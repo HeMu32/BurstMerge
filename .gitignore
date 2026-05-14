@@ -1,0 +1,56 @@
+# Build artifacts
+/build/
+/build*/
+/CMakeFiles/
+/CMakeCache.txt
+/CMakeLists.txt.example
+/*.cmake
+/*.make
+/*.ninja
+/compile_commands.json
+.cache/
+
+# Visual Studio files
+*.sln
+*.vcxproj*
+*.vcproj*
+*.user
+*.filters
+
+# MinGW/Windows specific
+*.exe
+*.dll
+*.lib
+*.obj
+*.o
+*.pch
+*.pdb
+
+# Backup and temporary files
+*~
+*.swp
+*.swo
+*.tmp
+*.log
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# CMake generated directories/logs
+/CMakeScripts/
+/Testing/
+
+# Others
+.vscode/
+
+# Copy only these onnxruntime manifest files, ignore other runtime data files.
+/3rdparty/onnxruntime/*
+!/3rdparty/onnxruntime/VERSION_NUMBER
+!/3rdparty/onnxruntime/readme.txt
+
+# Keep README only in ultralytics models; ignore all other weights/artifacts.
+/3rdparty/ultralytics-models/*
+!/3rdparty/ultralytics-models/README-models.md
+
+Reference/
