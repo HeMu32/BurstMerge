@@ -1,0 +1,2 @@
+add_executable(burstmerge_console main.cpp)
+target_link_libraries(burstmerge_console PRIVATE burstmerge)

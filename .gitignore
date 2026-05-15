@@ -44,6 +44,10 @@ Thumbs.db
 # Others
 .vscode/
 
+/3rdparty/dng_sdk/*
+!/3rdparty/dng_sdk/readme.txt
+!/3rdparty/dng_sdk/CMakeLists.txt
+
 # Copy only these onnxruntime manifest files, ignore other runtime data files.
 /3rdparty/onnxruntime/*
 !/3rdparty/onnxruntime/VERSION_NUMBER
@@ -52,5 +56,18 @@ Thumbs.db
 # Keep README only in ultralytics models; ignore all other weights/artifacts.
 /3rdparty/ultralytics-models/*
 !/3rdparty/ultralytics-models/README-models.md
+
+# Keep README only for manual SDK/runtime bundles under 3rdparty.
+/3rdparty/vulkan/*
+!/3rdparty/vulkan/readme.txt
+
+/3rdparty/openmp/*
+!/3rdparty/openmp/readme.txt
+
+/3rdparty/cxxopts/*
+!/3rdparty/cxxopts/readme.txt
+
+/3rdparty/pocketfft/*
+!/3rdparty/pocketfft/readme.txt
 
 Reference/

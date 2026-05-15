@@ -516,3 +516,4 @@ write_file(path, dng, filesize);
 ## Known Limitations
 Current vignette parameters translation result (from ARW to DNG) mismatch with original ARW files in Capture One, but another known fact was that C1's explanation of ARW burnt-in vignette correction parameters perform awfully. 
 Perhaps still minor difference for the effect of the translated distortion parameters vs the original file in C1. However not visible for the 200-600 G lens sample picture.
+CA correction parameters were not copied.
