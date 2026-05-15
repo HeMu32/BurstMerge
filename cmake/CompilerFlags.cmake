@@ -1,12 +1,9 @@
 # ===== CompilerFlags.cmake =====
-# GCC/MSVC/Clang 各自 flags
+# GCC/MSVC/Clang flags
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(COMMON_WARNINGS -Wall -Wextra -Wno-unused-parameter)
-    set(COMMON_FLAGS   -fopenmp -fvisibility=hidden)
-
-    set(CMAKE_CXX_FLAGS_RELEASE   "-O2 -DNDEBUG ${COMMON_FLAGS} ${COMMON_WARNINGS}")
-    set(CMAKE_CXX_FLAGS_DEBUG     "-O0 -g -D_DEBUG ${COMMON_FLAGS} ${COMMON_WARNINGS}")
+    set(CMAKE_CXX_FLAGS_RELEASE   "-O2 -DNDEBUG -fopenmp -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter")
+    set(CMAKE_CXX_FLAGS_DEBUG     "-O0 -g -D_DEBUG -fopenmp -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter")
 
 elseif(MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE   "/O2 /DNDEBUG /openmp")

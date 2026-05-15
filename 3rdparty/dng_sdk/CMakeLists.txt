@@ -81,7 +81,11 @@ list(REMOVE_ITEM DNG_SDK_SRCS
     "${DNG_SDK_ROOT}/dng_sdk/source/dng_validate.cpp"
     "${DNG_SDK_ROOT}/dng_sdk/source/dng_xmp_sdk.cpp"
     "${DNG_SDK_ROOT}/dng_sdk/source/dng_update_meta.cpp"
+    "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl.cpp"
 )
+
+# Add JXL stubs (replaces dng_jxl.cpp for builds without libjxl)
+list(APPEND DNG_SDK_SRCS "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl_stubs.cpp")
 
 add_library(dng_sdk STATIC ${DNG_SDK_SRCS})
 
@@ -89,7 +93,7 @@ target_include_directories(dng_sdk SYSTEM PRIVATE
     ${DNG_SDK_INCLUDE}
 )
 
-target_compile_definitions(dng_sdk PRIVATE
+target_compile_definitions(dng_sdk PUBLIC
     $<$<PLATFORM_ID:Windows>:qWinOS>
     $<$<PLATFORM_ID:Linux>:qLinux>
     $<$<PLATFORM_ID:Darwin>:qMacOS>
@@ -99,7 +103,7 @@ target_compile_definitions(dng_sdk PRIVATE
     qDNGUseXMP=0
     qDNGXMPFiles=0
     qDNGXMPDocOps=0
-    # MinGW-w64 自带 pthread.h 与 DNG SDK 的 pthread 模拟冲突
+    # MinGW-w64 自带 pthread.h ?DNG SDK ?pthread 模拟冲突
     $<$<CXX_COMPILER_ID:GNU>:qDNGThreadSafe=0>
 )
 
@@ -120,3 +124,6 @@ endif()
 if(MSVC)
     target_compile_options(dng_sdk PRIVATE /W0 /wd4996)
 endif()
+
+# zlib is used by DNG SDK for ZIP compression
+target_link_libraries(dng_sdk PUBLIC z)

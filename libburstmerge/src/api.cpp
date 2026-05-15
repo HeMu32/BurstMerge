@@ -5,6 +5,7 @@ namespace burstmerge {
 struct BurstMerge::Impl {
     BackendType backend;
     Settings settings;
+    ProgressFn progress_cb;
 };
 
 BurstMerge::BurstMerge(BackendType backend)
@@ -24,12 +25,16 @@ void BurstMerge::Configure(const Settings& settings) {
 }
 
 void BurstMerge::SetProgressCallback(ProgressFn cb) {
-    (void)cb;
+    impl_->progress_cb = std::move(cb);
 }
 
 Result BurstMerge::Process(const std::string& output_dir) {
     (void)output_dir;
-    return Result{true, "", ""};
+    if (impl_->progress_cb) {
+        impl_->progress_cb(0.0f, "Starting...");
+        impl_->progress_cb(1.0f, "Done");
+    }
+    return Result{true, output_dir, ""};
 }
 
 std::string BurstMerge::LastError() const {
