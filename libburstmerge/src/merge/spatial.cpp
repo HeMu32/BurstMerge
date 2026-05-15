@@ -52,7 +52,9 @@ FloatImage SpatialMerge(const FloatImage& reference,
     out.channels = reference.channels;
     out.data.resize(reference.data.size(), 0.0f);
 
-    const float noise_floor = std::max(8.0f, params.noise_reduction * 4.0f);
+    const float noise_floor = params.noise_floor > 0.0f
+        ? params.noise_floor
+        : std::max(8.0f, params.noise_reduction * 4.0f);
     const float robustness = std::max(0.1f, params.robustness);
     const float min_comparison_weight = 0.08f;
     const float highlight_threshold = params.highlight_threshold > 0.0f
@@ -80,10 +82,14 @@ FloatImage SpatialMerge(const FloatImage& reference,
                     }
 
                     float w = 1.0f;
-                    float diff = std::abs(cmp_guide - ref_guide);
-                    float ratio = diff / noise_floor;
-                    w = 1.0f / (1.0f + ratio * ratio * robustness);
-                    w = ClampMin(w, min_comparison_weight);
+                    if (ref_guide >= highlight_threshold || cmp_guide >= highlight_threshold) {
+                        w = 1.0f;
+                    } else {
+                        float diff = std::abs(cmp_guide - ref_guide);
+                        float ratio = diff / noise_floor;
+                        w = 1.0f / (1.0f + ratio * ratio * robustness);
+                        w = ClampMin(w, min_comparison_weight);
+                    }
 
                     weighted_sum += aligned_comparisons[idx].data[i] * w;
                     weight_sum += w;

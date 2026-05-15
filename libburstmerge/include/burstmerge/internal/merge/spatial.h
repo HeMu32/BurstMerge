@@ -9,6 +9,7 @@ namespace burstmerge {
 struct SpatialMergeParams {
     float noise_reduction = 13.0f;
     float robustness = 1.0f;
+    float noise_floor = 0.0f;
     float highlight_threshold = 0.0f;
     uint32_t guide_block_size = 2;
 };
