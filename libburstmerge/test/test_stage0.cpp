@@ -308,8 +308,9 @@ static void test_c_api() {
     BM_SetExposureMode(ctx, BM_EXPOSURE_LINEAR);
     BM_SetMergeAlgorithm(ctx, BM_ALGO_SPATIAL);
     BM_SetExposureStops(ctx, 1.5f);
+    BM_AddImage(ctx, (std::string(TEST_DATA_DIR) + "/libburstmerge/test/samples/X1M5_Wide.dng").c_str());
 
-    int result = BM_Process(ctx, ".");
+    int result = BM_Process(ctx, (std::string(TEST_DATA_DIR) + "/build/test_c_api_output.dng").c_str());
     CHECK_EQ(result, 1, "BM_Process returns success");
 
     BM_Destroy(ctx);
@@ -358,7 +359,8 @@ static void test_progress_callback() {
     BM_Context ctx = BM_Create(BM_BACKEND_CPU);
     CHECK_NE(ctx, nullptr, "BM_Create for progress test returns non-null");
     BM_SetProgressCallback(ctx, callback, &state);
-    int result = BM_Process(ctx, ".");
+    BM_AddImage(ctx, (std::string(TEST_DATA_DIR) + "/libburstmerge/test/samples/X1M5_Wide.dng").c_str());
+    int result = BM_Process(ctx, (std::string(TEST_DATA_DIR) + "/build/test_progress_output.dng").c_str());
     CHECK_EQ(result, 1, "BM_Process with progress callback succeeds");
     CHECK(state.calls >= 2, "Progress callback invoked at least twice");
     CHECK(state.first == 0.0f, "Progress callback starts at 0");
@@ -471,13 +473,13 @@ static void test_module_params() {
     CHECK_EQ(ap.pyramid_levels, 3, "AlignParams.pyramid_levels default");
 
     burstmerge::SpatialMergeParams sp{};
-    CHECK_EQ(sp.noise_reduction, 0.0f, "SpatialMergeParams.noise_reduction default");
+    CHECK_EQ(sp.noise_reduction, 13.0f, "SpatialMergeParams.noise_reduction default");
 
     burstmerge::FrequencyMergeParams fp{};
-    CHECK_EQ(fp.tile_size, 0, "FrequencyMergeParams.tile_size default");
+    CHECK_EQ(fp.tile_size, 32, "FrequencyMergeParams.tile_size default");
 
     burstmerge::TemporalDenoiseParams tp{};
-    CHECK_EQ(tp.strength, 0.0f, "TemporalDenoiseParams.strength default");
+    CHECK_EQ(tp.strength, 23.0f, "TemporalDenoiseParams.strength default");
 
     burstmerge::ExposureParams ep{};
     CHECK_EQ(static_cast<int>(ep.mode), 0, "ExposureParams.mode default(Off)");

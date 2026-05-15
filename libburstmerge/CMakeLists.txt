@@ -2,6 +2,13 @@
 add_library(burstmerge STATIC
     src/api.cpp
     src/api_c.cpp
+    src/core/float_image.cpp
+    src/core/pipeline.cpp
+    src/align/align.cpp
+    src/merge/spatial.cpp
+    src/merge/frequency.cpp
+    src/denoise/temporal.cpp
+    src/exposure/exposure.cpp
     src/io/dng_sdk_bridge.cpp
     src/io/dng_reader.cpp
     src/io/dng_writer.cpp

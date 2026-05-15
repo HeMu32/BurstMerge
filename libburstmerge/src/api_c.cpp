@@ -65,9 +65,7 @@ void BM_SetMergeAlgorithm(BM_Context ctx, int algo) {
 
 void BM_SetExposureStops(BM_Context ctx, float stops) {
     if (ctx) {
-        // Round to nearest int for the Settings struct
-        static_cast<CContext*>(ctx)->settings.exposure_stops =
-            static_cast<int>(stops < 0 ? stops - 0.5f : stops + 0.5f);
+        static_cast<CContext*>(ctx)->settings.exposure_stops = stops;
     }
 }
 

@@ -16,7 +16,7 @@ struct Settings {
     MergeAlgorithm merge_algo       = MergeAlgorithm::Spatial;
     float          noise_reduction  = 13.0f;
     ExposureMode   exposure_mode    = ExposureMode::Off;
-    int            exposure_stops   = 0;
+    float          exposure_stops   = 0.0f;
 };
 
 struct Result {

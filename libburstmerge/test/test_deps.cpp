@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 // 1. 测试 PocketFFT (C API, 需 C 链接)
 extern "C" {
@@ -83,9 +84,12 @@ static int test_burstmerge_api() {
     s.tile_size = 64;
     s.noise_reduction = 13.0f;
     bm->Configure(s);
-    bm->AddImage("test.dng");
-    auto result = bm->Process("./out");
+    bm->AddImage(std::string(TEST_DATA_DIR) + "/libburstmerge/test/samples/X1M5_Wide.dng");
+    auto result = bm->Process(std::string(TEST_DATA_DIR) + "/build/test_deps_output.dng");
     std::cout << "  Process result: success=" << result.success << std::endl;
+    if (!result.success) {
+        std::cout << "  Error: " << result.error_msg << std::endl;
+    }
     return result.success ? 0 : 1;
 }
 
