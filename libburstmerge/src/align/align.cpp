@@ -25,9 +25,11 @@ float SparseSad(const FloatImage& a, const FloatImage& b, int dx, int dy, int st
     uint64_t count = 0;
     for (int y = margin_y; y < static_cast<int>(a.height) - margin_y; y += step) {
         for (int x = margin_x; x < static_cast<int>(a.width) - margin_x; x += step) {
-            sad += std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y)) -
-                            b.At(static_cast<uint32_t>(x - dx), static_cast<uint32_t>(y - dy)));
-            ++count;
+            for (uint32_t c = 0; c < a.channels; ++c) {
+                sad += std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
+                                b.At(static_cast<uint32_t>(x - dx), static_cast<uint32_t>(y - dy), c));
+                ++count;
+            }
         }
     }
     return count ? static_cast<float>(sad / static_cast<double>(count)) : std::numeric_limits<float>::max();
@@ -56,9 +58,11 @@ float TileSad(const FloatImage& a,
         for (int x = ax0; x < ax1; x += sample_step) {
             int bx = x - dx;
             if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
-            sad += std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y)) -
-                            b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by)));
-            ++count;
+            for (uint32_t c = 0; c < a.channels; ++c) {
+                sad += std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
+                                b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by), c));
+                ++count;
+            }
         }
     }
 

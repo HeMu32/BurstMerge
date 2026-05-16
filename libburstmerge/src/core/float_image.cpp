@@ -161,6 +161,58 @@ FloatImage WarpTranslateBilinear(const FloatImage& src, float shift_x, float shi
     return out;
 }
 
+FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period) {
+    if (src.channels != 1 || cfa_period <= 1) return src;
+
+    FloatImage out;
+    out.width = (src.width + cfa_period - 1) / cfa_period;
+    out.height = (src.height + cfa_period - 1) / cfa_period;
+    out.channels = cfa_period * cfa_period;
+    out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels, 0.0f);
+
+    for (uint32_t y = 0; y < src.height; ++y) {
+        uint32_t py = y % cfa_period;
+        uint32_t oy = y / cfa_period;
+        for (uint32_t x = 0; x < src.width; ++x) {
+            uint32_t px = x % cfa_period;
+            uint32_t ox = x / cfa_period;
+            uint32_t c = py * cfa_period + px;
+            out.At(ox, oy, c) = src.At(x, y, 0);
+        }
+    }
+
+    return out;
+}
+
+FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
+                                     uint32_t mosaic_width,
+                                     uint32_t mosaic_height,
+                                     uint32_t cfa_period)
+{
+    if (src.channels != cfa_period * cfa_period || cfa_period <= 1) {
+        return src;
+    }
+
+    FloatImage out;
+    out.width = mosaic_width;
+    out.height = mosaic_height;
+    out.channels = 1;
+    out.data.resize(static_cast<size_t>(out.width) * out.height, 0.0f);
+
+    for (uint32_t y = 0; y < out.height; ++y) {
+        uint32_t py = y % cfa_period;
+        uint32_t sy = y / cfa_period;
+        for (uint32_t x = 0; x < out.width; ++x) {
+            uint32_t px = x % cfa_period;
+            uint32_t sx = x / cfa_period;
+            uint32_t c = py * cfa_period + px;
+            out.At(x, y, 0) = src.At(sx, sy, c);
+        }
+    }
+
+    return out;
+}
+
 float MaxValue(const FloatImage& src) {
     if (src.data.empty()) return 0.0f;
     return *std::max_element(src.data.begin(), src.data.end());

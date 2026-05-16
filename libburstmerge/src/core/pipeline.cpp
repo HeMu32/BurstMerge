@@ -181,7 +181,11 @@ std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images) {
     std::vector<FloatImage> out;
     out.reserve(images.size());
     for (const auto& img : images) {
-        out.push_back(HostBufferToFloatImage(img.pixels));
+        FloatImage fi = HostBufferToFloatImage(img.pixels);
+        if (img.metadata.mosaic_pattern_width > 1 && fi.channels == 1) {
+            fi = ConvertMosaicToPlaneImage(fi, img.metadata.mosaic_pattern_width);
+        }
+        out.push_back(std::move(fi));
     }
     return out;
 }
@@ -199,7 +203,9 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     params.tile_size = settings.tile_size;
     params.search_distance = settings.search_distance;
     params.pyramid_levels = 3;
-    params.cfa_period = std::max<uint32_t>(1, cfa_period);
+    // On plane images (channels > 1) the CFA phase is already separated per channel,
+    // so the alignment does not need period snapping. Fall back to cfa_period=1.
+    params.cfa_period = (float_images[0].channels > 1) ? 1u : std::max<uint32_t>(1, cfa_period);
 
     const FloatImage& ref = float_images[ref_idx];
     size_t processed = 0;
@@ -294,6 +300,18 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         std::vector<FloatImage> float_images = BuildFloatImages(images);
         RepairHotPixels(float_images, static_cast<float>(images[0].metadata.white_level), images[0].metadata.mosaic_pattern_width);
 
+        // Log the CFA pattern so we can verify channel ordering
+        if (images[ref_idx].metadata.mosaic_pattern_width > 0) {
+            uint32_t pw = images[ref_idx].metadata.mosaic_pattern_width;
+            char buf[128];
+            int n = std::snprintf(buf, sizeof(buf), "CFA pattern (%ux%u):", pw, pw);
+            for (uint32_t i = 0; i < pw * pw; ++i) {
+                n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %u",
+                    static_cast<unsigned>(images[ref_idx].metadata.mosaic_pattern[i]));
+            }
+            Report(progress, 0.541f, std::string(buf));
+        }
+
         Report(progress, 0.545f, "Normalizing frames (black level & exposure)");
         NormalizeFrames(float_images, images, ref_idx);
 
@@ -331,9 +349,34 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.noise_floor = std::min(estimated_noise, formula_noise);
             float avg_bl = MeanBlackLevel(images[ref_idx].metadata);
             params.highlight_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * 0.92f;
+            params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * 0.98f;
             params.guide_block_size = images[ref_idx].metadata.mosaic_pattern_width >= 2
                 ? images[ref_idx].metadata.mosaic_pattern_width
                 : 2;
+            // Record per-comparison-frame exposure scales for clipped-pixel detection
+            float ref_iso = images[ref_idx].metadata.iso_exposure_time;
+            float ref_bias = images[ref_idx].metadata.exposure_bias;
+            std::vector<float> exp_scales;
+            exp_scales.reserve(images.size());
+            for (size_t i = 0; i < images.size(); ++i) {
+                if (i == ref_idx) continue;
+                float comp_iso = images[i].metadata.iso_exposure_time;
+                if (ref_iso > 0.0f && comp_iso > 0.0f) {
+                    exp_scales.push_back((ref_iso / comp_iso) * std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
+                } else {
+                    exp_scales.push_back(1.0f);
+                }
+            }
+            params.num_scales = static_cast<uint32_t>(exp_scales.size());
+            params.exposure_scales = exp_scales.data();
+            {
+                char buf[128];
+                int n = std::snprintf(buf, sizeof(buf), "  scales(%u):", params.num_scales);
+                for (uint32_t si = 0; si < params.num_scales && si < 4; ++si) {
+                    n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %.4f", exp_scales[si]);
+                }
+                Report(progress, 0.700f, std::string(buf));
+            }
             merged = SpatialMerge(float_images[ref_idx], aligned, params);
         }
 
@@ -348,13 +391,20 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 for (float& v : merged.data) v += ref_bl;
             }
         }
-
         if (settings_.exposure_mode != ExposureMode::Off || settings_.exposure_stops != 0.0f) {
             Report(progress, 0.78f, "Exposure correction");
             ExposureParams params;
             params.mode = settings_.exposure_mode;
             params.stops = settings_.exposure_stops;
             ApplyExposure(merged, images[ref_idx].metadata.white_level, params);
+        }
+
+        if (images[ref_idx].metadata.mosaic_pattern_width > 1 &&
+            merged.channels == images[ref_idx].metadata.mosaic_pattern_width * images[ref_idx].metadata.mosaic_pattern_width) {
+            merged = ConvertPlaneImageToMosaic(merged,
+                                               images[ref_idx].metadata.width,
+                                               images[ref_idx].metadata.height,
+                                               images[ref_idx].metadata.mosaic_pattern_width);
         }
 
         Report(progress, 0.80f, "Quantizing float image to UInt16");

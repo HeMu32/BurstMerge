@@ -62,24 +62,18 @@ FloatImage SpatialMerge(const FloatImage& reference,
         : 65535.0f * 0.92f;
     const uint32_t guide_block = std::max<uint32_t>(1, params.guide_block_size);
 
-    for (uint32_t y = 0; y < out.height; ++y) {
-        for (uint32_t x = 0; x < out.width; ++x) {
-            for (uint32_t c = 0; c < out.channels; ++c) {
-                const size_t i = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
+    if (reference.channels == 1) {
+        // Single-channel (mosaic): per-pixel weight, each position one guide value
+        for (uint32_t y = 0; y < out.height; ++y) {
+            for (uint32_t x = 0; x < out.width; ++x) {
+                const size_t i = (static_cast<size_t>(y) * out.width + x);
 
+                float ref_guide = BlockMean(reference, x, y, guide_block);
                 float weighted_sum = reference.data[i];
                 float weight_sum = 1.0f;
 
-                float ref_guide = ref_blur.data[i];
-                if (reference.channels == 1) {
-                    ref_guide = BlockMean(reference, x, y, guide_block);
-                }
-
                 for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
-                    float cmp_guide = cmp_blurs[idx].data[i];
-                    if (reference.channels == 1) {
-                        cmp_guide = BlockMean(aligned_comparisons[idx], x, y, guide_block);
-                    }
+                    float cmp_guide = BlockMean(aligned_comparisons[idx], x, y, guide_block);
 
                     float w = 1.0f;
                     if (ref_guide >= highlight_threshold || cmp_guide >= highlight_threshold) {
@@ -96,6 +90,63 @@ FloatImage SpatialMerge(const FloatImage& reference,
                 }
 
                 out.data[i] = weighted_sum / weight_sum;
+            }
+        }
+    } else {
+        // Multi-channel (CFA planes or RGB): each channel gets its own weight
+        // from its own blurred diff, so one channel's misalignment does not
+        // penalize the others. Clipped-pixel detection remains global.
+        for (uint32_t y = 0; y < out.height; ++y) {
+            for (uint32_t x = 0; x < out.width; ++x) {
+                // Global saturated/clipped flags (shared across channels)
+                float ref_raw_guide = 0.0f;
+                float cmp_raw_max[32] = {};
+                for (uint32_t c = 0; c < out.channels; ++c) {
+                    const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
+                    ref_raw_guide = std::max(ref_raw_guide, reference.data[ci]);
+                    for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
+                        cmp_raw_max[idx] = std::max(cmp_raw_max[idx], aligned_comparisons[idx].data[ci]);
+                    }
+                }
+
+                // Per-channel diff-based weight
+                for (uint32_t c = 0; c < out.channels; ++c) {
+                    const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
+                    float ref_g = ref_blur.data[ci];
+
+                    float weighted_sum = reference.data[ci];
+                    float weight_sum = 1.0f;
+
+                    for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
+                        // Detect clipped comparison pixels (global check)
+                        bool cmp_clipped = false;
+                        if (params.clip_threshold > 0.0f && params.exposure_scales &&
+                            idx < params.num_scales && params.exposure_scales[idx] > 0.0f) {
+                            float estimated_original = cmp_raw_max[idx] / params.exposure_scales[idx];
+                            if (estimated_original >= params.clip_threshold) cmp_clipped = true;
+                        }
+
+                        float w = 1.0f;
+                        if (cmp_clipped) {
+                            // Comparison was clipped: its post-scaling value is unreliable.
+                            w = 0.0f;
+                        } else if (ref_raw_guide >= highlight_threshold || cmp_raw_max[idx] >= highlight_threshold) {
+                            // Truly saturated on both sides: equal-weight accumulation is safe.
+                            w = 1.0f;
+                        } else {
+                            float cmp_g = cmp_blurs[idx].data[ci];
+                            float diff = std::abs(cmp_g - ref_g);
+                            float ratio = diff / noise_floor;
+                            w = 1.0f / (1.0f + ratio * ratio * robustness);
+                            w = ClampMin(w, min_comparison_weight);
+                        }
+
+                        weighted_sum += aligned_comparisons[idx].data[ci] * w;
+                        weight_sum += w;
+                    }
+
+                    out.data[ci] = weighted_sum / weight_sum;
+                }
             }
         }
     }
