@@ -331,9 +331,27 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.noise_floor = std::min(estimated_noise, formula_noise);
             float avg_bl = MeanBlackLevel(images[ref_idx].metadata);
             params.highlight_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * 0.92f;
+            params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * 0.98f;
             params.guide_block_size = images[ref_idx].metadata.mosaic_pattern_width >= 2
                 ? images[ref_idx].metadata.mosaic_pattern_width
                 : 2;
+            // Collect per-comparison-frame exposure scale factors
+            float ref_iso = images[ref_idx].metadata.iso_exposure_time;
+            float ref_bias = images[ref_idx].metadata.exposure_bias;
+            std::vector<float> exp_scales;
+            exp_scales.reserve(images.size());
+            for (size_t i = 0; i < images.size(); ++i) {
+                if (i == ref_idx) continue;
+                float comp_iso = images[i].metadata.iso_exposure_time;
+                if (ref_iso > 0.0f && comp_iso > 0.0f) {
+                    exp_scales.push_back((ref_iso / comp_iso) *
+                        std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
+                } else {
+                    exp_scales.push_back(1.0f);
+                }
+            }
+            params.num_scales = static_cast<uint32_t>(exp_scales.size());
+            params.exposure_scales = exp_scales.data();
             merged = SpatialMerge(float_images[ref_idx], aligned, params);
         }
 

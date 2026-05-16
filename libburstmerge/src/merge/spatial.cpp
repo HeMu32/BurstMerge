@@ -81,8 +81,20 @@ FloatImage SpatialMerge(const FloatImage& reference,
                         cmp_guide = BlockMean(aligned_comparisons[idx], x, y, guide_block);
                     }
 
+                    // Detect clipped comparison pixels: if the original value
+                    // before exposure scaling exceeds clip_threshold, the scaled
+                    // pixel is unreliable.
+                    bool cmp_clipped = false;
+                    if (params.clip_threshold > 0.0f && params.exposure_scales &&
+                        idx < params.num_scales && params.exposure_scales[idx] > 0.0f) {
+                        float estimated_original = aligned_comparisons[idx].data[i] / params.exposure_scales[idx];
+                        if (estimated_original >= params.clip_threshold) cmp_clipped = true;
+                    }
+
                     float w = 1.0f;
-                    if (ref_guide >= highlight_threshold || cmp_guide >= highlight_threshold) {
+                    if (cmp_clipped) {
+                        w = 0.0f;
+                    } else if (ref_guide >= highlight_threshold || cmp_guide >= highlight_threshold) {
                         w = 1.0f;
                     } else {
                         float diff = std::abs(cmp_guide - ref_guide);
