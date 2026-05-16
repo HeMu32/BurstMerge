@@ -9,8 +9,14 @@ namespace burstmerge {
 struct SpatialMergeParams {
     float noise_reduction = 13.0f;
     float robustness = 1.0f;
+    float noise_floor = 0.0f;
     float highlight_threshold = 0.0f;
     uint32_t guide_block_size = 2;
+    // Per-comparison-frame exposure scale factors.
+    // Used to detect clipped pixels in high-exposure frames.
+    float clip_threshold = 0.0f;
+    uint32_t num_scales = 0;
+    const float* exposure_scales = nullptr;
 };
 
 FloatImage SpatialMerge(const FloatImage& reference,

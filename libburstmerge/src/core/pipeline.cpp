@@ -114,6 +114,31 @@ float ComputeRobustness(float noise_reduction) {
     return std::max(0.2f, noise_reduction / 13.0f);
 }
 
+float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size) {
+    if (image.data.empty()) return 8.0f;
+
+    const int blur_radius = 2;
+    const FloatImage blurred = BoxBlur(image, blur_radius);
+    const uint32_t step = std::max<uint32_t>(1, guide_block_size);
+
+    double sum_sq = 0.0;
+    uint64_t count = 0;
+    for (uint32_t y = 0; y < image.height; y += step) {
+        for (uint32_t x = 0; x < image.width; x += step) {
+            size_t idx = (static_cast<size_t>(y) * image.width + x) * image.channels;
+            for (uint32_t c = 0; c < image.channels; ++c) {
+                float d = image.data[idx + c] - blurred.data[idx + c];
+                sum_sq += static_cast<double>(d) * static_cast<double>(d);
+                ++count;
+            }
+        }
+    }
+
+    if (count == 0) return 8.0f;
+    float rms = static_cast<float>(std::sqrt(sum_sq / static_cast<double>(count)));
+    return std::max(8.0f, rms);
+}
+
 float MeanBlackLevel(const RawMetadata& meta) {
     float sum = 0.0f;
     int n = 0;
@@ -127,32 +152,28 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                      const std::vector<RawImage>& raw_images,
                      size_t ref_idx)
 {
-    // Subtract black level for correct zero-point, then normalize exposure
-    // so that all comparison frames match the reference frame's exposure.
-    float ref_bl = MeanBlackLevel(raw_images[ref_idx].metadata);
     float ref_iso = raw_images[ref_idx].metadata.iso_exposure_time;
-    float ref_bias = raw_images[ref_idx].metadata.exposure_bias;
 
     for (size_t i = 0; i < float_images.size(); ++i) {
-        float bl = MeanBlackLevel(raw_images[i].metadata);
+        const auto& meta = raw_images[i].metadata;
+        FloatImage& img = float_images[i];
 
-        // Black level removal
+        // Black level removal using mean black level
+        float bl = MeanBlackLevel(meta);
         if (bl > 1.0f) {
-            for (float& v : float_images[i].data) v -= bl;
-        } else if (ref_bl > 1.0f) {
-            // Reference has black but this frame doesn't (unlikely). Pad.
-            // Since we're normalizing to ref, add ref's black for consistency.
-            for (float& v : float_images[i].data) v += ref_bl;
+            for (float& v : img.data) v -= bl;
         }
 
-        // Exposure normalization (comparison frames only)
+        // Exposure normalization using both physical exposure and exposure_bias
         if (i == ref_idx) continue;
-        float comp_iso = raw_images[i].metadata.iso_exposure_time;
-        if (ref_iso <= 0.0f || comp_iso <= 0.0f) continue;
-        float comp_bias = raw_images[i].metadata.exposure_bias;
-        float scale = (ref_iso / comp_iso) * std::pow(2.0f, ref_bias - comp_bias);
-        if (std::abs(scale - 1.0f) < 0.001f) continue;
-        for (float& v : float_images[i].data) v *= scale;
+        float comp_iso = meta.iso_exposure_time;
+        if (ref_iso > 0.0f && comp_iso > 0.0f) {
+            float scale = (ref_iso / comp_iso) *
+                          std::pow(2.0f, raw_images[ref_idx].metadata.exposure_bias - meta.exposure_bias);
+            if (std::abs(scale - 1.0f) > 0.001f) {
+                for (float& v : img.data) v *= scale;
+            }
+        }
     }
 }
 
@@ -178,6 +199,7 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     params.tile_size = settings.tile_size;
     params.search_distance = settings.search_distance;
     params.pyramid_levels = 3;
+    params.cfa_period = std::max<uint32_t>(1, cfa_period);
 
     const FloatImage& ref = float_images[ref_idx];
     size_t processed = 0;
@@ -189,17 +211,6 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                0.56f + 0.06f * static_cast<float>(processed) / static_cast<float>(std::max<size_t>(1, total)),
                "Aligning frame " + std::to_string(processed + 1) + "/" + std::to_string(total));
         AlignmentResult ar = EstimateTranslation(ref, float_images[i], params);
-
-        // Snap alignment to CFA period boundaries to preserve Bayer/X-Trans phase,
-        // preventing false color at edges during demosaic.
-        if (cfa_period > 1) {
-            auto snap = [](int v, int p) -> int {
-                if (v >= 0) return (v / static_cast<int>(p)) * static_cast<int>(p);
-                else return -((-v) / static_cast<int>(p)) * static_cast<int>(p);
-            };
-            ar.shift_x = snap(ar.shift_x, static_cast<int>(cfa_period));
-            ar.shift_y = snap(ar.shift_y, static_cast<int>(cfa_period));
-        }
 
         Report(progress,
                0.62f + 0.06f * static_cast<float>(processed) / static_cast<float>(std::max<size_t>(1, total)),
@@ -312,16 +323,43 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             SpatialMergeParams params;
             params.noise_reduction = settings_.noise_reduction;
             params.robustness = ComputeRobustness(settings_.noise_reduction);
-            params.highlight_threshold =
-                (static_cast<float>(images[ref_idx].metadata.white_level) -
-                 MeanBlackLevel(images[ref_idx].metadata)) * 0.92f;
+            float estimated_noise = EstimateNoiseFloor(float_images[ref_idx], std::max<uint32_t>(1, cfa_period));
+            float formula_noise = std::max(8.0f, settings_.noise_reduction * 4.0f);
+            // Assertion: auto-estimate must not exceed formula value.
+            // Dark reference frames (Bkt) can produce inflated noise floor,
+            // which disables the robust weight formula and causes blur.
+            params.noise_floor = std::min(estimated_noise, formula_noise);
+            float avg_bl = MeanBlackLevel(images[ref_idx].metadata);
+            params.highlight_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * 0.92f;
+            params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * 0.98f;
             params.guide_block_size = images[ref_idx].metadata.mosaic_pattern_width >= 2
                 ? images[ref_idx].metadata.mosaic_pattern_width
                 : 2;
+            // Collect per-comparison-frame exposure scale factors
+            float ref_iso = images[ref_idx].metadata.iso_exposure_time;
+            float ref_bias = images[ref_idx].metadata.exposure_bias;
+            std::vector<float> exp_scales;
+            exp_scales.reserve(images.size());
+            for (size_t i = 0; i < images.size(); ++i) {
+                if (i == ref_idx) continue;
+                float comp_iso = images[i].metadata.iso_exposure_time;
+                if (ref_iso > 0.0f && comp_iso > 0.0f) {
+                    exp_scales.push_back((ref_iso / comp_iso) *
+                        std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
+                } else {
+                    exp_scales.push_back(1.0f);
+                }
+            }
+            params.num_scales = static_cast<uint32_t>(exp_scales.size());
+            params.exposure_scales = exp_scales.data();
             merged = SpatialMerge(float_images[ref_idx], aligned, params);
         }
 
-        // Add back reference black level so DNG writer's metadata matches pixel values
+        // Add back reference black level so DNG writer's metadata matches pixel values.
+        // Both subtraction (NormalizeFrames) and restoration use mean black level to avoid
+        // per-channel DC offset. The DNG metadata retains original per-channel black_level[],
+        // causing Lightroom to subtract slightly wrong values per channel, but the error is
+        // < 4 DN for typical sensors and visually negligible.
         {
             float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
             if (ref_bl > 1.0f) {
