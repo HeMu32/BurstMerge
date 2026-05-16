@@ -136,6 +136,11 @@ float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size) {
 
     if (count == 0) return 8.0f;
     float rms = static_cast<float>(std::sqrt(sum_sq / static_cast<double>(count)));
+    // Floor at 8.0 DN: prevents degenerate behavior in the weight formula
+    // when the reference frame is unusually flat. RMS for any real sensor
+    // frame (even dark) exceeds this minimum. The estimate runs before
+    // bit-depth rescaling, so this value is in sensor-native DN and valid
+    // for 12/14/16-bit sources.
     return std::max(8.0f, rms);
 }
 
@@ -158,14 +163,15 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
         const auto& meta = raw_images[i].metadata;
         FloatImage& img = float_images[i];
 
-        // Black level removal using mean black level
+        // Remove each frame's own black level (per-frame ADC offset)
         float bl = MeanBlackLevel(meta);
         if (bl > 1.0f) {
             for (float& v : img.data) v -= bl;
         }
 
-        // Exposure normalization using both physical exposure and exposure_bias
         if (i == ref_idx) continue;
+
+        // Exposure-normalize comparison frames to the reference's exposure
         float comp_iso = meta.iso_exposure_time;
         if (ref_iso > 0.0f && comp_iso > 0.0f) {
             float scale = (ref_iso / comp_iso) *
@@ -373,15 +379,55 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             merged = SpatialMerge(float_images[ref_idx], aligned, params);
         }
 
-        // Add back reference black level so DNG writer's metadata matches pixel values.
-        // Both subtraction (NormalizeFrames) and restoration use mean black level to avoid
-        // per-channel DC offset. The DNG metadata retains original per-channel black_level[],
-        // causing Lightroom to subtract slightly wrong values per channel, but the error is
-        // < 4 DN for typical sensors and visually negligible.
         {
-            float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
-            if (ref_bl > 1.0f) {
+            double ch_sum[4]={0}, ch_min[4]={1e30,1e30,1e30,1e30}, ch_max[4]={-1e30,-1e30,-1e30,-1e30};
+            uint64_t ch_cnt[4]={0};
+            uint32_t limit = std::min(merged.height, 100u);
+            for (uint32_t yy = 0; yy < limit; ++yy) {
+                for (uint32_t xx = 0; xx < std::min(merged.width, 100u); ++xx) {
+                    int ci = (yy & 1) * 2 + (xx & 1);
+                    float v = merged.At(xx, yy, 0);
+                    ch_sum[ci] += v; ch_cnt[ci]++;
+                    if (v < ch_min[ci]) ch_min[ci] = v;
+                    if (v > ch_max[ci]) ch_max[ci] = v;
+                }
+            }
+            fprintf(stderr, "[DCH] merged black-subtracted (100x100 corner):\n");
+            for (int ci = 0; ci < 4; ++ci) {
+                double avg = ch_cnt[ci] > 0 ? ch_sum[ci]/ch_cnt[ci] : 0;
+                fprintf(stderr, "  ch[%d]: avg=%.2f min=%.0f max=%.0f cnt=%llu\n",
+                    ci, avg, ch_min[ci], ch_max[ci], (unsigned long long)ch_cnt[ci]);
+            }
+        }
+
+        // Compute bit-depth rescaling factor (must happen in black-subtracted space)
+        float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
+        uint32_t sensor_white = images[ref_idx].metadata.white_level;
+        uint32_t target_white = sensor_white;
+        switch (settings_.dng_bit_depth) {
+            case 12: target_white = 4095;  break;
+            case 14: target_white = sensor_white; break;
+            case 16: target_white = 65535; break;
+            default: target_white = sensor_white; break;
+        }
+        float bit_scale = (target_white != sensor_white && sensor_white > 0)
+            ? static_cast<float>(target_white) / static_cast<float>(sensor_white)
+            : 1.0f;
+
+        // Scale signal to target bit depth (in black-subtracted space),
+        // then add back the scaled black level.
+        if (ref_bl > 1.0f) {
+            float scaled_bl = ref_bl * bit_scale;
+            if (bit_scale != 1.0f) {
+                for (float& v : merged.data) {
+                    v = v * bit_scale + scaled_bl;
+                }
+            } else {
                 for (float& v : merged.data) v += ref_bl;
+            }
+        } else {
+            if (bit_scale != 1.0f) {
+                for (float& v : merged.data) v *= bit_scale;
             }
         }
         if (settings_.exposure_mode != ExposureMode::Off || settings_.exposure_stops != 0.0f) {
@@ -389,7 +435,9 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             ExposureParams params;
             params.mode = settings_.exposure_mode;
             params.stops = settings_.exposure_stops;
-            ApplyExposure(merged, images[ref_idx].metadata.white_level, params);
+            // Exposure correction operates on data that already has black restored,
+            // so the white_level passed must be the final (rescaled) one.
+            ApplyExposure(merged, target_white, params);
         }
 
         if (images[ref_idx].metadata.mosaic_pattern_width > 1 &&
@@ -401,14 +449,32 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
 
         Report(progress, 0.80f, "Quantizing float image to UInt16");
-        HostBuffer averaged = FloatImageToUint16HostBuffer(merged, images[ref_idx].metadata.white_level);
+        HostBuffer averaged = FloatImageToUint16HostBuffer(merged, target_white);
 
         Report(progress, 0.82f, "Preparing output DNG container");
         RawImage output;
         output.metadata = std::move(images[ref_idx].metadata);
+        output.metadata.white_level = target_white;
+        if (bit_scale != 1.0f && ref_bl > 1.0f) {
+            for (int i = 0; i < 4; ++i) {
+                if (output.metadata.black_level[i] > 0.0f) {
+                    output.metadata.black_level[i] *= bit_scale;
+                }
+            }
+        }
         output.pixels = std::move(averaged);
 
         Report(progress, 0.90f, "Writing output DNG file");
+        io::SetDngWhiteLevel(output.metadata.dng_negative, target_white);
+        if (bit_scale != 1.0f && ref_bl > 1.0f) {
+            float scaled_bl[4];
+            // Use the (already-moved) output metadata's black_level (which was scaled above)
+            // to avoid reading from the moved-from images[ref_idx].
+            for (int i = 0; i < 4; ++i) {
+                scaled_bl[i] = output.metadata.black_level[i];
+            }
+            io::SetDngBlackLevel(output.metadata.dng_negative, scaled_bl);
+        }
         DngWriter writer(output.metadata.dng_negative);
         writer.Write(output_path.c_str(), output);
 
