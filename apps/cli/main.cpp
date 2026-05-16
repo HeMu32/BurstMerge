@@ -1,4 +1,5 @@
 #include "burstmerge/api.h"
+#include "burstmerge/internal/io/dng_io.h"
 #include "cxxopts.hpp"
 
 #include <chrono>
@@ -32,7 +33,9 @@ int main(int argc, char* argv[]) {
         ("i,input", "Input RAW/DNG files", cxxopts::value<std::vector<std::string>>())
         ("o,output", "Output DNG path or output directory", cxxopts::value<std::string>()->default_value("./out"))
         ("t,tile", "Tile size", cxxopts::value<int>()->default_value("32"))
+        ("b,bit-depth", "Output bit depth (12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
         ("f,frequency", "Use frequency merge placeholder flag")
+        ("n,noise-reduction", "Noise reduction strength (>=22.5 = temporal average)", cxxopts::value<float>())
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -60,9 +63,18 @@ int main(int argc, char* argv[]) {
 
     burstmerge::Settings settings;
     settings.tile_size = args["tile"].as<int>();
+    int bit_depth = args["bit-depth"].as<int>();
+    if (bit_depth != 12 && bit_depth != 14 && bit_depth != 16) {
+        std::cerr << "Invalid bit depth: " << bit_depth << " (use 12, 14, or 16)" << std::endl;
+        return 2;
+    }
+    settings.dng_bit_depth = bit_depth;
     settings.merge_algo = args.count("frequency")
         ? burstmerge::MergeAlgorithm::Frequency
         : burstmerge::MergeAlgorithm::Spatial;
+    if (args.count("noise-reduction")) {
+        settings.noise_reduction = args["noise-reduction"].as<float>();
+    }
     bm.Configure(settings);
 
     const std::string output_target = args["output"].as<std::string>();
@@ -72,6 +84,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Merge: " << MergeAlgoName(settings.merge_algo) << std::endl;
     std::cout << "Tile size: " << settings.tile_size << std::endl;
     std::cout << "Noise reduction: " << settings.noise_reduction << std::endl;
+    std::cout << "Bit depth: " << settings.dng_bit_depth << std::endl;
     std::cout << "Output target: " << output_target << std::endl;
     PrintInputSummary(inputs);
 

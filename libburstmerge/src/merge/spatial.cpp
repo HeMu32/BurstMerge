@@ -59,7 +59,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
     const float min_comparison_weight = 0.08f;
     const float highlight_threshold = params.highlight_threshold > 0.0f
         ? params.highlight_threshold
-        : 65535.0f * 0.92f;
+        : MaxValue(reference) * 0.92f;  // fallback: use data's own range
     const uint32_t guide_block = std::max<uint32_t>(1, params.guide_block_size);
 
     for (uint32_t y = 0; y < out.height; ++y) {
@@ -81,13 +81,15 @@ FloatImage SpatialMerge(const FloatImage& reference,
                         cmp_guide = BlockMean(aligned_comparisons[idx], x, y, guide_block);
                     }
 
-                    // Detect clipped comparison pixels: if the original value
-                    // before exposure scaling exceeds clip_threshold, the scaled
-                    // pixel is unreliable.
+                    // Detect clipped comparison pixels: estimated original value
+                    // (before normalization scaling) above clip_threshold means
+                    // the pixel has reached or exceeded the sensor's saturation
+                    // and its normalized value is unreliable.
                     bool cmp_clipped = false;
                     if (params.clip_threshold > 0.0f && params.exposure_scales &&
                         idx < params.num_scales && params.exposure_scales[idx] > 0.0f) {
-                        float estimated_original = aligned_comparisons[idx].data[i] / params.exposure_scales[idx];
+                        float scale = params.exposure_scales[idx];
+                        float estimated_original = aligned_comparisons[idx].data[i] / scale;
                         if (estimated_original >= params.clip_threshold) cmp_clipped = true;
                     }
 

@@ -167,8 +167,22 @@ void ExtractRawMetadata(DngNegativeHolder* holder,
     for (int i = 0; i < 4; i++) black_level[i] = 0.0f;
     if (neg.GetLinearizationInfo()) {
         const auto& linfo = *neg.GetLinearizationInfo();
-        for (uint32_t c = 0; c < 4 && c < kMaxColorPlanes; c++)
-            black_level[c] = static_cast<float>(linfo.fBlackLevel[0][0][c]);
+        // Bayer images are single-plane (plane 0). The 4 black levels
+        // come from the CFA pattern repeat, not from multiple color planes.
+        // Read fBlackLevel[pattern_row][pattern_col][plane=0] for each
+        // 2x2 CFA position. If the repeat dim is (1,1), propagate the
+        // single value to all 4 positions.
+        uint32_t br = linfo.fBlackLevelRepeatRows;
+        uint32_t bc = linfo.fBlackLevelRepeatCols;
+
+        if (br == 1 && bc == 1) {
+            float bl0 = static_cast<float>(linfo.fBlackLevel[0][0][0]);
+            for (int i = 0; i < 4; ++i) black_level[i] = bl0;
+        } else {
+            for (uint32_t r = 0; r < std::min<uint32>(br, 2); ++r)
+                for (uint32_t c = 0; c < std::min<uint32>(bc, 2); ++c)
+                    black_level[r * 2 + c] = static_cast<float>(linfo.fBlackLevel[r][c][0]);
+        }
     }
 
     pattern_width = 2;
@@ -219,6 +233,20 @@ void ExtractExposureMetadata(DngNegativeHolder* holder,
     if (exposure_time > 0.0 && iso > 0) {
         iso_exposure_time = static_cast<float>(exposure_time * static_cast<real64>(iso));
     }
+}
+
+void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level) {
+    if (!holder || !holder->negative) return;
+    holder->negative->SetWhiteLevel(static_cast<uint32>(white_level));
+}
+
+void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4]) {
+    if (!holder || !holder->negative) return;
+    holder->negative->SetQuadBlacks(
+        static_cast<real64>(black_level[0]),
+        static_cast<real64>(black_level[1]),
+        static_cast<real64>(black_level[2]),
+        static_cast<real64>(black_level[3]));
 }
 
 } // namespace io

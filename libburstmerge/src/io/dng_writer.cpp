@@ -36,7 +36,11 @@ DngWriter::~DngWriter() {
 
 static bool GetDngType(const HostBuffer& buf, uint32_t& outPixelType, uint32_t& outPixelSize) {
     switch (buf.format) {
-        case PixelFormat::R16_Uint:   outPixelType = ttShort; outPixelSize = 2; return true;
+        case PixelFormat::R16_Uint:
+            // DNG has no separate types for 12/14/16-bit; all use ttShort.
+            // The effective bit depth is conveyed by the white_level metadata
+            // tag, which the writer receives from RawMetadata::white_level.
+            outPixelType = ttShort; outPixelSize = 2; return true;
         case PixelFormat::R32_Float:  outPixelType = ttFloat; outPixelSize = 4; return true;
         case PixelFormat::RGBA32_Float: outPixelType = ttFloat; outPixelSize = 4; return true;
         default: return false;

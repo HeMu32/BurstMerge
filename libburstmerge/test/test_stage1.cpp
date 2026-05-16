@@ -112,6 +112,47 @@ void ProcessAndVerify(const std::string& name,
     }
 }
 
+void TestBitDepthOutput(const std::string& name, const std::string& input, int bit_depth, uint32_t expected_white_level, const std::string& output_path) {
+    std::cout << "[test] process " << name << " (bit depth " << bit_depth << ")..." << std::endl;
+    
+    fs::create_directories(fs::path(output_path).parent_path());
+    std::remove(output_path.c_str());
+
+    burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+    burstmerge::Settings settings;
+    settings.dng_bit_depth = bit_depth;
+    bm.Configure(settings);
+
+    bm.AddImage(input);
+    auto result = bm.Process(output_path);
+    CHECK(result.success, name + " process succeeds");
+    CHECK(FileExists(output_path), name + " output exists");
+
+    if (FileExists(output_path)) {
+        burstmerge::DngReader reader(output_path.c_str());
+        auto image = reader.Read();
+        
+        uint32_t target_white = expected_white_level;
+        if (target_white == 0) {
+            // Read original to find its native white level
+            burstmerge::DngReader orig_reader(input.c_str());
+            target_white = orig_reader.Read().metadata.white_level;
+        }
+
+        CHECK(image.metadata.white_level == target_white, 
+              name + " white level matches expected (" + std::to_string(target_white) + ", got " + std::to_string(image.metadata.white_level) + ")");
+              
+        // We can also sample the image data to ensure it's bounded by the new white level
+        burstmerge::FloatImage fi = burstmerge::HostBufferToFloatImage(image.pixels);
+        float max_val = 0.0f;
+        for (float v : fi.data) {
+            if (v > max_val) max_val = v;
+        }
+        CHECK(max_val <= static_cast<float>(target_white) * 1.001f, 
+              name + " pixel max value within white level bounds");
+    }
+}
+
 // Regression: after merging a bracketed burst with a bright source at center,
 // the center pixels must stay near white_level and not be dragged down by
 // clipped comparison frames. This would manifest as purple/magenta highlights.
@@ -157,6 +198,17 @@ int main() {
     ProcessAndVerify("single_dng",
         { (samples / "X1M5_Wide.dng").string() },
         (out_dir / "single_dng_output.dng").string());
+
+    // Read native white level of the source DNG to compute expected output levels
+    burstmerge::DngReader native_reader((samples / "X1M5_Wide.dng").string().c_str());
+    uint32_t native_wl = native_reader.Read().metadata.white_level;
+
+    TestBitDepthOutput("single_12bit", (samples / "X1M5_Wide.dng").string(), 12, 4095, (out_dir / "single_12bit_output.dng").string());
+    // For 14-bit, the output white_level = sensor_white (no rescaling)
+    TestBitDepthOutput("single_14bit", (samples / "X1M5_Wide.dng").string(), 14, native_wl, (out_dir / "single_14bit_output.dng").string());
+    TestBitDepthOutput("single_16bit", (samples / "X1M5_Wide.dng").string(), 16, 65535, (out_dir / "single_16bit_output.dng").string());
+    // Test robustness: invalid/unsupported bit depth requests should gracefully fall back to the sensor's native white level.
+    TestBitDepthOutput("single_invalid_bit", (samples / "X1M5_Wide.dng").string(), 99, 0, (out_dir / "single_invalid_bit_output.dng").string());
 
     if (ConverterAvailable()) {
         auto seq = FilesWithExt(samples / "Seq", ".arw");

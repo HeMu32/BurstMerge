@@ -11,7 +11,9 @@ namespace io {
 struct DngNegativeHolder;
 }
 
-// Maps to our internal Dng pixel types
+// Maps to our internal Dng pixel types.
+// DNG SDK has no separate 12-bit pixel type; 12/14/16-bit data all use
+// ttShort (16-bit container). Effective bit depth is conveyed via white_level.
 enum class DngPixelType : uint32_t {
     Uint8  = 1,
     Uint16 = 2,
@@ -108,5 +110,10 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
                           const std::string& output_dir,
                           std::vector<std::string>& output_files);
 #endif
+
+namespace io {
+void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level);
+void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4]);
+}
 
 } // namespace burstmerge

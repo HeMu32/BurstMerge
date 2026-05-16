@@ -77,5 +77,9 @@ void ExtractExposureMetadata(DngNegativeHolder* holder,
                              float& exposure_bias,
                              float& iso_exposure_time);
 
+// Override the output DNG's white/black level to match the desired bit depth.
+void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level);
+void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4]);
+
 } // namespace io
 } // namespace burstmerge
