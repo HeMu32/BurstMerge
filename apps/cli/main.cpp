@@ -3,6 +3,7 @@
 #include "cxxopts.hpp"
 
 #include <chrono>
+#include <cctype>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -16,6 +17,47 @@ const char* MergeAlgoName(burstmerge::MergeAlgorithm algo) {
         case burstmerge::MergeAlgorithm::Frequency: return "Frequency";
     }
     return "Unknown";
+}
+
+std::string Lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool ParseAlignmentMode(const std::string& value, burstmerge::AlignmentMode& out) {
+    std::string v = Lower(value);
+    if (v == "legacy") { out = burstmerge::AlignmentMode::Legacy; return true; }
+    if (v == "dense" || v == "dense-tile") { out = burstmerge::AlignmentMode::DenseTile; return true; }
+    return false;
+}
+
+bool ParseSpatialMode(const std::string& value, burstmerge::SpatialMergeMode& out) {
+    std::string v = Lower(value);
+    if (v == "legacy") { out = burstmerge::SpatialMergeMode::Legacy; return true; }
+    if (v == "linear") { out = burstmerge::SpatialMergeMode::Linear; return true; }
+    return false;
+}
+
+bool ParseFrequencyMode(const std::string& value, burstmerge::FrequencyMode& out) {
+    std::string v = Lower(value);
+    if (v == "laplacian" || v == "legacy") { out = burstmerge::FrequencyMode::Laplacian; return true; }
+    if (v == "wiener" || v == "wiener-fft" || v == "fft") { out = burstmerge::FrequencyMode::WienerFft; return true; }
+    return false;
+}
+
+bool ParseExposureMode(const std::string& value, burstmerge::ExposureMode& out) {
+    std::string v = Lower(value);
+    if (v == "off") { out = burstmerge::ExposureMode::Off; return true; }
+    if (v == "linear") { out = burstmerge::ExposureMode::Linear; return true; }
+    if (v == "curve") { out = burstmerge::ExposureMode::Curve; return true; }
+    return false;
+}
+
+bool ParseExposureCurveMode(const std::string& value, burstmerge::ExposureCurveMode& out) {
+    std::string v = Lower(value);
+    if (v == "global" || v == "legacy") { out = burstmerge::ExposureCurveMode::Global; return true; }
+    if (v == "local" || v == "local-reinhard") { out = burstmerge::ExposureCurveMode::LocalReinhard; return true; }
+    return false;
 }
 
 void PrintInputSummary(const std::vector<std::string>& inputs) {
@@ -36,6 +78,12 @@ int main(int argc, char* argv[]) {
         ("b,bit-depth", "Output bit depth (12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
         ("f,frequency", "Use frequency merge placeholder flag")
         ("n,noise-reduction", "Noise reduction strength (>=22.5 = temporal average)", cxxopts::value<float>())
+        ("alignment", "Alignment mode: legacy, dense", cxxopts::value<std::string>()->default_value("legacy"))
+        ("spatial-mode", "Spatial merge mode: legacy, linear", cxxopts::value<std::string>()->default_value("legacy"))
+        ("frequency-mode", "Frequency mode: laplacian, wiener", cxxopts::value<std::string>()->default_value("laplacian"))
+        ("exposure-mode", "Exposure mode: off, linear, curve", cxxopts::value<std::string>()->default_value("off"))
+        ("exposure-stops", "Exposure correction stops", cxxopts::value<float>()->default_value("0"))
+        ("exposure-curve", "Exposure curve mode: global, local", cxxopts::value<std::string>()->default_value("global"))
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -72,6 +120,27 @@ int main(int argc, char* argv[]) {
     settings.merge_algo = args.count("frequency")
         ? burstmerge::MergeAlgorithm::Frequency
         : burstmerge::MergeAlgorithm::Spatial;
+    if (!ParseAlignmentMode(args["alignment"].as<std::string>(), settings.alignment_mode)) {
+        std::cerr << "Invalid alignment mode (use legacy or dense)" << std::endl;
+        return 2;
+    }
+    if (!ParseSpatialMode(args["spatial-mode"].as<std::string>(), settings.spatial_mode)) {
+        std::cerr << "Invalid spatial mode (use legacy or linear)" << std::endl;
+        return 2;
+    }
+    if (!ParseFrequencyMode(args["frequency-mode"].as<std::string>(), settings.frequency_mode)) {
+        std::cerr << "Invalid frequency mode (use laplacian or wiener)" << std::endl;
+        return 2;
+    }
+    if (!ParseExposureMode(args["exposure-mode"].as<std::string>(), settings.exposure_mode)) {
+        std::cerr << "Invalid exposure mode (use off, linear, or curve)" << std::endl;
+        return 2;
+    }
+    if (!ParseExposureCurveMode(args["exposure-curve"].as<std::string>(), settings.exposure_curve_mode)) {
+        std::cerr << "Invalid exposure curve mode (use global or local)" << std::endl;
+        return 2;
+    }
+    settings.exposure_stops = args["exposure-stops"].as<float>();
     if (args.count("noise-reduction")) {
         settings.noise_reduction = args["noise-reduction"].as<float>();
     }

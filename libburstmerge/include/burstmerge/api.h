@@ -9,11 +9,19 @@ namespace burstmerge {
 enum class BackendType      { CPU, Vulkan };
 enum class MergeAlgorithm   { Spatial, Frequency };
 enum class ExposureMode     { Off, Linear, Curve };
+enum class AlignmentMode    { Legacy, DenseTile };
+enum class SpatialMergeMode { Legacy, Linear };
+enum class FrequencyMode    { Laplacian, WienerFft };
+enum class ExposureCurveMode { Global, LocalReinhard };
 
 struct Settings {
     int            tile_size        = 32;
     int            search_distance  = 64;
     MergeAlgorithm merge_algo       = MergeAlgorithm::Spatial;
+    AlignmentMode   alignment_mode  = AlignmentMode::Legacy;
+    SpatialMergeMode spatial_mode   = SpatialMergeMode::Legacy;
+    FrequencyMode   frequency_mode  = FrequencyMode::Laplacian;
+    ExposureCurveMode exposure_curve_mode = ExposureCurveMode::Global;
     float          noise_reduction  = 13.0f;
     ExposureMode   exposure_mode    = ExposureMode::Off;
     float          exposure_stops   = 0.0f;

@@ -12,6 +12,7 @@ add_library(burstmerge STATIC
     src/io/dng_sdk_bridge.cpp
     src/io/dng_reader.cpp
     src/io/dng_writer.cpp
+    ${PROJECT_SOURCE_DIR}/3rdparty/pocketfft/pocketfft.c
 )
 
 if(WIN32)

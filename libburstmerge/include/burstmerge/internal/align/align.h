@@ -1,4 +1,5 @@
 #pragma once
+#include "burstmerge/api.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/core/float_image.h"
 
@@ -6,11 +7,27 @@
 
 namespace burstmerge {
 
+struct AlignConstants {
+    static constexpr int32_t kDefaultTileSize = 32;
+    static constexpr int32_t kDefaultSearchDistance = 64;
+    static constexpr int32_t kDefaultPyramidLevels = 3;
+    static constexpr int32_t kPyramidMinDimension = 256;
+    static constexpr int32_t kDenseSearchBaseRadius = 8;
+    static constexpr int32_t kDenseSearchMinRadius = 2;
+    static constexpr int32_t kDenseLocalRadius = 2;
+    static constexpr int32_t kSmoothNeighborRadius = 1;
+    static constexpr int32_t kRefineLocalRadiusDiv = 16;
+    static constexpr int32_t kRefineDenseLocalRadiusDiv = 12;
+    static constexpr int32_t kRefineDenseMaxRadius = 6;
+    static constexpr int32_t kMinTileSize = 8;
+};
+
 struct AlignParams {
-    int32_t tile_size       = 32;
-    int32_t search_distance = 64;
-    int32_t pyramid_levels  = 3;
+    int32_t tile_size       = AlignConstants::kDefaultTileSize;
+    int32_t search_distance = AlignConstants::kDefaultSearchDistance;
+    int32_t pyramid_levels  = AlignConstants::kDefaultPyramidLevels;
     uint32_t cfa_period     = 1;
+    AlignmentMode mode      = AlignmentMode::Legacy;
 };
 
 struct AlignmentResult {

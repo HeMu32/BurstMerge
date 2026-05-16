@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <utility>
 
 namespace burstmerge {
 namespace {
@@ -74,13 +75,14 @@ void SmoothTileField(AlignmentResult& result) {
 
     std::vector<int16_t> smoothed_x = result.tile_shift_x;
     std::vector<int16_t> smoothed_y = result.tile_shift_y;
+    const int rad = AlignConstants::kSmoothNeighborRadius;
 
     for (uint32_t ty = 0; ty < result.tiles_y; ++ty) {
         for (uint32_t tx = 0; tx < result.tiles_x; ++tx) {
             int sx = 0;
             int sy = 0;
             int n = 0;
-            for (int oy = -1; oy <= 1; ++oy) {
+            for (int oy = -rad; oy <= rad; ++oy) {
                 int ny = static_cast<int>(ty) + oy;
                 if (ny < 0 || ny >= static_cast<int>(result.tiles_y)) continue;
                 for (int ox = -1; ox <= 1; ++ox) {
@@ -107,7 +109,7 @@ void RefineTileField(const FloatImage& reference,
                      const AlignParams& params,
                      AlignmentResult& result)
 {
-    const uint32_t tile_size = static_cast<uint32_t>(std::max(8, params.tile_size));
+    const uint32_t tile_size = static_cast<uint32_t>(std::max(AlignConstants::kMinTileSize, params.tile_size));
     result.tile_size = static_cast<int32_t>(tile_size);
     result.cfa_period = std::max<uint32_t>(1, params.cfa_period);
     result.tiles_x = (reference.width + tile_size - 1) / tile_size;
@@ -115,7 +117,7 @@ void RefineTileField(const FloatImage& reference,
     result.tile_shift_x.assign(static_cast<size_t>(result.tiles_x) * result.tiles_y, static_cast<int16_t>(result.shift_x));
     result.tile_shift_y.assign(static_cast<size_t>(result.tiles_x) * result.tiles_y, static_cast<int16_t>(result.shift_y));
 
-    const int local_radius = std::max<int>(1, std::min<int>(4, params.search_distance / 16));
+    const int local_radius = std::max<int>(1, std::min<int>(AlignConstants::kDenseLocalRadius, params.search_distance / AlignConstants::kRefineLocalRadiusDiv));
     const int sample_step = std::max<int>(1, params.cfa_period);
 
     for (uint32_t ty = 0; ty < result.tiles_y; ++ty) {
@@ -169,6 +171,214 @@ void RefineTileField(const FloatImage& reference,
     SmoothTileField(result);
 }
 
+float TileCost(const FloatImage& a,
+               const FloatImage& b,
+               uint32_t x0,
+               uint32_t y0,
+               uint32_t tile_w,
+               uint32_t tile_h,
+               int dx,
+               int dy,
+               int sample_step,
+               bool ssd)
+{
+    const int ax0 = static_cast<int>(x0);
+    const int ay0 = static_cast<int>(y0);
+    const int ax1 = static_cast<int>(std::min<uint32_t>(a.width, x0 + tile_w));
+    const int ay1 = static_cast<int>(std::min<uint32_t>(a.height, y0 + tile_h));
+    double cost = 0.0;
+    uint64_t count = 0;
+    for (int y = ay0; y < ay1; y += sample_step) {
+        int by = y - dy;
+        for (int x = ax0; x < ax1; x += sample_step) {
+            int bx = x - dx;
+            // Skip out-of-bounds comparison pixels entirely instead of penalizing
+            if (bx < 0 || by < 0 || bx >= static_cast<int>(b.width) || by >= static_cast<int>(b.height)) continue;
+            for (uint32_t c = 0; c < a.channels; ++c) {
+                float d = std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
+                                   b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by), c));
+                cost += ssd ? static_cast<double>(d) * d : d;
+                ++count;
+            }
+        }
+    }
+    return count ? static_cast<float>(cost / static_cast<double>(count)) : std::numeric_limits<float>::max();
+}
+
+void RefineTileFieldDense(const FloatImage& reference,
+                          const FloatImage& comparison,
+                          const AlignParams& params,
+                          AlignmentResult& result)
+{
+    const uint32_t tile_size = static_cast<uint32_t>(std::max(AlignConstants::kMinTileSize, params.tile_size));
+    result.tile_size = static_cast<int32_t>(tile_size);
+    result.cfa_period = std::max<uint32_t>(1, params.cfa_period);
+    result.tiles_x = (reference.width + tile_size - 1) / tile_size;
+    result.tiles_y = (reference.height + tile_size - 1) / tile_size;
+    result.tile_shift_x.assign(static_cast<size_t>(result.tiles_x) * result.tiles_y, static_cast<int16_t>(result.shift_x));
+    result.tile_shift_y.assign(static_cast<size_t>(result.tiles_x) * result.tiles_y, static_cast<int16_t>(result.shift_y));
+
+    const int local_radius = std::max<int>(1, std::min<int>(AlignConstants::kRefineDenseMaxRadius, params.search_distance / AlignConstants::kRefineDenseLocalRadiusDiv));
+    const int sample_step = std::max<int>(1, params.cfa_period);
+
+    for (uint32_t ty = 0; ty < result.tiles_y; ++ty) {
+        for (uint32_t tx = 0; tx < result.tiles_x; ++tx) {
+            const size_t idx = static_cast<size_t>(ty) * result.tiles_x + tx;
+            const uint32_t x0 = tx * tile_size;
+            const uint32_t y0 = ty * tile_size;
+
+            std::vector<std::pair<int, int>> candidates;
+            candidates.emplace_back(result.shift_x, result.shift_y);
+            if (tx > 0) {
+                size_t left = idx - 1;
+                candidates.emplace_back(result.tile_shift_x[left], result.tile_shift_y[left]);
+            }
+            if (ty > 0) {
+                size_t top = idx - result.tiles_x;
+                candidates.emplace_back(result.tile_shift_x[top], result.tile_shift_y[top]);
+            }
+            if (tx > 0 && ty > 0) {
+                size_t left = idx - 1;
+                size_t top = idx - result.tiles_x;
+                candidates.emplace_back((result.tile_shift_x[left] + result.tile_shift_x[top]) / 2,
+                                        (result.tile_shift_y[left] + result.tile_shift_y[top]) / 2);
+            }
+
+            float best_score = std::numeric_limits<float>::max();
+            int best_x = result.shift_x;
+            int best_y = result.shift_y;
+            for (auto candidate : candidates) {
+                for (int dy = candidate.second - local_radius; dy <= candidate.second + local_radius; ++dy) {
+                    for (int dx = candidate.first - local_radius; dx <= candidate.first + local_radius; ++dx) {
+                        int snapped_dx = SnapToPeriod(dx, result.cfa_period);
+                        int snapped_dy = SnapToPeriod(dy, result.cfa_period);
+                        float score = TileSad(reference, comparison, x0, y0, tile_size, tile_size,
+                                              snapped_dx, snapped_dy, sample_step);
+                        if (score < best_score) {
+                            best_score = score;
+                            best_x = snapped_dx;
+                            best_y = snapped_dy;
+                        }
+                    }
+                }
+            }
+
+            result.tile_shift_x[idx] = static_cast<int16_t>(best_x);
+            result.tile_shift_y[idx] = static_cast<int16_t>(best_y);
+        }
+    }
+
+    SmoothTileField(result);
+    SmoothTileField(result);
+}
+
+AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
+                                       const std::vector<FloatImage>& cmp_pyr,
+                                       const AlignParams& params)
+{
+    AlignmentResult cur;
+    cur.cfa_period = std::max<uint32_t>(1, params.cfa_period);
+    cur.tile_size = std::max<int32_t>(8, params.tile_size >> (static_cast<int>(ref_pyr.size()) - 1));
+    cur.tiles_x = 1;
+    cur.tiles_y = 1;
+    cur.tile_shift_x.assign(1, 0);
+    cur.tile_shift_y.assign(1, 0);
+
+    for (int level = static_cast<int>(ref_pyr.size()) - 1; level >= 0; --level) {
+        const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
+        const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
+        const uint32_t tile_size = static_cast<uint32_t>(std::max<int>(AlignConstants::kMinTileSize, params.tile_size >> level));
+        const uint32_t tiles_x = std::max<uint32_t>(1, (ref.width + tile_size - 1) / tile_size);
+        const uint32_t tiles_y = std::max<uint32_t>(1, (ref.height + tile_size - 1) / tile_size);
+        const int downscale = (level == static_cast<int>(ref_pyr.size()) - 1) ? 0 : 2;
+
+        std::vector<int16_t> prev_x(static_cast<size_t>(tiles_x) * tiles_y, 0);
+        std::vector<int16_t> prev_y(static_cast<size_t>(tiles_x) * tiles_y, 0);
+        if (downscale != 0) {
+            for (uint32_t ty = 0; ty < tiles_y; ++ty) {
+                for (uint32_t tx = 0; tx < tiles_x; ++tx) {
+                    uint32_t px = std::min(cur.tiles_x - 1, tx / 2);
+                    uint32_t py = std::min(cur.tiles_y - 1, ty / 2);
+                    size_t dst = static_cast<size_t>(ty) * tiles_x + tx;
+                    size_t src = static_cast<size_t>(py) * cur.tiles_x + px;
+                    prev_x[dst] = static_cast<int16_t>(cur.tile_shift_x[src] * downscale);
+                    prev_y[dst] = static_cast<int16_t>(cur.tile_shift_y[src] * downscale);
+                }
+            }
+        }
+
+        AlignmentResult next;
+        next.tile_size = static_cast<int32_t>(tile_size);
+        next.cfa_period = cur.cfa_period;
+        next.tiles_x = tiles_x;
+        next.tiles_y = tiles_y;
+        next.tile_shift_x.assign(static_cast<size_t>(tiles_x) * tiles_y, 0);
+        next.tile_shift_y.assign(static_cast<size_t>(tiles_x) * tiles_y, 0);
+
+        // Search radius scales with pyramid level: larger at coarser levels
+        const int search = std::max(AlignConstants::kDenseSearchMinRadius, AlignConstants::kDenseSearchBaseRadius >> level);
+        const int sample_step = std::max<int>(1, next.cfa_period);
+        const bool use_ssd = (level != 0);
+        for (uint32_t ty = 0; ty < tiles_y; ++ty) {
+            for (uint32_t tx = 0; tx < tiles_x; ++tx) {
+                size_t idx = static_cast<size_t>(ty) * tiles_x + tx;
+
+                // Gather candidate seeds from the 4 coarse parent tiles that map
+                // to this fine tile, ensuring coverage at tile boundaries.
+                std::vector<std::pair<int, int>> candidates;
+                candidates.emplace_back(prev_x[idx], prev_y[idx]);
+                if (tx > 0) {
+                    size_t lidx = static_cast<size_t>(ty) * tiles_x + (tx - 1);
+                    candidates.emplace_back(prev_x[lidx], prev_y[lidx]);
+                } else if (tx + 1 < tiles_x) {
+                    size_t ridx = static_cast<size_t>(ty) * tiles_x + (tx + 1);
+                    candidates.emplace_back(prev_x[ridx], prev_y[ridx]);
+                }
+                if (ty > 0) {
+                    size_t tidx = static_cast<size_t>(ty - 1) * tiles_x + tx;
+                    candidates.emplace_back(prev_x[tidx], prev_y[tidx]);
+                } else if (ty + 1 < tiles_y) {
+                    size_t bidx = static_cast<size_t>(ty + 1) * tiles_x + tx;
+                    candidates.emplace_back(prev_x[bidx], prev_y[bidx]);
+                }
+
+                float best_score = std::numeric_limits<float>::max();
+                int best_x = static_cast<int>(prev_x[idx]);
+                int best_y = static_cast<int>(prev_y[idx]);
+                for (const auto& seed : candidates) {
+                    for (int dy = seed.second - search; dy <= seed.second + search; ++dy) {
+                        for (int dx = seed.first - search; dx <= seed.first + search; ++dx) {
+                            int sx = SnapToPeriod(dx, next.cfa_period);
+                            int sy = SnapToPeriod(dy, next.cfa_period);
+                            float score = TileCost(ref, cmp, tx * tile_size, ty * tile_size,
+                                                   tile_size, tile_size, sx, sy, sample_step, use_ssd);
+                            if (score < best_score) {
+                                best_score = score;
+                                best_x = sx;
+                                best_y = sy;
+                            }
+                        }
+                    }
+                }
+                next.tile_shift_x[idx] = static_cast<int16_t>(best_x);
+                next.tile_shift_y[idx] = static_cast<int16_t>(best_y);
+            }
+        }
+        SmoothTileField(next);
+        cur = std::move(next);
+    }
+
+    long sx = 0;
+    long sy = 0;
+    for (int16_t v : cur.tile_shift_x) sx += v;
+    for (int16_t v : cur.tile_shift_y) sy += v;
+    int n = static_cast<int>(std::max<size_t>(1, cur.tile_shift_x.size()));
+    cur.shift_x = static_cast<int32_t>(std::lround(static_cast<double>(sx) / n));
+    cur.shift_y = static_cast<int32_t>(std::lround(static_cast<double>(sy) / n));
+    cur.confidence = 1.0f;
+    return cur;
+}
+
 float InterpolateTileShift(const std::vector<int16_t>& field,
                            uint32_t tiles_x,
                            uint32_t tiles_y,
@@ -214,10 +424,15 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
 {
     std::vector<FloatImage> ref_pyr{reference};
     std::vector<FloatImage> cmp_pyr{comparison};
-    while (ref_pyr.back().width > 256 && ref_pyr.back().height > 256 &&
+    while (ref_pyr.back().width > static_cast<uint32_t>(AlignConstants::kPyramidMinDimension) &&
+           ref_pyr.back().height > static_cast<uint32_t>(AlignConstants::kPyramidMinDimension) &&
            static_cast<int>(ref_pyr.size()) < params.pyramid_levels) {
         ref_pyr.push_back(Downsample2x(ref_pyr.back()));
         cmp_pyr.push_back(Downsample2x(cmp_pyr.back()));
+    }
+
+    if (params.mode == AlignmentMode::DenseTile) {
+        return EstimateDenseTileField(ref_pyr, cmp_pyr, params);
     }
 
     int best_x = 0;
@@ -256,7 +471,11 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
     out.shift_x = SnapToPeriod(best_x, params.cfa_period);
     out.shift_y = SnapToPeriod(best_y, params.cfa_period);
     out.confidence = 1.0f / (1.0f + best_score);
-    RefineTileField(reference, comparison, params, out);
+    if (params.mode == AlignmentMode::DenseTile) {
+        RefineTileFieldDense(reference, comparison, params, out);
+    } else {
+        RefineTileField(reference, comparison, params, out);
+    }
     return out;
 }
 

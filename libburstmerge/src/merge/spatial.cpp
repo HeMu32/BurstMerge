@@ -1,12 +1,100 @@
 #include "burstmerge/internal/merge/spatial.h"
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
+namespace burstmerge {
+
+const float kBinomialWeights[9] = {
+    601080390.0f, 565722720.0f, 471435600.0f, 347373600.0f,
+    225792840.0f, 129024480.0f, 64512240.0f,  28048800.0f,
+    10518300.0f
+};
+
+} // namespace burstmerge
+
 namespace {
+
+float Clamp01(float v) {
+    return std::max(0.0f, std::min(1.0f, v));
+}
 
 float ClampMin(float v, float lo) {
     return v < lo ? lo : v;
+}
+
+burstmerge::FloatImage BinomialBlur(const burstmerge::FloatImage& src, int radius = 8) {
+    if (src.data.empty()) return src;
+    const float* bw = burstmerge::kBinomialWeights;
+    burstmerge::FloatImage tmp;
+    tmp.width = src.width;
+    tmp.height = src.height;
+    tmp.channels = src.channels;
+    tmp.data.resize(src.data.size(), 0.0f);
+
+    burstmerge::FloatImage out = tmp;
+
+    for (uint32_t y = 0; y < src.height; ++y) {
+        for (uint32_t x = 0; x < src.width; ++x) {
+            for (uint32_t c = 0; c < src.channels; ++c) {
+                double sum = 0.0;
+                double weight = 0.0;
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    int sx = static_cast<int>(x) + dx;
+                    if (sx < 0 || sx >= static_cast<int>(src.width)) continue;
+                    float w = bw[std::abs(dx)];
+                    sum += static_cast<double>(w) * src.At(static_cast<uint32_t>(sx), y, c);
+                    weight += w;
+                }
+                tmp.At(x, y, c) = static_cast<float>(sum / std::max(1.0, weight));
+            }
+        }
+    }
+
+    for (uint32_t y = 0; y < src.height; ++y) {
+        for (uint32_t x = 0; x < src.width; ++x) {
+            for (uint32_t c = 0; c < src.channels; ++c) {
+                double sum = 0.0;
+                double weight = 0.0;
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    int sy = static_cast<int>(y) + dy;
+                    if (sy < 0 || sy >= static_cast<int>(src.height)) continue;
+                    float w = bw[std::abs(dy)];
+                    sum += static_cast<double>(w) * tmp.At(x, static_cast<uint32_t>(sy), c);
+                    weight += w;
+                }
+                out.At(x, y, c) = static_cast<float>(sum / std::max(1.0, weight));
+            }
+        }
+    }
+    return out;
+}
+
+float ColorDifferenceAt(const burstmerge::FloatImage& a, const burstmerge::FloatImage& b, size_t pixel_index) {
+    float diff = 0.0f;
+    const size_t base = pixel_index * a.channels;
+    for (uint32_t c = 0; c < a.channels; ++c) {
+        diff += std::abs(a.data[base + c] - b.data[base + c]);
+    }
+    return diff;
+}
+
+float EstimateLinearNoise(const burstmerge::FloatImage& image, uint32_t sample_step) {
+    if (image.data.empty()) return burstmerge::SpatialConstants::kNoiseFloorFallback;
+    const burstmerge::FloatImage blurred = BinomialBlur(image);
+    const uint32_t step = std::max<uint32_t>(1, sample_step);
+    double sum = 0.0;
+    uint64_t count = 0;
+    for (uint32_t y = 0; y < image.height; y += step) {
+        for (uint32_t x = 0; x < image.width; x += step) {
+            size_t idx = static_cast<size_t>(y) * image.width + x;
+            sum += ColorDifferenceAt(image, blurred, idx);
+            ++count;
+        }
+    }
+    if (count == 0) return burstmerge::SpatialConstants::kNoiseFloorFallback;
+    return std::max(burstmerge::SpatialConstants::kNoiseFloorMin, static_cast<float>(sum / static_cast<double>(count)));
 }
 
 float BlockMean(const burstmerge::FloatImage& img, uint32_t x, uint32_t y, uint32_t block_size) {
@@ -35,15 +123,12 @@ FloatImage SpatialMerge(const FloatImage& reference,
         return reference;
     }
 
-    // Approximate the original pipeline's ref_blurred / diff-based weighting.
-    // We derive weights from low-frequency content so that raw CFA noise and
-    // small phase errors do not immediately zero out contribution from other frames.
-    const int blur_radius = 2;
-    const FloatImage ref_blur = BoxBlur(reference, blur_radius);
+    const bool linear_mode = params.mode == SpatialMergeMode::Linear;
+    const FloatImage ref_blur = linear_mode ? BinomialBlur(reference) : BoxBlur(reference, 2);
     std::vector<FloatImage> cmp_blurs;
     cmp_blurs.reserve(aligned_comparisons.size());
     for (const auto& img : aligned_comparisons) {
-        cmp_blurs.push_back(BoxBlur(img, blur_radius));
+        cmp_blurs.push_back(linear_mode ? BinomialBlur(img) : BoxBlur(img, 2));
     }
 
     FloatImage out;
@@ -52,14 +137,14 @@ FloatImage SpatialMerge(const FloatImage& reference,
     out.channels = reference.channels;
     out.data.resize(reference.data.size(), 0.0f);
 
-    const float noise_floor = params.noise_floor > 0.0f
-        ? params.noise_floor
-        : std::max(8.0f, params.noise_reduction * 4.0f);
-    const float robustness = std::max(0.1f, params.robustness);
-    const float min_comparison_weight = 0.08f;
+    const float noise_floor = linear_mode
+        ? EstimateLinearNoise(reference, params.guide_block_size)
+        : (params.noise_floor > 0.0f ? params.noise_floor : std::max(burstmerge::SpatialConstants::kNoiseFloorFallback, params.noise_reduction * 4.0f));
+    const float robustness = std::max(0.0f, params.robustness);
+    const float min_comparison_weight = linear_mode ? burstmerge::SpatialConstants::kLinearMinComparisonWeight : burstmerge::SpatialConstants::kLegacyMinComparisonWeight;
     const float highlight_threshold = params.highlight_threshold > 0.0f
         ? params.highlight_threshold
-        : MaxValue(reference) * 0.92f;  // fallback: use data's own range
+        : MaxValue(reference) * burstmerge::SpatialConstants::kHighlightThresholdFactor;
     const uint32_t guide_block = std::max<uint32_t>(1, params.guide_block_size);
 
     if (reference.channels == 1) {
@@ -68,12 +153,12 @@ FloatImage SpatialMerge(const FloatImage& reference,
             for (uint32_t x = 0; x < out.width; ++x) {
                 const size_t i = (static_cast<size_t>(y) * out.width + x);
 
-                float ref_guide = BlockMean(reference, x, y, guide_block);
+                    float ref_guide = linear_mode ? ref_blur.data[i] : BlockMean(reference, x, y, guide_block);
                 float weighted_sum = reference.data[i];
                 float weight_sum = 1.0f;
 
                 for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
-                    float cmp_guide = BlockMean(aligned_comparisons[idx], x, y, guide_block);
+                    float cmp_guide = linear_mode ? cmp_blurs[idx].data[i] : BlockMean(aligned_comparisons[idx], x, y, guide_block);
 
                     // Detect clipped comparison pixels: estimated original value
                     // (before normalization scaling) above clip_threshold means
@@ -94,9 +179,13 @@ FloatImage SpatialMerge(const FloatImage& reference,
                         w = 1.0f;
                     } else {
                         float diff = std::abs(cmp_guide - ref_guide);
-                        float ratio = diff / noise_floor;
-                        w = 1.0f / (1.0f + ratio * ratio * robustness);
-                        w = ClampMin(w, min_comparison_weight);
+                        if (linear_mode) {
+                            w = robustness == 0.0f ? 1.0f : Clamp01(1.0f - diff / std::max(1.0f, noise_floor / robustness));
+                        } else {
+                            float ratio = diff / noise_floor;
+                            w = 1.0f / (1.0f + ratio * ratio * robustness);
+                            w = ClampMin(w, min_comparison_weight);
+                        }
                     }
 
                     weighted_sum += aligned_comparisons[idx].data[i] * w;
@@ -123,31 +212,46 @@ FloatImage SpatialMerge(const FloatImage& reference,
                     }
                 }
 
-                // Per-channel diff-based weight
-                for (uint32_t c = 0; c < out.channels; ++c) {
-                    const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
-                    float ref_g = ref_blur.data[ci];
-
-                    float weighted_sum = reference.data[ci];
-                    float weight_sum = 1.0f;
-
+                // For plane-image pipeline (channels > 1), compute a single shared weight
+                // per comparison frame per pixel to prevent per-channel weight divergence
+                // which causes color shifts in gradient regions when alignment is imperfect.
+                std::vector<float> shared_w(aligned_comparisons.size(), 1.0f);
+                if (linear_mode) {
                     for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
-                        // Detect clipped comparison pixels (global check)
                         bool cmp_clipped = false;
                         if (params.clip_threshold > 0.0f && params.exposure_scales &&
                             idx < params.num_scales && params.exposure_scales[idx] > 0.0f) {
                             float estimated_original = cmp_raw_max[idx] / params.exposure_scales[idx];
                             if (estimated_original >= params.clip_threshold) cmp_clipped = true;
                         }
-
-                        float w = 1.0f;
                         if (cmp_clipped) {
-                            // Comparison was clipped: its post-scaling value is unreliable.
-                            w = 0.0f;
+                            shared_w[idx] = 0.0f;
                         } else if (ref_raw_guide >= highlight_threshold || cmp_raw_max[idx] >= highlight_threshold) {
-                            // Truly saturated on both sides: equal-weight accumulation is safe.
-                            w = 1.0f;
+                            shared_w[idx] = 1.0f;
                         } else {
+                            float max_diff = 0.0f;
+                            for (uint32_t c = 0; c < out.channels; ++c) {
+                                const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
+                                float d = std::abs(cmp_blurs[idx].data[ci] - ref_blur.data[ci]);
+                                max_diff = std::max(max_diff, d);
+                            }
+                            float threshold = std::max(1.0f, noise_floor / std::max(0.001f, robustness));
+                            shared_w[idx] = max_diff >= threshold ? 0.0f : Clamp01(1.0f - max_diff / threshold);
+                        }
+                    }
+                }
+
+                // Per-channel merge using shared weights
+                for (uint32_t c = 0; c < out.channels; ++c) {
+                    const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
+
+                    float weighted_sum = reference.data[ci];
+                    float weight_sum = 1.0f;
+
+                    for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
+                        float w = shared_w[idx];
+                        if (!linear_mode) {
+                            float ref_g = ref_blur.data[ci];
                             float cmp_g = cmp_blurs[idx].data[ci];
                             float diff = std::abs(cmp_g - ref_g);
                             float ratio = diff / noise_floor;

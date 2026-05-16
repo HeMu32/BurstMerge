@@ -44,13 +44,47 @@ void RepairHotPixels(std::vector<FloatImage>& images, float white_level, uint32_
 
 FloatImage TemporalAverage(const FloatImage& reference,
                            const std::vector<FloatImage>& aligned_comparisons,
-                           const TemporalDenoiseParams&)
+                           const TemporalDenoiseParams& params)
 {
     FloatImage out;
     out.width = reference.width;
     out.height = reference.height;
     out.channels = reference.channels;
     out.data.resize(reference.data.size(), 0.0f);
+
+    if (params.exposure_scales && params.num_scales == aligned_comparisons.size() &&
+        params.white_level > params.black_level + 1.0f) {
+        const float white = params.white_level;
+        const float black = params.black_level;
+        const float range = std::max(1.0f, white - black);
+        FloatImage ref_blur = BoxBlur(reference, 2);
+        std::vector<FloatImage> comp_blur;
+        comp_blur.reserve(aligned_comparisons.size());
+        for (const auto& img : aligned_comparisons) comp_blur.push_back(BoxBlur(img, 2));
+
+        for (size_t i = 0; i < out.data.size(); ++i) {
+            float sum = reference.data[i];
+            float weight_sum = 1.0f;
+            for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
+                float scale = std::max(1e-6f, params.exposure_scales[idx]);
+                float exposure_factor = 1.0f / scale;
+                float luminance = std::max(0.0f, std::min(1.0f, (comp_blur[idx].data[i] - black) / range));
+                float w = std::sqrt(exposure_factor);
+                if (luminance < 0.25f) {
+                    w = exposure_factor;
+                } else {
+                    float t = std::max(0.0f, std::min(1.0f, (luminance - 0.25f) / 0.74f));
+                    w = exposure_factor * (1.0f - t) + 1.0f * t;
+                }
+                float highlight_w = std::max(0.0f, std::min(1.0f, 0.99f / 0.74f - luminance / 0.74f));
+                w = std::max(1.0f, w) * highlight_w;
+                sum += aligned_comparisons[idx].data[i] * w;
+                weight_sum += w;
+            }
+            out.data[i] = sum / std::max(1e-6f, weight_sum);
+        }
+        return out;
+    }
 
     const float inv = 1.0f / static_cast<float>(aligned_comparisons.size() + 1);
     for (size_t i = 0; i < out.data.size(); ++i) {
