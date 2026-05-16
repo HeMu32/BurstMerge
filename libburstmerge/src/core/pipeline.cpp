@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <limits>
@@ -21,6 +22,10 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace burstmerge {
 namespace {
@@ -60,21 +65,61 @@ std::string ResolveOutputPath(const std::string& output_path_or_dir) {
     return (out / "burstmerge_output.dng").string();
 }
 
-std::filesystem::path MakeTempConvertDir(const std::string& output_path) {
+std::string GenerateRunId() {
+#ifdef _WIN32
+    DWORD pid = GetCurrentProcessId();
+    ULONGLONG tick = GetTickCount64();
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "run_%lu_%llx", pid, tick);
+    return buf;
+#else
+    auto pid = static_cast<unsigned long>(::getpid());
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return "run_" + std::to_string(pid) + "_" + std::to_string(now);
+#endif
+}
+
+void OrphanSweep(const std::filesystem::path& parent, std::chrono::hours max_age) {
+    if (!std::filesystem::exists(parent)) return;
+    auto now = std::filesystem::file_time_type::clock::now();
+    std::error_code ec;
+    for (auto& entry : std::filesystem::directory_iterator(parent, ec)) {
+        if (ec) { ec.clear(); continue; }
+        if (!entry.is_directory()) continue;
+        std::string name = entry.path().filename().string();
+        if (name.rfind("run_", 0) != 0) continue;
+        auto ft = entry.last_write_time(ec);
+        if (ec) { ec.clear(); continue; }
+        auto age = now - ft;
+        if (age > max_age) {
+            std::filesystem::remove_all(entry.path(), ec);
+            ec.clear();
+        }
+    }
+}
+
+std::string MakeTempConvertDir(const std::string& output_path) {
     std::filesystem::path base(output_path);
     std::filesystem::path parent = base.has_parent_path() ? base.parent_path() : std::filesystem::current_path();
     std::filesystem::path dir = parent / "burstmerge_converted";
     std::filesystem::create_directories(dir);
-    return dir;
+    // Sweep orphan directories from crashed runs (older than 24 hours)
+    OrphanSweep(dir, std::chrono::hours(24));
+    // Create a per-process run directory so parallel CLI processes don't collide
+    std::filesystem::path run_dir = dir / GenerateRunId();
+    std::filesystem::create_directories(run_dir);
+    return run_dir.string();
 }
 
 std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_paths,
                                           const std::string& output_path,
-                                          const ProgressFn& progress)
+                                          const ProgressFn& progress,
+                                          std::string& out_convert_dir)
 {
     std::vector<std::string> dng_paths;
     std::vector<std::string> raw_paths;
     dng_paths.reserve(input_paths.size());
+    out_convert_dir.clear();
 
     Report(progress, 0.03f, "Validating input files");
     for (const auto& path : input_paths) {
@@ -89,10 +134,11 @@ std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_
 
 #ifdef _WIN32
     Report(progress, 0.08f, "Preparing RAW to DNG conversion");
+    out_convert_dir = MakeTempConvertDir(output_path);
     std::vector<std::string> converted;
-    std::filesystem::path convert_dir = MakeTempConvertDir(output_path);
     Report(progress, 0.10f, "Converting " + std::to_string(raw_paths.size()) + " RAW file(s) to DNG");
-    if (!RunAdobeDngConverter(raw_paths, convert_dir.string(), converted)) {
+    if (!RunAdobeDngConverter(raw_paths, out_convert_dir, converted)) {
+        out_convert_dir.clear();
         throw std::runtime_error("Adobe DNG Converter failed or timed out");
     }
     Report(progress, 0.16f, "RAW to DNG conversion completed");
@@ -274,6 +320,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                                      const std::string& output_path_or_dir,
                                      ProgressFn progress)
 {
+    Result result = {false, "", ""};
     try {
         Report(progress, 0.0f, "Starting");
         if (backend_ != BackendType::CPU) {
@@ -285,8 +332,9 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
         std::string output_path = ResolveOutputPath(output_path_or_dir);
         Report(progress, 0.02f, "Preparing inputs");
-        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, output_path, progress);
-        if (dng_paths.empty()) return {false, "", "No readable DNG inputs"};
+        convert_dir_.clear();
+        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, output_path, progress, convert_dir_);
+        if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
         Report(progress, 0.18f, "Reading and decoding DNG files");
         std::vector<RawImage> images;
@@ -323,7 +371,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
         for (size_t i = 1; i < images.size(); ++i) {
             if (!IsCompatibleForAverage(images[0], images[i])) {
-                return {false, "", "Input images differ in dimensions, format, or stride"};
+                throw std::runtime_error("Input images differ in dimensions, format, or stride");
             }
         }
 
@@ -379,26 +427,6 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             merged = SpatialMerge(float_images[ref_idx], aligned, params);
         }
 
-        {
-            double ch_sum[4]={0}, ch_min[4]={1e30,1e30,1e30,1e30}, ch_max[4]={-1e30,-1e30,-1e30,-1e30};
-            uint64_t ch_cnt[4]={0};
-            uint32_t limit = std::min(merged.height, 100u);
-            for (uint32_t yy = 0; yy < limit; ++yy) {
-                for (uint32_t xx = 0; xx < std::min(merged.width, 100u); ++xx) {
-                    int ci = (yy & 1) * 2 + (xx & 1);
-                    float v = merged.At(xx, yy, 0);
-                    ch_sum[ci] += v; ch_cnt[ci]++;
-                    if (v < ch_min[ci]) ch_min[ci] = v;
-                    if (v > ch_max[ci]) ch_max[ci] = v;
-                }
-            }
-            fprintf(stderr, "[DCH] merged black-subtracted (100x100 corner):\n");
-            for (int ci = 0; ci < 4; ++ci) {
-                double avg = ch_cnt[ci] > 0 ? ch_sum[ci]/ch_cnt[ci] : 0;
-                fprintf(stderr, "  ch[%d]: avg=%.2f min=%.0f max=%.0f cnt=%llu\n",
-                    ci, avg, ch_min[ci], ch_max[ci], (unsigned long long)ch_cnt[ci]);
-            }
-        }
 
         // Compute bit-depth rescaling factor (must happen in black-subtracted space)
         float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
@@ -479,11 +507,26 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         writer.Write(output_path.c_str(), output);
 
         Report(progress, 1.0f, "Done");
-        return {true, output_path, ""};
+        result = {true, output_path, ""};
     } catch (const std::exception& e) {
-        return {false, "", e.what()};
+        result = {false, "", e.what()};
     } catch (...) {
-        return {false, "", "Unknown processing error"};
+        result = {false, "", "Unknown processing error"};
+    }
+    CleanupConvertDir();
+    return result;
+}
+
+void PipelineOrchestrator::CleanupConvertDir() {
+    if (convert_dir_.empty()) return;
+    std::error_code ec;
+    std::filesystem::remove_all(convert_dir_, ec);
+    // Also remove the parent burstmerge_converted/ if it became empty
+    std::filesystem::path parent = std::filesystem::path(convert_dir_).parent_path();
+    convert_dir_.clear();
+    if (std::filesystem::exists(parent) &&
+        std::filesystem::is_empty(parent, ec)) {
+        std::filesystem::remove(parent, ec);
     }
 }
 

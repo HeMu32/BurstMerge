@@ -19,8 +19,11 @@ public:
                    ProgressFn progress);
 
 private:
+    void CleanupConvertDir();
+
     BackendType backend_;
     Settings settings_;
+    std::string convert_dir_;
 };
 
 } // namespace burstmerge

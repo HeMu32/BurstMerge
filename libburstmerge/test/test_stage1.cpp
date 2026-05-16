@@ -213,12 +213,17 @@ int main() {
     if (ConverterAvailable()) {
         auto seq = FilesWithExt(samples / "Seq", ".arw");
         // auto bkt = FilesWithExt(samples / "Bkt", ".arw");
-        auto bkt2 = FilesWithExt(samples / "Bkt2", ".arw");
+        std::vector<std::string> bkt2;
+        if (fs::exists(samples / "Bkt2")) {
+            bkt2 = FilesWithExt(samples / "Bkt2", ".arw");
+        }
         ProcessAndVerify("seq_arw_5", seq, (out_dir / "seq_output.dng").string());
-        // ProcessAndVerify("bkt_arw_5", bkt, (out_dir / "bkt_output.dng").string()); 
-        // Disabled: bkt2_arw_5 provides stronger bracketed test coverage (including center saturation check), bkt sequence is temporarily skipped to save time.
-        ProcessAndVerify("bkt2_arw_5", bkt2, (out_dir / "bkt2_output.dng").string());
-        CheckCenterSaturated("bkt2_center", (out_dir / "bkt2_output.dng").string());
+        if (!bkt2.empty()) {
+            ProcessAndVerify("bkt2_arw_5", bkt2, (out_dir / "bkt2_output.dng").string());
+            CheckCenterSaturated("bkt2_center", (out_dir / "bkt2_output.dng").string());
+        } else {
+            std::cout << "[test] SKIP bkt2_arw_5 (samples/Bkt2 not found)" << std::endl;
+        }
     } else {
         std::cout << "[test] SKIP ARW process tests: Adobe DNG Converter not installed" << std::endl;
     }
