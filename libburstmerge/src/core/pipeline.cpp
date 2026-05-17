@@ -447,7 +447,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
         Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
         std::vector<FloatImage> float_images = BuildFloatImages(images);
-        RepairHotPixels(float_images, static_cast<float>(images[0].metadata.white_level), images[0].metadata.mosaic_pattern_width);
+        uint32_t hotpixel_period = (float_images.empty() || float_images[0].channels <= 1)
+            ? images[0].metadata.mosaic_pattern_width
+            : 1u;
+        RepairHotPixels(float_images, static_cast<float>(images[0].metadata.white_level), hotpixel_period);
 
         // Log the CFA pattern so we can verify channel ordering
         if (images[ref_idx].metadata.mosaic_pattern_width > 0) {
