@@ -1,13 +1,15 @@
-#pragma once
+﻿#pragma once
 #include "burstmerge/api.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/core/float_image.h"
 
 #include <vector>
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-struct AlignConstants {
+struct AlignConstants
+{
     static constexpr int32_t kDefaultTileSize = 32;
     static constexpr int32_t kDefaultSearchDistance = 64;
     static constexpr int32_t kDefaultPyramidLevels = 3;
@@ -21,7 +23,8 @@ struct AlignConstants {
     static constexpr int32_t kDenseSearchDist = 2;
 };
 
-struct AlignParams {
+struct AlignParams
+{
     int32_t tile_size       = AlignConstants::kDefaultTileSize;
     int32_t search_distance = AlignConstants::kDefaultSearchDistance;
     int32_t pyramid_levels  = AlignConstants::kDefaultPyramidLevels;
@@ -29,7 +32,8 @@ struct AlignParams {
     AlignmentMode mode      = AlignmentMode::Legacy;
 };
 
-struct AlignmentResult {
+struct AlignmentResult
+{
     int32_t shift_x = 0;
     int32_t shift_y = 0;
     float   confidence = 0.0f;

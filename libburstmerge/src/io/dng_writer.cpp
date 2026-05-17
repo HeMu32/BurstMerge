@@ -1,4 +1,4 @@
-#include "burstmerge/internal/io/dng_io.h"
+﻿#include "burstmerge/internal/io/dng_io.h"
 #include "dng_sdk_bridge.h"
 
 #include "dng_image_writer.h"
@@ -9,16 +9,19 @@
 #include <windows.h>
 #endif
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-struct DngWriterImpl {
+struct DngWriterImpl
+{
     io::DngNegativeHolder* holder = nullptr;
 
     explicit DngWriterImpl(io::DngNegativeHolder* h)
         : holder(h)
     {}
 
-    ~DngWriterImpl() {
+    ~DngWriterImpl()
+    {
         if (holder) io::DestroyNegativeHolder(holder);
     }
 };
@@ -30,12 +33,15 @@ DngWriter::DngWriter(io::DngNegativeHolder*& ref_negative)
     ref_negative = nullptr;
 }
 
-DngWriter::~DngWriter() {
+DngWriter::~DngWriter()
+{
     delete static_cast<DngWriterImpl*>(impl_);
 }
 
-static bool GetDngType(const HostBuffer& buf, uint32_t& outPixelType, uint32_t& outPixelSize) {
-    switch (buf.format) {
+static bool GetDngType(const HostBuffer& buf, uint32_t& outPixelType, uint32_t& outPixelSize)
+{
+    switch (buf.format)
+    {
         case PixelFormat::R16_Uint:
             // DNG has no separate types for 12/14/16-bit; all use ttShort.
             // The effective bit depth is conveyed by the white_level metadata
@@ -47,14 +53,17 @@ static bool GetDngType(const HostBuffer& buf, uint32_t& outPixelType, uint32_t& 
     }
 }
 
-static uint32_t GetPlanes(PixelFormat fmt) {
-    switch (fmt) {
+static uint32_t GetPlanes(PixelFormat fmt)
+{
+    switch (fmt)
+    {
         case PixelFormat::RGBA32_Float: return 4;
         default: return 1;
     }
 }
 
-void DngWriter::Write(const char* out_path, const RawImage& image) {
+void DngWriter::Write(const char* out_path, const RawImage& image)
+{
     auto* p = static_cast<DngWriterImpl*>(impl_);
     if (!p->holder || !io::GetNegative(p->holder))
         throw std::runtime_error("DngWriter: no valid DNG negative");

@@ -1,13 +1,16 @@
-#include "burstmerge/internal/core/float_image.h"
+﻿#include "burstmerge/internal/core/float_image.h"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-namespace burstmerge {
-namespace {
+namespace burstmerge
+{
+namespace
+{
 
-float SampleClamped(const FloatImage& src, int x, int y, uint32_t c) {
+float SampleClamped(const FloatImage& src, int x, int y, uint32_t c)
+{
     x = std::max(0, std::min(x, static_cast<int>(src.width) - 1));
     y = std::max(0, std::min(y, static_cast<int>(src.height) - 1));
     return src.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c);
@@ -15,14 +18,17 @@ float SampleClamped(const FloatImage& src, int x, int y, uint32_t c) {
 
 } // namespace
 
-uint32_t ChannelsForFormat(PixelFormat format) {
-    switch (format) {
+uint32_t ChannelsForFormat(PixelFormat format)
+{
+    switch (format)
+    {
         case PixelFormat::RGBA32_Float: return 4;
         default: return 1;
     }
 }
 
-FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale) {
+FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale)
+{
     FloatImage out;
     out.width = src.width;
     out.height = src.height;
@@ -32,19 +38,23 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale) {
     if (!src.data) return out;
 
     const size_t count = static_cast<size_t>(out.width) * out.height * out.channels;
-    switch (src.format) {
-        case PixelFormat::R8_Uint: {
+    switch (src.format)
+    {
+        case PixelFormat::R8_Uint:
+        {
             const auto* p = reinterpret_cast<const uint8_t*>(src.data);
             for (size_t i = 0; i < count; ++i) out.data[i] = static_cast<float>(p[i]) * scale;
             break;
         }
-        case PixelFormat::R16_Uint: {
+        case PixelFormat::R16_Uint:
+        {
             const auto* p = reinterpret_cast<const uint16_t*>(src.data);
             for (size_t i = 0; i < count; ++i) out.data[i] = static_cast<float>(p[i]) * scale;
             break;
         }
         case PixelFormat::R32_Float:
-        case PixelFormat::RGBA32_Float: {
+        case PixelFormat::RGBA32_Float:
+        {
             const auto* p = reinterpret_cast<const float*>(src.data);
             for (size_t i = 0; i < count; ++i) out.data[i] = p[i] * scale;
             break;
@@ -53,8 +63,10 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale) {
     return out;
 }
 
-HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_level) {
-    if (src.channels != 1) {
+HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_level)
+{
+    if (src.channels != 1)
+    {
         throw std::runtime_error("FloatImageToUint16HostBuffer expects single-channel image");
     }
 
@@ -72,29 +84,36 @@ HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_le
     auto* dst = reinterpret_cast<uint16_t*>(out.data);
     const size_t count = static_cast<size_t>(src.width) * src.height;
     const float hi = static_cast<float>(white_level);
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i)
+    {
         float v = std::max(0.0f, std::min(src.data[i], hi));
         dst[i] = static_cast<uint16_t>(std::lround(v));
     }
     return out;
 }
 
-FloatImage Downsample2x(const FloatImage& src) {
+FloatImage Downsample2x(const FloatImage& src)
+{
     FloatImage out;
     out.width = std::max<uint32_t>(1, src.width / 2);
     out.height = std::max<uint32_t>(1, src.height / 2);
     out.channels = src.channels;
     out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels, 0.0f);
 
-    for (uint32_t y = 0; y < out.height; ++y) {
-        for (uint32_t x = 0; x < out.width; ++x) {
-            for (uint32_t c = 0; c < out.channels; ++c) {
+    for (uint32_t y = 0; y < out.height; ++y)
+    {
+        for (uint32_t x = 0; x < out.width; ++x)
+        {
+            for (uint32_t c = 0; c < out.channels; ++c)
+            {
                 uint32_t sx = x * 2;
                 uint32_t sy = y * 2;
                 float sum = 0.0f;
                 int n = 0;
-                for (uint32_t dy = 0; dy < 2 && sy + dy < src.height; ++dy) {
-                    for (uint32_t dx = 0; dx < 2 && sx + dx < src.width; ++dx) {
+                for (uint32_t dy = 0; dy < 2 && sy + dy < src.height; ++dy)
+                {
+                    for (uint32_t dx = 0; dx < 2 && sx + dx < src.width; ++dx)
+                    {
                         sum += src.At(sx + dx, sy + dy, c);
                         ++n;
                     }
@@ -106,7 +125,8 @@ FloatImage Downsample2x(const FloatImage& src) {
     return out;
 }
 
-FloatImage BoxBlur(const FloatImage& src, int radius) {
+FloatImage BoxBlur(const FloatImage& src, int radius)
+{
     if (radius <= 0) return src;
     FloatImage out;
     out.width = src.width;
@@ -114,13 +134,18 @@ FloatImage BoxBlur(const FloatImage& src, int radius) {
     out.channels = src.channels;
     out.data.resize(src.data.size(), 0.0f);
 
-    for (uint32_t y = 0; y < src.height; ++y) {
-        for (uint32_t x = 0; x < src.width; ++x) {
-            for (uint32_t c = 0; c < src.channels; ++c) {
+    for (uint32_t y = 0; y < src.height; ++y)
+    {
+        for (uint32_t x = 0; x < src.width; ++x)
+        {
+            for (uint32_t c = 0; c < src.channels; ++c)
+            {
                 float sum = 0.0f;
                 int n = 0;
-                for (int dy = -radius; dy <= radius; ++dy) {
-                    for (int dx = -radius; dx <= radius; ++dx) {
+                for (int dy = -radius; dy <= radius; ++dy)
+                {
+                    for (int dx = -radius; dx <= radius; ++dx)
+                    {
                         sum += SampleClamped(src, static_cast<int>(x) + dx, static_cast<int>(y) + dy, c);
                         ++n;
                     }
@@ -132,15 +157,18 @@ FloatImage BoxBlur(const FloatImage& src, int radius) {
     return out;
 }
 
-FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y) {
+FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y)
+{
     FloatImage out;
     out.width = src.width;
     out.height = src.height;
     out.channels = src.channels;
     out.data.resize(src.data.size(), 0.0f);
 
-    for (uint32_t y = 0; y < src.height; ++y) {
-        for (uint32_t x = 0; x < src.width; ++x) {
+    for (uint32_t y = 0; y < src.height; ++y)
+    {
+        for (uint32_t x = 0; x < src.width; ++x)
+        {
             float sx = static_cast<float>(x) - shift_x;
             float sy = static_cast<float>(y) - shift_y;
             int nx = static_cast<int>(std::lround(sx));
@@ -149,7 +177,8 @@ FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y) {
             // Use nearest-neighbor for the simple alignment warp path.
             // This can preserve edge acutance better than bilinear blending,
             // so results may look slightly sharper.
-            for (uint32_t c = 0; c < src.channels; ++c) {
+            for (uint32_t c = 0; c < src.channels; ++c)
+            {
                 out.At(x, y, c) = SampleClamped(src, nx, ny, c);
             }
 
@@ -161,7 +190,8 @@ FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y) {
             float tx = sx - static_cast<float>(x0);
             float ty = sy - static_cast<float>(y0);
 
-            for (uint32_t c = 0; c < src.channels; ++c) {
+            for (uint32_t c = 0; c < src.channels; ++c)
+            {
                 float p00 = SampleClamped(src, x0, y0, c);
                 float p10 = SampleClamped(src, x1, y0, c);
                 float p01 = SampleClamped(src, x0, y1, c);
@@ -176,7 +206,8 @@ FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y) {
     return out;
 }
 
-FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period) {
+FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period)
+{
     if (src.channels != 1 || cfa_period <= 1) return src;
 
     FloatImage out;
@@ -185,10 +216,12 @@ FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period)
     out.channels = cfa_period * cfa_period;
     out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels, 0.0f);
 
-    for (uint32_t y = 0; y < src.height; ++y) {
+    for (uint32_t y = 0; y < src.height; ++y)
+    {
         uint32_t py = y % cfa_period;
         uint32_t oy = y / cfa_period;
-        for (uint32_t x = 0; x < src.width; ++x) {
+        for (uint32_t x = 0; x < src.width; ++x)
+        {
             uint32_t px = x % cfa_period;
             uint32_t ox = x / cfa_period;
             uint32_t c = py * cfa_period + px;
@@ -204,7 +237,8 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
                                      uint32_t mosaic_height,
                                      uint32_t cfa_period)
 {
-    if (src.channels != cfa_period * cfa_period || cfa_period <= 1) {
+    if (src.channels != cfa_period * cfa_period || cfa_period <= 1)
+    {
         return src;
     }
 
@@ -214,10 +248,12 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
     out.channels = 1;
     out.data.resize(static_cast<size_t>(out.width) * out.height, 0.0f);
 
-    for (uint32_t y = 0; y < out.height; ++y) {
+    for (uint32_t y = 0; y < out.height; ++y)
+    {
         uint32_t py = y % cfa_period;
         uint32_t sy = y / cfa_period;
-        for (uint32_t x = 0; x < out.width; ++x) {
+        for (uint32_t x = 0; x < out.width; ++x)
+        {
             uint32_t px = x % cfa_period;
             uint32_t sx = x / cfa_period;
             uint32_t c = py * cfa_period + px;
@@ -228,7 +264,8 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
     return out;
 }
 
-float MaxValue(const FloatImage& src) {
+float MaxValue(const FloatImage& src)
+{
     if (src.data.empty()) return 0.0f;
     return *std::max_element(src.data.begin(), src.data.end());
 }

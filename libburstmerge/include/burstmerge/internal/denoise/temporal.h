@@ -1,12 +1,14 @@
-#pragma once
+﻿#pragma once
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/core/float_image.h"
 
 #include <vector>
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-struct TemporalDenoiseParams {
+struct TemporalDenoiseParams
+{
     float strength = 23.0f;
     float white_level = 0.0f;
     float black_level = 0.0f;

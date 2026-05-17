@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "burstmerge/api.h"
 
@@ -7,9 +7,11 @@
 #include <string>
 #include <vector>
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-struct PipelineConstants {
+struct PipelineConstants
+{
     static constexpr float kHighlightFactor = 0.92f;
     static constexpr float kClipFactor = 0.98f;
     static constexpr float kNoiseFormulaMul = 4.0f;
@@ -42,7 +44,8 @@ struct PipelineConstants {
     static constexpr std::chrono::hours kOrphanMaxAge = std::chrono::hours(24);
 };
 
-class PipelineOrchestrator {
+class PipelineOrchestrator
+{
 public:
     using ProgressFn = std::function<void(float, const std::string&)>;
 

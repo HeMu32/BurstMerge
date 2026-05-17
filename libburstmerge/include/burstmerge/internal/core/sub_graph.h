@@ -1,11 +1,13 @@
-#pragma once
+﻿#pragma once
 #include <cstdint>
 #include <vector>
 #include "burstmerge/internal/core/image_buffer.h"
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-enum class NodeType {
+enum class NodeType
+{
     PrepareTexture,
     BuildPyramid,
     ConvertToRGBA,
@@ -40,13 +42,15 @@ enum class NodeType {
     FloatToUint16,
 };
 
-struct SubGraphNode {
+struct SubGraphNode
+{
     NodeType type;
     std::vector<uint64_t> input_handles;
     std::vector<uint64_t> output_handles;
 };
 
-struct SubGraph {
+struct SubGraph
+{
     std::vector<SubGraphNode> nodes;
     std::vector<DeviceBuffer> shared_inputs;
     std::vector<DeviceBuffer> outputs;

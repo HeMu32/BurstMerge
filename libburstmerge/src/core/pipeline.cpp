@@ -1,4 +1,4 @@
-#include "burstmerge/internal/core/pipeline.h"
+﻿#include "burstmerge/internal/core/pipeline.h"
 
 #include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/core/float_image.h"
@@ -33,35 +33,45 @@
 #include <unistd.h>
 #endif
 
-namespace burstmerge {
-namespace {
+namespace burstmerge
+{
+namespace
+{
 
 using ProgressFn = PipelineOrchestrator::ProgressFn;
 
-void Report(const ProgressFn& progress, float percent, const std::string& stage) {
+void Report(const ProgressFn& progress, float percent, const std::string& stage)
+{
     if (progress) progress(percent, stage);
 }
 
-std::string LowerExt(const std::filesystem::path& p) {
+std::string LowerExt(const std::filesystem::path& p)
+{
     std::string ext = p.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c)
+    {
         return static_cast<char>(std::tolower(c));
     });
     return ext;
 }
 
-bool IsDngPath(const std::string& path) {
+bool IsDngPath(const std::string& path)
+{
     return LowerExt(std::filesystem::path(path)) == ".dng";
 }
 
-bool LooksLikeDngOutputPath(const std::string& path) {
+bool LooksLikeDngOutputPath(const std::string& path)
+{
     return IsDngPath(path);
 }
 
-std::string ResolveOutputPath(const std::string& output_path_or_dir) {
+std::string ResolveOutputPath(const std::string& output_path_or_dir)
+{
     std::filesystem::path out(output_path_or_dir.empty() ? "." : output_path_or_dir);
-    if (LooksLikeDngOutputPath(out.string())) {
-        if (out.has_parent_path()) {
+    if (LooksLikeDngOutputPath(out.string()))
+    {
+        if (out.has_parent_path())
+        {
             std::filesystem::create_directories(out.parent_path());
         }
         return out.string();
@@ -71,7 +81,8 @@ std::string ResolveOutputPath(const std::string& output_path_or_dir) {
     return (out / "burstmerge_output.dng").string();
 }
 
-std::string GenerateRunId() {
+std::string GenerateRunId()
+{
 #ifdef _WIN32
     DWORD pid = GetCurrentProcessId();
     ULONGLONG tick = GetTickCount64();
@@ -85,27 +96,33 @@ std::string GenerateRunId() {
 #endif
 }
 
-void OrphanSweep(const std::filesystem::path& parent) {
+void OrphanSweep(const std::filesystem::path& parent)
+{
     auto max_age = PipelineConstants::kOrphanMaxAge;
     if (!std::filesystem::exists(parent)) return;
     auto now = std::filesystem::file_time_type::clock::now();
     std::error_code ec;
-    for (auto& entry : std::filesystem::directory_iterator(parent, ec)) {
-        if (ec) { ec.clear(); continue; }
+    for (auto& entry : std::filesystem::directory_iterator(parent, ec))
+    {
+        if (ec)
+        { ec.clear(); continue; }
         if (!entry.is_directory()) continue;
         std::string name = entry.path().filename().string();
         if (name.rfind("run_", 0) != 0) continue;
         auto ft = entry.last_write_time(ec);
-        if (ec) { ec.clear(); continue; }
+        if (ec)
+        { ec.clear(); continue; }
         auto age = now - ft;
-        if (age > max_age) {
+        if (age > max_age)
+        {
             std::filesystem::remove_all(entry.path(), ec);
             ec.clear();
         }
     }
 }
 
-std::string MakeTempConvertDir(const std::string& output_path) {
+std::string MakeTempConvertDir(const std::string& output_path)
+{
     std::filesystem::path base(output_path);
     std::filesystem::path parent = base.has_parent_path() ? base.parent_path() : std::filesystem::current_path();
     std::filesystem::path dir = parent / "burstmerge_converted";
@@ -129,8 +146,10 @@ std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_
     out_convert_dir.clear();
 
     Report(progress, PipelineConstants::kProgressValidate, "Validating input files");
-    for (const auto& path : input_paths) {
-        if (!std::filesystem::exists(path)) {
+    for (const auto& path : input_paths)
+    {
+        if (!std::filesystem::exists(path))
+        {
             throw std::runtime_error("Input does not exist: " + path);
         }
         if (IsDngPath(path)) dng_paths.push_back(path);
@@ -144,7 +163,8 @@ std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_
     out_convert_dir = MakeTempConvertDir(output_path);
     std::vector<std::string> converted;
     Report(progress, PipelineConstants::kProgressConvertStart + 0.02f, "Converting " + std::to_string(raw_paths.size()) + " RAW file(s) to DNG");
-    if (!RunAdobeDngConverter(raw_paths, out_convert_dir, converted)) {
+    if (!RunAdobeDngConverter(raw_paths, out_convert_dir, converted))
+    {
         out_convert_dir.clear();
         throw std::runtime_error("Adobe DNG Converter failed or timed out");
     }
@@ -156,18 +176,21 @@ std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_
 #endif
 }
 
-bool IsCompatibleForAverage(const RawImage& a, const RawImage& b) {
+bool IsCompatibleForAverage(const RawImage& a, const RawImage& b)
+{
     return a.pixels.width == b.pixels.width &&
            a.pixels.height == b.pixels.height &&
            a.pixels.format == b.pixels.format &&
            a.pixels.row_stride == b.pixels.row_stride;
 }
 
-float ComputeRobustness(float noise_reduction) {
+float ComputeRobustness(float noise_reduction)
+{
     return std::max(PipelineConstants::kRobustnessMin, noise_reduction / PipelineConstants::kRobustnessDiv);
 }
 
-float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size) {
+float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size)
+{
     if (image.data.empty()) return 8.0f;
 
     const int blur_radius = 2;
@@ -176,10 +199,13 @@ float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size) {
 
     double sum_sq = 0.0;
     uint64_t count = 0;
-    for (uint32_t y = 0; y < image.height; y += step) {
-        for (uint32_t x = 0; x < image.width; x += step) {
+    for (uint32_t y = 0; y < image.height; y += step)
+    {
+        for (uint32_t x = 0; x < image.width; x += step)
+        {
             size_t idx = (static_cast<size_t>(y) * image.width + x) * image.channels;
-            for (uint32_t c = 0; c < image.channels; ++c) {
+            for (uint32_t c = 0; c < image.channels; ++c)
+            {
                 float d = image.data[idx + c] - blurred.data[idx + c];
                 sum_sq += static_cast<double>(d) * static_cast<double>(d);
                 ++count;
@@ -197,11 +223,14 @@ float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size) {
     return std::max(PipelineConstants::kNoiseFloorMin, rms);
 }
 
-float MeanBlackLevel(const RawMetadata& meta) {
+float MeanBlackLevel(const RawMetadata& meta)
+{
     float sum = 0.0f;
     int n = 0;
-    for (int i = 0; i < 4; ++i) {
-        if (meta.black_level[i] > 0.0f) { sum += meta.black_level[i]; ++n; }
+    for (int i = 0; i < 4; ++i)
+    {
+        if (meta.black_level[i] > 0.0f)
+        { sum += meta.black_level[i]; ++n; }
     }
     return n > 0 ? sum / static_cast<float>(n) : 0.0f;
 }
@@ -212,13 +241,15 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
 {
     float ref_iso = raw_images[ref_idx].metadata.iso_exposure_time;
 
-    for (size_t i = 0; i < float_images.size(); ++i) {
+    for (size_t i = 0; i < float_images.size(); ++i)
+    {
         const auto& meta = raw_images[i].metadata;
         FloatImage& img = float_images[i];
 
         // Remove each frame's own black level (per-frame ADC offset)
         float bl = MeanBlackLevel(meta);
-        if (bl > 1.0f) {
+        if (bl > 1.0f)
+        {
             for (float& v : img.data) v -= bl;
         }
 
@@ -226,22 +257,27 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
 
         // Exposure-normalize comparison frames to the reference's exposure
         float comp_iso = meta.iso_exposure_time;
-        if (ref_iso > 0.0f && comp_iso > 0.0f) {
+        if (ref_iso > 0.0f && comp_iso > 0.0f)
+        {
             float scale = (ref_iso / comp_iso) *
                           std::pow(2.0f, raw_images[ref_idx].metadata.exposure_bias - meta.exposure_bias);
-            if (std::abs(scale - 1.0f) > 0.001f) {
+            if (std::abs(scale - 1.0f) > 0.001f)
+            {
                 for (float& v : img.data) v *= scale;
             }
         }
     }
 }
 
-std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images) {
+std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images)
+{
     std::vector<FloatImage> out;
     out.reserve(images.size());
-    for (const auto& img : images) {
+    for (const auto& img : images)
+    {
         FloatImage fi = HostBufferToFloatImage(img.pixels);
-        if (img.metadata.mosaic_pattern_width > 1 && fi.channels == 1) {
+        if (img.metadata.mosaic_pattern_width > 1 && fi.channels == 1)
+        {
             fi = ConvertMosaicToPlaneImage(fi, img.metadata.mosaic_pattern_width);
         }
         out.push_back(std::move(fi));
@@ -271,7 +307,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     // NOTE: Advanced dense alignment in this pipeline is still under development.
     // Current behavior is experimental and does not yet guarantee robust results
     // across all bracketed-exposure scenes.
-    if (settings.alignment_mode == AlignmentMode::DenseTile) {
+    if (settings.alignment_mode == AlignmentMode::DenseTile)
+    {
         std::fprintf(stderr,
             "[WARN] Advanced dense alignment is experimental and not fully implemented yet. Results may be unstable.\n");
     }
@@ -279,7 +316,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     auto align_and_warp = [&](const FloatImage& guide_ref,
                               const FloatImage& source,
                               size_t progress_idx,
-                              size_t total_count) -> FloatImage {
+                              size_t total_count) -> FloatImage
+                              {
         Report(progress,
                PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange * static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
                "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
@@ -296,13 +334,16 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     float max_exp = 0.0f;
     std::vector<std::pair<float, size_t>> exposure_order;
     exposure_order.reserve(raw_images.size());
-    for (size_t i = 0; i < raw_images.size(); ++i) {
+    for (size_t i = 0; i < raw_images.size(); ++i)
+    {
         float v = raw_images[i].metadata.iso_exposure_time;
-        if (v > 0.0f) {
+        if (v > 0.0f)
+        {
             has_exposure = true;
             min_exp = std::min(min_exp, v);
             max_exp = std::max(max_exp, v);
-            exposure_order.push_back({v, i});
+            exposure_order.push_back(
+            {v, i});
         }
     }
 
@@ -311,11 +352,13 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                                   !exposure_order.empty() &&
                                   max_exp > min_exp * std::pow(2.0f, PipelineConstants::kBracketTransmissionFallbackEv);
 
-    if (!use_transmission) {
+    if (!use_transmission)
+    {
         const FloatImage& ref = float_images[ref_idx];
         size_t processed = 0;
         const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
-        for (size_t i = 0; i < float_images.size(); ++i) {
+        for (size_t i = 0; i < float_images.size(); ++i)
+        {
             if (i == ref_idx) continue;
             aligned.push_back(align_and_warp(ref, float_images[i], processed, total));
             ++processed;
@@ -324,12 +367,15 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     }
 
     std::sort(exposure_order.begin(), exposure_order.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+              [](const auto& a, const auto& b)
+              { return a.first < b.first; });
 
     const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
     size_t root_pos = 0;
-    for (size_t pos = 0; pos < exposure_order.size(); ++pos) {
-        if (exposure_order[pos].second == ref_idx) {
+    for (size_t pos = 0; pos < exposure_order.size(); ++pos)
+    {
+        if (exposure_order[pos].second == ref_idx)
+        {
             root_pos = pos;
             break;
         }
@@ -342,7 +388,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 
     size_t processed = 0;
 
-    for (size_t pos = root_pos; pos > 0; --pos) {
+    for (size_t pos = root_pos; pos > 0; --pos)
+    {
         size_t parent_idx = exposure_order[pos].second;
         size_t child_idx = exposure_order[pos - 1].second;
         const FloatImage& parent_ref = has_aligned[parent_idx] ? aligned_to_root[parent_idx] : float_images[parent_idx];
@@ -352,7 +399,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         ++processed;
     }
 
-    for (size_t pos = root_pos + 1; pos < exposure_order.size(); ++pos) {
+    for (size_t pos = root_pos + 1; pos < exposure_order.size(); ++pos)
+    {
         size_t parent_idx = exposure_order[pos - 1].second;
         size_t child_idx = exposure_order[pos].second;
         const FloatImage& parent_ref = has_aligned[parent_idx] ? aligned_to_root[parent_idx] : float_images[parent_idx];
@@ -362,7 +410,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         ++processed;
     }
 
-    for (size_t i = 0; i < float_images.size(); ++i) {
+    for (size_t i = 0; i < float_images.size(); ++i)
+    {
         if (i == ref_idx) continue;
         if (has_aligned[i]) aligned.push_back(std::move(aligned_to_root[i]));
         else aligned.push_back(align_and_warp(float_images[ref_idx], float_images[i], processed, total));
@@ -370,31 +419,39 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     return aligned;
 }
 
-size_t SelectExposureRefIndex(const std::vector<RawImage>& images) {
+size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
+{
     if (images.empty()) return 0;
 
     bool has_exposure = false;
     float min_exp = std::numeric_limits<float>::max();
     float max_exp = 0.0f;
-    for (const auto& img : images) {
+    for (const auto& img : images)
+    {
         float v = img.metadata.iso_exposure_time;
-        if (v > 0.0f) {
+        if (v > 0.0f)
+        {
             has_exposure = true;
             min_exp = std::min(min_exp, v);
             max_exp = std::max(max_exp, v);
         }
     }
 
-    if (has_exposure && max_exp > min_exp * 1.25f) {
+    if (has_exposure && max_exp > min_exp * 1.25f)
+    {
         std::vector<std::pair<float, size_t>> exposure_order;
         exposure_order.reserve(images.size());
-        for (size_t i = 0; i < images.size(); ++i) {
+        for (size_t i = 0; i < images.size(); ++i)
+        {
             float v = images[i].metadata.iso_exposure_time;
-            if (v > 0.0f) exposure_order.push_back({v, i});
+            if (v > 0.0f) exposure_order.push_back(
+            {v, i});
         }
-        if (!exposure_order.empty()) {
+        if (!exposure_order.empty())
+        {
             std::sort(exposure_order.begin(), exposure_order.end(),
-                      [](const auto& a, const auto& b) { return a.first < b.first; });
+                      [](const auto& a, const auto& b)
+                      { return a.first < b.first; });
             // Use the darkest frame as the exposure/output anchor for bracketed sets.
             // This keeps highlight headroom and avoids the brighter mid-exposure
             // reference making the final DNG look globally over-lifted.
@@ -415,14 +472,20 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                                      const std::string& output_path_or_dir,
                                      ProgressFn progress)
 {
-    Result result = {false, "", ""};
-    try {
+    Result result =
+    {false, "", ""};
+    try
+    {
         Report(progress, 0.0f, "Starting");
-        if (backend_ != BackendType::CPU) {
-            return {false, "", "Stage 1 currently supports CPU backend only"};
+        if (backend_ != BackendType::CPU)
+        {
+            return
+            {false, "", "Stage 1 currently supports CPU backend only"};
         }
-        if (input_paths.empty()) {
-            return {false, "", "No input images"};
+        if (input_paths.empty())
+        {
+            return
+            {false, "", "No input images"};
         }
 
         std::string output_path = ResolveOutputPath(output_path_or_dir);
@@ -434,7 +497,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         Report(progress, PipelineConstants::kProgressDecodeStart, "Reading and decoding DNG files");
         std::vector<RawImage> images;
         images.reserve(dng_paths.size());
-        for (size_t i = 0; i < dng_paths.size(); ++i) {
+        for (size_t i = 0; i < dng_paths.size(); ++i)
+        {
             DngReader reader(dng_paths[i].c_str());
             images.push_back(reader.Read());
             float p = PipelineConstants::kProgressDecodeStart + PipelineConstants::kProgressDecodeRange * static_cast<float>(i + 1) / static_cast<float>(dng_paths.size());
@@ -453,11 +517,13 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         RepairHotPixels(float_images, static_cast<float>(images[0].metadata.white_level), hotpixel_period);
 
         // Log the CFA pattern so we can verify channel ordering
-        if (images[ref_idx].metadata.mosaic_pattern_width > 0) {
+        if (images[ref_idx].metadata.mosaic_pattern_width > 0)
+        {
             uint32_t pw = images[ref_idx].metadata.mosaic_pattern_width;
             char buf[128];
             int n = std::snprintf(buf, sizeof(buf), "CFA pattern (%ux%u):", pw, pw);
-            for (uint32_t i = 0; i < pw * pw; ++i) {
+            for (uint32_t i = 0; i < pw * pw; ++i)
+            {
                 n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %u",
                     static_cast<unsigned>(images[ref_idx].metadata.mosaic_pattern[i]));
             }
@@ -467,8 +533,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
         NormalizeFrames(float_images, images, ref_idx);
 
-        for (size_t i = 1; i < images.size(); ++i) {
-            if (!IsCompatibleForAverage(images[0], images[i])) {
+        for (size_t i = 1; i < images.size(); ++i)
+        {
+            if (!IsCompatibleForAverage(images[0], images[i]))
+            {
                 throw std::runtime_error("Input images differ in dimensions, format, or stride");
             }
         }
@@ -480,19 +548,23 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         float ref_bias = images[ref_idx].metadata.exposure_bias;
         std::vector<float> exp_scales;
         exp_scales.reserve(images.size());
-        for (size_t i = 0; i < images.size(); ++i) {
+        for (size_t i = 0; i < images.size(); ++i)
+        {
             if (i == ref_idx) continue;
             float comp_iso = images[i].metadata.iso_exposure_time;
-            if (ref_iso > 0.0f && comp_iso > 0.0f) {
+            if (ref_iso > 0.0f && comp_iso > 0.0f)
+            {
                 exp_scales.push_back((ref_iso / comp_iso) *
                     std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
-            } else {
+            } else
+            {
                 exp_scales.push_back(1.0f);
             }
         }
 
         FloatImage merged;
-        if (settings_.noise_reduction >= PipelineConstants::kTemporalNrThreshold) {
+        if (settings_.noise_reduction >= PipelineConstants::kTemporalNrThreshold)
+        {
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal average");
             TemporalDenoiseParams params;
             params.strength = settings_.noise_reduction;
@@ -501,14 +573,16 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.num_scales = static_cast<uint32_t>(exp_scales.size());
             params.exposure_scales = exp_scales.data();
             merged = TemporalAverage(float_images[ref_idx], aligned, params);
-        } else if (settings_.merge_algo == MergeAlgorithm::Frequency) {
+        } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
+        {
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with frequency path");
             FrequencyMergeParams params;
             params.mode = settings_.frequency_mode;
             params.noise_reduction = settings_.noise_reduction;
             params.tile_size = settings_.tile_size;
             merged = FrequencyMerge(float_images[ref_idx], aligned, params);
-        } else {
+        } else
+        {
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with spatial path");
             SpatialMergeParams params;
             params.mode = settings_.spatial_mode;
@@ -531,12 +605,12 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             merged = SpatialMerge(float_images[ref_idx], aligned, params);
         }
 
-
-        // Compute bit-depth rescaling factor (must happen in black-subtracted space)
+// Compute bit-depth rescaling factor (must happen in black-subtracted space)
         float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
         uint32_t sensor_white = images[ref_idx].metadata.white_level;
         uint32_t target_white = sensor_white;
-        switch (settings_.dng_bit_depth) {
+        switch (settings_.dng_bit_depth)
+        {
             case 12: target_white = 4095;  break;
             case 14: target_white = sensor_white; break;
             case 16: target_white = 65535; break;
@@ -551,21 +625,28 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         // ref_bl (mean), let exposure do its work, then inject per-channel delta
         // afterward.  This way the DNG pixel data matches per-channel BlackLevel
         // metadata without confusing the tone mapper.
-        if (ref_bl > 1.0f) {
+        if (ref_bl > 1.0f)
+        {
             float scaled_bl = ref_bl * bit_scale;
-            if (bit_scale != 1.0f) {
-                for (float& v : merged.data) {
+            if (bit_scale != 1.0f)
+            {
+                for (float& v : merged.data)
+                {
                     v = v * bit_scale + scaled_bl;
                 }
-            } else {
+            } else
+            {
                 for (float& v : merged.data) v += ref_bl;
             }
-        } else {
-            if (bit_scale != 1.0f) {
+        } else
+        {
+            if (bit_scale != 1.0f)
+            {
                 for (float& v : merged.data) v *= bit_scale;
             }
         }
-        if (settings_.exposure_mode != ExposureMode::Off || settings_.exposure_stops != 0.0f) {
+        if (settings_.exposure_mode != ExposureMode::Off || settings_.exposure_stops != 0.0f)
+        {
             Report(progress, PipelineConstants::kProgressExposure, "Exposure correction");
             ExposureParams params;
             params.mode = settings_.exposure_mode;
@@ -582,21 +663,30 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         // inject per-channel delta so final pixel data matches per-channel
         // BlackLevel metadata.  Only needed when the image is still in plane
         // layout (4 channels) and per-channel black levels differ from the mean.
-        if (merged.channels == 4 && ref_bl > 1.0f) {
-            float bl_ch[4] = {};
+        if (merged.channels == 4 && ref_bl > 1.0f)
+        {
+            float bl_ch[4] =
+            {};
             bool has_per_channel = false;
-            for (int i = 0; i < 4 && i < static_cast<int>(merged.channels); ++i) {
+            for (int i = 0; i < 4 && i < static_cast<int>(merged.channels); ++i)
+            {
                 float v = images[ref_idx].metadata.black_level[i];
-                if (v > 0.0f) { bl_ch[i] = v; has_per_channel = true; }
-                else { bl_ch[i] = ref_bl; }
+                if (v > 0.0f)
+                { bl_ch[i] = v; has_per_channel = true; }
+                else
+                { bl_ch[i] = ref_bl; }
             }
-            if (has_per_channel) {
+            if (has_per_channel)
+            {
                 float delta[4];
                 for (int i = 0; i < 4; ++i) delta[i] = bl_ch[i] - ref_bl;
-                for (uint32_t y = 0; y < merged.height; ++y) {
-                    for (uint32_t x = 0; x < merged.width; ++x) {
+                for (uint32_t y = 0; y < merged.height; ++y)
+                {
+                    for (uint32_t x = 0; x < merged.width; ++x)
+                    {
                         size_t base = (static_cast<size_t>(y) * merged.width + x) * 4;
-                        for (uint32_t c = 0; c < 4; ++c) {
+                        for (uint32_t c = 0; c < 4; ++c)
+                        {
                             merged.data[base + c] += delta[c];
                         }
                     }
@@ -605,7 +695,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
 
         if (images[ref_idx].metadata.mosaic_pattern_width > 1 &&
-            merged.channels == images[ref_idx].metadata.mosaic_pattern_width * images[ref_idx].metadata.mosaic_pattern_width) {
+            merged.channels == images[ref_idx].metadata.mosaic_pattern_width * images[ref_idx].metadata.mosaic_pattern_width)
+            {
             merged = ConvertPlaneImageToMosaic(merged,
                                                images[ref_idx].metadata.width,
                                                images[ref_idx].metadata.height,
@@ -619,9 +710,12 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         RawImage output;
         output.metadata = std::move(images[ref_idx].metadata);
         output.metadata.white_level = target_white;
-        if (bit_scale != 1.0f && ref_bl > 1.0f) {
-            for (int i = 0; i < 4; ++i) {
-                if (output.metadata.black_level[i] > 0.0f) {
+        if (bit_scale != 1.0f && ref_bl > 1.0f)
+        {
+            for (int i = 0; i < 4; ++i)
+            {
+                if (output.metadata.black_level[i] > 0.0f)
+                {
                     output.metadata.black_level[i] *= bit_scale;
                 }
             }
@@ -630,11 +724,13 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
         Report(progress, PipelineConstants::kProgressWrite, "Writing output DNG file");
         io::SetDngWhiteLevel(output.metadata.dng_negative, target_white);
-        if (bit_scale != 1.0f && ref_bl > 1.0f) {
+        if (bit_scale != 1.0f && ref_bl > 1.0f)
+        {
             float scaled_bl[4];
             // Use the (already-moved) output metadata's black_level (which was scaled above)
             // to avoid reading from the moved-from images[ref_idx].
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < 4; ++i)
+            {
                 scaled_bl[i] = output.metadata.black_level[i];
             }
             io::SetDngBlackLevel(output.metadata.dng_negative, scaled_bl);
@@ -643,17 +739,23 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         writer.Write(output_path.c_str(), output);
 
         Report(progress, PipelineConstants::kProgressDone, "Done");
-        result = {true, output_path, ""};
-    } catch (const std::exception& e) {
-        result = {false, "", e.what()};
-    } catch (...) {
-        result = {false, "", "Unknown processing error"};
+        result =
+        {true, output_path, ""};
+    } catch (const std::exception& e)
+    {
+        result =
+        {false, "", e.what()};
+    } catch (...)
+    {
+        result =
+        {false, "", "Unknown processing error"};
     }
     CleanupConvertDir();
     return result;
 }
 
-void PipelineOrchestrator::CleanupConvertDir() {
+void PipelineOrchestrator::CleanupConvertDir()
+{
     if (convert_dir_.empty()) return;
     std::error_code ec;
     std::filesystem::remove_all(convert_dir_, ec);
@@ -661,7 +763,8 @@ void PipelineOrchestrator::CleanupConvertDir() {
     std::filesystem::path parent = std::filesystem::path(convert_dir_).parent_path();
     convert_dir_.clear();
     if (std::filesystem::exists(parent) &&
-        std::filesystem::is_empty(parent, ec)) {
+        std::filesystem::is_empty(parent, ec))
+        {
         std::filesystem::remove(parent, ec);
     }
 }

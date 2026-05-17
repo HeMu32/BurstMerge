@@ -1,7 +1,8 @@
-#pragma once
+﻿#pragma once
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 #if defined(BM_BUILD_SHARED)

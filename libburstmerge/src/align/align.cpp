@@ -6,27 +6,35 @@
 #include <limits>
 #include <utility>
 
-namespace burstmerge {
-namespace {
+namespace burstmerge
+{
+namespace
+{
 
-int SnapToPeriod(int value, uint32_t period) {
+int SnapToPeriod(int value, uint32_t period)
+{
     if (period <= 1) return value;
     int p = static_cast<int>(period);
     return value >= 0 ? (value / p) * p : -((-value) / p) * p;
 }
 
-float SparseSad(const FloatImage& a, const FloatImage& b, int dx, int dy, int step) {
+float SparseSad(const FloatImage& a, const FloatImage& b, int dx, int dy, int step)
+{
     const int margin_x = std::abs(dx);
     const int margin_y = std::abs(dy);
-    if (a.width <= static_cast<uint32_t>(margin_x * 2) || a.height <= static_cast<uint32_t>(margin_y * 2)) {
+    if (a.width <= static_cast<uint32_t>(margin_x * 2) || a.height <= static_cast<uint32_t>(margin_y * 2))
+    {
         return std::numeric_limits<float>::max();
     }
 
     double sad = 0.0;
     uint64_t count = 0;
-    for (int y = margin_y; y < static_cast<int>(a.height) - margin_y; y += step) {
-        for (int x = margin_x; x < static_cast<int>(a.width) - margin_x; x += step) {
-            for (uint32_t c = 0; c < a.channels; ++c) {
+    for (int y = margin_y; y < static_cast<int>(a.height) - margin_y; y += step)
+    {
+        for (int x = margin_x; x < static_cast<int>(a.width) - margin_x; x += step)
+        {
+            for (uint32_t c = 0; c < a.channels; ++c)
+            {
                 sad += std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
                                 b.At(static_cast<uint32_t>(x - dx), static_cast<uint32_t>(y - dy), c));
                 ++count;
@@ -53,13 +61,16 @@ float TileSad(const FloatImage& a,
 
     double sad = 0.0;
     uint64_t count = 0;
-    for (int y = ay0; y < ay1; y += sample_step) {
+    for (int y = ay0; y < ay1; y += sample_step)
+    {
         int by = y - dy;
         if (by < 0 || by >= static_cast<int>(b.height)) continue;
-        for (int x = ax0; x < ax1; x += sample_step) {
+        for (int x = ax0; x < ax1; x += sample_step)
+        {
             int bx = x - dx;
             if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
-            for (uint32_t c = 0; c < a.channels; ++c) {
+            for (uint32_t c = 0; c < a.channels; ++c)
+            {
                 sad += std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
                                 b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by), c));
                 ++count;
@@ -70,22 +81,27 @@ float TileSad(const FloatImage& a,
     return count ? static_cast<float>(sad / static_cast<double>(count)) : std::numeric_limits<float>::max();
 }
 
-void SmoothTileField(AlignmentResult& result) {
+void SmoothTileField(AlignmentResult& result)
+{
     if (result.tiles_x == 0 || result.tiles_y == 0) return;
 
     std::vector<int16_t> smoothed_x = result.tile_shift_x;
     std::vector<int16_t> smoothed_y = result.tile_shift_y;
     const int rad = AlignConstants::kSmoothNeighborRadius;
 
-    for (uint32_t ty = 0; ty < result.tiles_y; ++ty) {
-        for (uint32_t tx = 0; tx < result.tiles_x; ++tx) {
+    for (uint32_t ty = 0; ty < result.tiles_y; ++ty)
+    {
+        for (uint32_t tx = 0; tx < result.tiles_x; ++tx)
+        {
             int sx = 0;
             int sy = 0;
             int n = 0;
-            for (int oy = -rad; oy <= rad; ++oy) {
+            for (int oy = -rad; oy <= rad; ++oy)
+            {
                 int ny = static_cast<int>(ty) + oy;
                 if (ny < 0 || ny >= static_cast<int>(result.tiles_y)) continue;
-                for (int ox = -1; ox <= 1; ++ox) {
+                for (int ox = -1; ox <= 1; ++ox)
+                {
                     int nx = static_cast<int>(tx) + ox;
                     if (nx < 0 || nx >= static_cast<int>(result.tiles_x)) continue;
                     size_t idx = static_cast<size_t>(ny) * result.tiles_x + static_cast<uint32_t>(nx);
@@ -120,20 +136,24 @@ void RefineTileField(const FloatImage& reference,
     const int local_radius = std::max<int>(1, std::min<int>(AlignConstants::kDenseLocalRadius, params.search_distance / AlignConstants::kRefineLocalRadiusDiv));
     const int sample_step = std::max<int>(1, params.cfa_period);
 
-    for (uint32_t ty = 0; ty < result.tiles_y; ++ty) {
-        for (uint32_t tx = 0; tx < result.tiles_x; ++tx) {
+    for (uint32_t ty = 0; ty < result.tiles_y; ++ty)
+    {
+        for (uint32_t tx = 0; tx < result.tiles_x; ++tx)
+        {
             size_t idx = static_cast<size_t>(ty) * result.tiles_x + tx;
             const uint32_t x0 = tx * tile_size;
             const uint32_t y0 = ty * tile_size;
 
             int seed_x = result.shift_x;
             int seed_y = result.shift_y;
-            if (tx > 0) {
+            if (tx > 0)
+            {
                 size_t left = idx - 1;
                 seed_x = (seed_x + result.tile_shift_x[left]) / 2;
                 seed_y = (seed_y + result.tile_shift_y[left]) / 2;
             }
-            if (ty > 0) {
+            if (ty > 0)
+            {
                 size_t top = idx - result.tiles_x;
                 seed_x = (seed_x + result.tile_shift_x[top]) / 2;
                 seed_y = (seed_y + result.tile_shift_y[top]) / 2;
@@ -142,8 +162,10 @@ void RefineTileField(const FloatImage& reference,
             float best_score = std::numeric_limits<float>::max();
             int best_x = seed_x;
             int best_y = seed_y;
-            for (int dy = seed_y - local_radius; dy <= seed_y + local_radius; ++dy) {
-                for (int dx = seed_x - local_radius; dx <= seed_x + local_radius; ++dx) {
+            for (int dy = seed_y - local_radius; dy <= seed_y + local_radius; ++dy)
+            {
+                for (int dx = seed_x - local_radius; dx <= seed_x + local_radius; ++dx)
+                {
                     int snapped_dx = SnapToPeriod(dx, result.cfa_period);
                     int snapped_dy = SnapToPeriod(dy, result.cfa_period);
                     float score = TileSad(reference,
@@ -155,7 +177,8 @@ void RefineTileField(const FloatImage& reference,
                                           snapped_dx,
                                           snapped_dy,
                                           sample_step);
-                    if (score < best_score) {
+                    if (score < best_score)
+                    {
                         best_score = score;
                         best_x = snapped_dx;
                         best_y = snapped_dy;
@@ -188,13 +211,16 @@ float TileCost(const FloatImage& a,
     const int ay1 = static_cast<int>(std::min<uint32_t>(a.height, y0 + tile_h));
     double cost = 0.0;
     uint64_t count = 0;
-    for (int y = ay0; y < ay1; y += sample_step) {
+    for (int y = ay0; y < ay1; y += sample_step)
+    {
         int by = y - dy;
-        for (int x = ax0; x < ax1; x += sample_step) {
+        for (int x = ax0; x < ax1; x += sample_step)
+        {
             int bx = x - dx;
             // Skip out-of-bounds comparison pixels entirely instead of penalizing
             if (bx < 0 || by < 0 || bx >= static_cast<int>(b.width) || by >= static_cast<int>(b.height)) continue;
-            for (uint32_t c = 0; c < a.channels; ++c) {
+            for (uint32_t c = 0; c < a.channels; ++c)
+            {
                 float d = std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
                                    b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by), c));
                 cost += ssd ? static_cast<double>(d) * d : d;
@@ -229,12 +255,15 @@ float TileCost(const FloatImage& a,
     // Compute ratio at seed shift
     double sum_u = 0.0, sum_v = 0.0;
     uint64_t n_pix = 0;
-    for (int y = ay0; y < ay1; y += sample_step) {
+    for (int y = ay0; y < ay1; y += sample_step)
+    {
         int by = y - seed_dy;
-        for (int x = ax0; x < ax1; x += sample_step) {
+        for (int x = ax0; x < ax1; x += sample_step)
+        {
             int bx = x - seed_dx;
             if (bx < 0 || by < 0 || bx >= static_cast<int>(b.width) || by >= static_cast<int>(b.height)) continue;
-            for (uint32_t c = 0; c < a.channels; ++c) {
+            for (uint32_t c = 0; c < a.channels; ++c)
+            {
                 sum_u += a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c);
                 sum_v += b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by), c);
                 ++n_pix;
@@ -246,12 +275,15 @@ float TileCost(const FloatImage& a,
     // Evaluate cost at target shift with ratio compensation
     double cost = 0.0;
     uint64_t count = 0;
-    for (int y = ay0; y < ay1; y += sample_step) {
+    for (int y = ay0; y < ay1; y += sample_step)
+    {
         int by = y - dy;
-        for (int x = ax0; x < ax1; x += sample_step) {
+        for (int x = ax0; x < ax1; x += sample_step)
+        {
             int bx = x - dx;
             if (bx < 0 || by < 0 || bx >= static_cast<int>(b.width) || by >= static_cast<int>(b.height)) continue;
-            for (uint32_t c = 0; c < a.channels; ++c) {
+            for (uint32_t c = 0; c < a.channels; ++c)
+            {
                 float r = a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c);
                 float cv = b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by), c);
                 float d = std::abs(r - ratio * cv);
@@ -279,23 +311,28 @@ void RefineTileFieldDense(const FloatImage& reference,
     const int local_radius = std::max<int>(1, std::min<int>(AlignConstants::kRefineDenseMaxRadius, params.search_distance / AlignConstants::kRefineDenseLocalRadiusDiv));
     const int sample_step = std::max<int>(1, params.cfa_period);
 
-    for (uint32_t ty = 0; ty < result.tiles_y; ++ty) {
-        for (uint32_t tx = 0; tx < result.tiles_x; ++tx) {
+    for (uint32_t ty = 0; ty < result.tiles_y; ++ty)
+    {
+        for (uint32_t tx = 0; tx < result.tiles_x; ++tx)
+        {
             const size_t idx = static_cast<size_t>(ty) * result.tiles_x + tx;
             const uint32_t x0 = tx * tile_size;
             const uint32_t y0 = ty * tile_size;
 
             std::vector<std::pair<int, int>> candidates;
             candidates.emplace_back(result.shift_x, result.shift_y);
-            if (tx > 0) {
+            if (tx > 0)
+            {
                 size_t left = idx - 1;
                 candidates.emplace_back(result.tile_shift_x[left], result.tile_shift_y[left]);
             }
-            if (ty > 0) {
+            if (ty > 0)
+            {
                 size_t top = idx - result.tiles_x;
                 candidates.emplace_back(result.tile_shift_x[top], result.tile_shift_y[top]);
             }
-            if (tx > 0 && ty > 0) {
+            if (tx > 0 && ty > 0)
+            {
                 size_t left = idx - 1;
                 size_t top = idx - result.tiles_x;
                 candidates.emplace_back((result.tile_shift_x[left] + result.tile_shift_x[top]) / 2,
@@ -305,14 +342,18 @@ void RefineTileFieldDense(const FloatImage& reference,
             float best_score = std::numeric_limits<float>::max();
             int best_x = result.shift_x;
             int best_y = result.shift_y;
-            for (auto candidate : candidates) {
-                for (int dy = candidate.second - local_radius; dy <= candidate.second + local_radius; ++dy) {
-                    for (int dx = candidate.first - local_radius; dx <= candidate.first + local_radius; ++dx) {
+            for (auto candidate : candidates)
+            {
+                for (int dy = candidate.second - local_radius; dy <= candidate.second + local_radius; ++dy)
+                {
+                    for (int dx = candidate.first - local_radius; dx <= candidate.first + local_radius; ++dx)
+                    {
                         int snapped_dx = SnapToPeriod(dx, result.cfa_period);
                         int snapped_dy = SnapToPeriod(dy, result.cfa_period);
                         float score = TileSad(reference, comparison, x0, y0, tile_size, tile_size,
                                               snapped_dx, snapped_dy, sample_step);
-                        if (score < best_score) {
+                        if (score < best_score)
+                        {
                             best_score = score;
                             best_x = snapped_dx;
                             best_y = snapped_dy;
@@ -343,13 +384,17 @@ void CorrectUpsamplingError(const FloatImage& ref,
                              std::vector<int16_t>& out_x,
                              std::vector<int16_t>& out_y)
 {
-    for (uint32_t ty = 0; ty < tiles_y; ++ty) {
-        for (uint32_t tx = 0; tx < tiles_x; ++tx) {
+    for (uint32_t ty = 0; ty < tiles_y; ++ty)
+    {
+        for (uint32_t tx = 0; tx < tiles_x; ++tx)
+        {
             size_t idx = static_cast<size_t>(ty) * tiles_x + tx;
 
             // 3 candidates: own, left/right neighbor, top/bottom neighbor
-            int cand_x[3] = {static_cast<int>(tx), static_cast<int>(tx), static_cast<int>(tx)};
-            int cand_y[3] = {static_cast<int>(ty), static_cast<int>(ty), static_cast<int>(ty)};
+            int cand_x[3] =
+            {static_cast<int>(tx), static_cast<int>(tx), static_cast<int>(tx)};
+            int cand_y[3] =
+            {static_cast<int>(ty), static_cast<int>(ty), static_cast<int>(ty)};
             cand_x[1] = std::max(0, std::min(static_cast<int>(tiles_x) - 1,
                 static_cast<int>(tx) + ((tx % 2 == 0) ? -1 : 1)));
             cand_y[2] = std::max(0, std::min(static_cast<int>(tiles_y) - 1,
@@ -359,7 +404,8 @@ void CorrectUpsamplingError(const FloatImage& ref,
             int best_dx = prev_x[idx];
             int best_dy = prev_y[idx];
 
-            for (int c = 0; c < 3; ++c) {
+            for (int c = 0; c < 3; ++c)
+            {
                 size_t cidx = static_cast<size_t>(cand_y[c]) * tiles_x + static_cast<uint32_t>(cand_x[c]);
                 int dx = prev_x[cidx];
                 int dy = prev_y[cidx];
@@ -367,7 +413,8 @@ void CorrectUpsamplingError(const FloatImage& ref,
                     tx * half_tile, ty * half_tile,
                     tile_size, tile_size,
                     dx, dy, sample_step, weight_ssd > 0);
-                if (score < best_score) {
+                if (score < best_score)
+                {
                     best_score = score;
                     best_dx = dx;
                     best_dy = dy;
@@ -395,8 +442,10 @@ void SearchDense5x5(const FloatImage& ref,
                      std::vector<int16_t>& out_y)
 {
     constexpr int kSearchDist = 2;
-    for (uint32_t ty = 0; ty < tiles_y; ++ty) {
-        for (uint32_t tx = 0; tx < tiles_x; ++tx) {
+    for (uint32_t ty = 0; ty < tiles_y; ++ty)
+    {
+        for (uint32_t tx = 0; tx < tiles_x; ++tx)
+        {
             size_t idx = static_cast<size_t>(ty) * tiles_x + tx;
             int sx0 = seed_x[idx];
             int sy0 = seed_y[idx];
@@ -405,15 +454,18 @@ void SearchDense5x5(const FloatImage& ref,
             int best_x = sx0;
             int best_y = sy0;
 
-            for (int dy = sy0 - kSearchDist; dy <= sy0 + kSearchDist; ++dy) {
-                for (int dx = sx0 - kSearchDist; dx <= sx0 + kSearchDist; ++dx) {
+            for (int dy = sy0 - kSearchDist; dy <= sy0 + kSearchDist; ++dy)
+            {
+                for (int dx = sx0 - kSearchDist; dx <= sx0 + kSearchDist; ++dx)
+                {
                     int sx = SnapToPeriod(dx, cfa_period);
                     int sy = SnapToPeriod(dy, cfa_period);
                     float score = TileCost(ref, cmp,
                         tx * half_tile, ty * half_tile,
                         tile_size, tile_size,
                         sx, sy, sample_step, weight_ssd > 0);
-                    if (score < best_score) {
+                    if (score < best_score)
+                    {
                         best_score = score;
                         best_x = sx;
                         best_y = sy;
@@ -446,10 +498,13 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
     float global_best = std::numeric_limits<float>::max();
     const uint32_t cfa = std::max<uint32_t>(1, params.cfa_period);
     const int global_step = std::max(2, static_cast<int>(cfa) * 2);
-    for (int dy = -coarse_max_shift; dy <= coarse_max_shift; ++dy) {
-        for (int dx = -coarse_max_shift; dx <= coarse_max_shift; ++dx) {
+    for (int dy = -coarse_max_shift; dy <= coarse_max_shift; ++dy)
+    {
+        for (int dx = -coarse_max_shift; dx <= coarse_max_shift; ++dx)
+        {
             float score = SparseSad(coarsest_ref, coarsest_cmp, dx, dy, global_step);
-            if (score < global_best) {
+            if (score < global_best)
+            {
                 global_best = score;
                 global_dx = dx;
                 global_dy = dy;
@@ -470,7 +525,8 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
     cur.shift_y = global_dy;
     cur.confidence = 1.0f;
 
-    for (int level = n_levels - 1; level >= 0; --level) {
+    for (int level = n_levels - 1; level >= 0; --level)
+    {
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
         const uint32_t tile_size = static_cast<uint32_t>(
@@ -485,9 +541,12 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
         // Upsample previous alignment
         std::vector<int16_t> prev_x(static_cast<size_t>(tiles_x) * tiles_y, 0);
         std::vector<int16_t> prev_y(static_cast<size_t>(tiles_x) * tiles_y, 0);
-        if (downscale != 0) {
-            for (uint32_t ty = 0; ty < tiles_y; ++ty) {
-                for (uint32_t tx = 0; tx < tiles_x; ++tx) {
+        if (downscale != 0)
+        {
+            for (uint32_t ty = 0; ty < tiles_y; ++ty)
+            {
+                for (uint32_t tx = 0; tx < tiles_x; ++tx)
+                {
                     uint32_t px = std::min(cur.tiles_x - 1, tx / 2);
                     uint32_t py = std::min(cur.tiles_y - 1, ty / 2);
                     size_t dst = static_cast<size_t>(ty) * tiles_x + tx;
@@ -504,11 +563,13 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
         // Step 1: correct_upsampling_error — test 3 candidates after upsampling
         std::vector<int16_t> corrected_x(static_cast<size_t>(tiles_x) * tiles_y);
         std::vector<int16_t> corrected_y(static_cast<size_t>(tiles_x) * tiles_y);
-        if (downscale != 0) {
+        if (downscale != 0)
+        {
             CorrectUpsamplingError(ref, cmp, tiles_x, tiles_y, tile_size, half_tile,
                                    prev_x, prev_y, sample_step, weight_ssd,
                                    corrected_x, corrected_y);
-        } else {
+        } else
+        {
             corrected_x = prev_x;
             corrected_y = prev_y;
         }
@@ -561,7 +622,8 @@ float InterpolateTileShift(const std::vector<int16_t>& field,
     float tx = fx - static_cast<float>(x0);
     float ty = fy - static_cast<float>(y0);
 
-    auto sample = [&](int ix, int iy) -> float {
+    auto sample = [&](int ix, int iy) -> float
+    {
         ix = std::max(0, std::min(ix, static_cast<int>(tiles_x) - 1));
         iy = std::max(0, std::min(iy, static_cast<int>(tiles_y) - 1));
         size_t idx = static_cast<size_t>(iy) * tiles_x + static_cast<uint32_t>(ix);
@@ -577,7 +639,8 @@ float InterpolateTileShift(const std::vector<int16_t>& field,
     return a * (1.0f - ty) + b * ty;
 }
 
-int ClampInt(int v, int lo, int hi) {
+int ClampInt(int v, int lo, int hi)
+{
     return std::max(lo, std::min(v, hi));
 }
 
@@ -587,16 +650,20 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
                                     const FloatImage& comparison,
                                     const AlignParams& params)
 {
-    std::vector<FloatImage> ref_pyr{reference};
-    std::vector<FloatImage> cmp_pyr{comparison};
+    std::vector<FloatImage> ref_pyr
+    {reference};
+    std::vector<FloatImage> cmp_pyr
+    {comparison};
     while (ref_pyr.back().width > static_cast<uint32_t>(AlignConstants::kPyramidMinDimension) &&
            ref_pyr.back().height > static_cast<uint32_t>(AlignConstants::kPyramidMinDimension) &&
-           static_cast<int>(ref_pyr.size()) < params.pyramid_levels) {
+           static_cast<int>(ref_pyr.size()) < params.pyramid_levels)
+           {
         ref_pyr.push_back(Downsample2x(ref_pyr.back()));
         cmp_pyr.push_back(Downsample2x(cmp_pyr.back()));
     }
 
-    if (params.mode == AlignmentMode::DenseTile) {
+    if (params.mode == AlignmentMode::DenseTile)
+    {
         return EstimateDenseTileField(ref_pyr, cmp_pyr, params);
     }
 
@@ -604,7 +671,8 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
     int best_y = 0;
     float best_score = std::numeric_limits<float>::max();
 
-    for (int level = static_cast<int>(ref_pyr.size()) - 1; level >= 0; --level) {
+    for (int level = static_cast<int>(ref_pyr.size()) - 1; level >= 0; --level)
+    {
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
 
@@ -617,10 +685,13 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
         float level_best = std::numeric_limits<float>::max();
         int level_x = best_x;
         int level_y = best_y;
-        for (int dy = best_y - radius; dy <= best_y + radius; ++dy) {
-            for (int dx = best_x - radius; dx <= best_x + radius; ++dx) {
+        for (int dy = best_y - radius; dy <= best_y + radius; ++dy)
+        {
+            for (int dx = best_x - radius; dx <= best_x + radius; ++dx)
+            {
                 float score = SparseSad(ref, cmp, dx, dy, step);
-                if (score < level_best) {
+                if (score < level_best)
+                {
                     level_best = score;
                     level_x = dx;
                     level_y = dy;
@@ -636,17 +707,21 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
     out.shift_x = SnapToPeriod(best_x, params.cfa_period);
     out.shift_y = SnapToPeriod(best_y, params.cfa_period);
     out.confidence = 1.0f / (1.0f + best_score);
-    if (params.mode == AlignmentMode::DenseTile) {
+    if (params.mode == AlignmentMode::DenseTile)
+    {
         RefineTileFieldDense(reference, comparison, params, out);
-    } else {
+    } else
+    {
         RefineTileField(reference, comparison, params, out);
     }
     return out;
 }
 
-FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignment) {
+FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignment)
+{
     if (alignment.tile_shift_x.empty() || alignment.tile_shift_y.empty() ||
-        alignment.tiles_x == 0 || alignment.tiles_y == 0 || alignment.tile_size <= 0) {
+        alignment.tiles_x == 0 || alignment.tiles_y == 0 || alignment.tile_size <= 0)
+        {
         return WarpTranslate(source,
                                      static_cast<float>(alignment.shift_x),
                                      static_cast<float>(alignment.shift_y));
@@ -658,8 +733,10 @@ FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignmen
     out.channels = source.channels;
     out.data.resize(source.data.size(), 0.0f);
 
-    for (uint32_t y = 0; y < source.height; ++y) {
-        for (uint32_t x = 0; x < source.width; ++x) {
+    for (uint32_t y = 0; y < source.height; ++y)
+    {
+        for (uint32_t x = 0; x < source.width; ++x)
+        {
             float shift_x = InterpolateTileShift(alignment.tile_shift_x,
                                                   alignment.tiles_x,
                                                   alignment.tiles_y,
@@ -677,12 +754,14 @@ FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignmen
 
             // RAW mosaic: snap interpolated shift to CFA period then do integer copy.
             // This preserves Bayer phase perfectly while still leveraging the tile field.
-            if (source.channels == 1 || alignment.cfa_period > 1) {
+            if (source.channels == 1 || alignment.cfa_period > 1)
+            {
                 int isx = SnapToPeriod(static_cast<int>(std::lround(shift_x)), alignment.cfa_period);
                 int isy = SnapToPeriod(static_cast<int>(std::lround(shift_y)), alignment.cfa_period);
                 int sx = ClampInt(static_cast<int>(x) - isx, 0, static_cast<int>(source.width) - 1);
                 int sy = ClampInt(static_cast<int>(y) - isy, 0, static_cast<int>(source.height) - 1);
-                for (uint32_t c = 0; c < source.channels; ++c) {
+                for (uint32_t c = 0; c < source.channels; ++c)
+                {
                     out.At(x, y, c) = source.At(static_cast<uint32_t>(sx), static_cast<uint32_t>(sy), c);
                 }
                 continue;
@@ -697,7 +776,8 @@ FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignmen
             float tx = sx - static_cast<float>(x0);
             float ty = sy - static_cast<float>(y0);
 
-            for (uint32_t c = 0; c < source.channels; ++c) {
+            for (uint32_t c = 0; c < source.channels; ++c)
+            {
                 float p00 = source.At(static_cast<uint32_t>(ClampInt(x0, 0, static_cast<int>(source.width) - 1)),
                                       static_cast<uint32_t>(ClampInt(y0, 0, static_cast<int>(source.height) - 1)), c);
                 float p10 = source.At(static_cast<uint32_t>(ClampInt(x1, 0, static_cast<int>(source.width) - 1)),

@@ -1,13 +1,15 @@
-#pragma once
+﻿#pragma once
 #include "burstmerge/api.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/core/float_image.h"
 
 #include <vector>
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-struct FrequencyConstants {
+struct FrequencyConstants
+{
     static constexpr int32_t kFourierSearchGrid = 7;        // 7x7 search
     static constexpr double kFourierSearchRange = 0.5;       // +/-0.5 pixel
     static constexpr int32_t kMinTileSize = 16;
@@ -19,7 +21,8 @@ struct FrequencyConstants {
     static constexpr int32_t kLaplacianBlurDiv = 16;
 };
 
-struct FrequencyMergeParams {
+struct FrequencyMergeParams
+{
     FrequencyMode mode = FrequencyMode::Laplacian;
     float noise_reduction = 13.0f;
     int32_t tile_size = 32;

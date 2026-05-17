@@ -1,4 +1,4 @@
-#include <algorithm>
+﻿#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -18,20 +18,23 @@
 #define BM_PCLOSE pclose
 #endif
 
-namespace {
+namespace
+{
 
 int g_checks = 0;
 int g_failed = 0;
 
 #define CHECK(cond, msg) do { \
     ++g_checks; \
-    if (!(cond)) { \
+    if (!(cond))
+    { \
         std::cerr << "  FAIL [" << __LINE__ << "]: " << msg << std::endl; \
         ++g_failed; \
     } \
 } while (0)
 
-struct SampleExpectation {
+struct SampleExpectation
+{
     const char* relative_path;
     uint32_t expected_width;
     uint32_t expected_height;
@@ -39,8 +42,10 @@ struct SampleExpectation {
     const char* note;
 };
 
-bool SupportsRoundTrip(const burstmerge::RawImage& image) {
-    switch (image.pixels.format) {
+bool SupportsRoundTrip(const burstmerge::RawImage& image)
+{
+    switch (image.pixels.format)
+    {
         case burstmerge::PixelFormat::R16_Uint:
         case burstmerge::PixelFormat::R32_Float:
             return true;
@@ -49,14 +54,16 @@ bool SupportsRoundTrip(const burstmerge::RawImage& image) {
     }
 }
 
-bool FileExists(const std::string& path) {
+bool FileExists(const std::string& path)
+{
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return false;
     std::fclose(f);
     return true;
 }
 
-long FileSize(const std::string& path) {
+long FileSize(const std::string& path)
+{
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return -1;
     std::fseek(f, 0, SEEK_END);
@@ -65,7 +72,8 @@ long FileSize(const std::string& path) {
     return size;
 }
 
-void CreateDirectoryIfNotExist(const std::string& path) {
+void CreateDirectoryIfNotExist(const std::string& path)
+{
 #ifdef _WIN32
     CreateDirectoryA(path.c_str(), nullptr);
 #else
@@ -73,51 +81,62 @@ void CreateDirectoryIfNotExist(const std::string& path) {
 #endif
 }
 
-std::string BaseName(const std::string& path) {
+std::string BaseName(const std::string& path)
+{
     size_t pos = path.find_last_of("/\\");
     return pos == std::string::npos ? path : path.substr(pos + 1);
 }
 
-std::string NormalizeWindowsPath(std::string path) {
+std::string NormalizeWindowsPath(std::string path)
+{
     std::replace(path.begin(), path.end(), '/', '\\');
     return path;
 }
 
-std::string RunCommand(const std::string& command) {
+std::string RunCommand(const std::string& command)
+{
     FILE* pipe = BM_POPEN(command.c_str(), "r");
-    if (!pipe) return {};
+    if (!pipe) return
+    {};
 
-    std::array<char, 512> buffer{};
+    std::array<char, 512> buffer
+    {};
     std::string result;
-    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
+    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe))
+    {
         result += buffer.data();
     }
     BM_PCLOSE(pipe);
     return result;
 }
 
-bool ExifToolAvailable() {
+bool ExifToolAvailable()
+{
     static int cached = -1;
-    if (cached == -1) {
+    if (cached == -1)
+    {
         cached = RunCommand("exiftool -ver").empty() ? 0 : 1;
     }
     return cached == 1;
 }
 
-std::string ExifField(const std::string& file, const char* field) {
+std::string ExifField(const std::string& file, const char* field)
+{
     std::string command = "exiftool -s3 -";
     command += field;
     command += " \"";
     command += NormalizeWindowsPath(file);
     command += "\"";
     std::string value = RunCommand(command);
-    while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) {
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r'))
+    {
         value.pop_back();
     }
     return value;
 }
 
-void CheckMetadata(const burstmerge::RawImage& image, const SampleExpectation& sample) {
+void CheckMetadata(const burstmerge::RawImage& image, const SampleExpectation& sample)
+{
     CHECK(image.metadata.width == sample.expected_width, std::string(sample.relative_path) + " width");
     CHECK(image.metadata.height == sample.expected_height, std::string(sample.relative_path) + " height");
     CHECK(image.metadata.white_level > 0, std::string(sample.relative_path) + " white_level > 0");
@@ -132,8 +151,10 @@ void CheckMetadata(const burstmerge::RawImage& image, const SampleExpectation& s
 
     bool has_non_zero_pixel = false;
     size_t scan = std::min<size_t>(image.pixels.size, 4096);
-    for (size_t i = 0; i < scan; ++i) {
-        if (image.pixels.data[i] != std::byte{0}) {
+    for (size_t i = 0; i < scan; ++i)
+    {
+        if (image.pixels.data[i] != std::byte
+        {0}) {
             has_non_zero_pixel = true;
             break;
         }
@@ -142,11 +163,13 @@ void CheckMetadata(const burstmerge::RawImage& image, const SampleExpectation& s
 
     CHECK(image.metadata.mosaic_pattern_width == 2 || image.metadata.mosaic_pattern_width == 6,
           std::string(sample.relative_path) + " mosaic pattern width is supported");
-    for (float color_factor : image.metadata.color_factors) {
+    for (float color_factor : image.metadata.color_factors)
+    {
         CHECK(color_factor > 0.0f, std::string(sample.relative_path) + " color factor > 0");
     }
 
-    switch (image.metadata.dng_pixel_type) {
+    switch (image.metadata.dng_pixel_type)
+    {
         case burstmerge::DngPixelType::Uint8:
             CHECK(image.pixels.format == burstmerge::PixelFormat::R8_Uint,
                   std::string(sample.relative_path) + " Uint8 maps to R8_Uint");
@@ -164,7 +187,8 @@ void CheckMetadata(const burstmerge::RawImage& image, const SampleExpectation& s
     }
 }
 
-void TestDngRoundTrips() {
+void TestDngRoundTrips()
+{
     std::cout << "[test] DNG read/write round trips..." << std::endl;
 
     const std::string root = TEST_DATA_DIR;
@@ -172,7 +196,8 @@ void TestDngRoundTrips() {
     CreateDirectoryIfNotExist(root + "/build");
     CreateDirectoryIfNotExist(out_dir);
 
-    const std::vector<SampleExpectation> samples = {
+    const std::vector<SampleExpectation> samples =
+    {
         {"3rdparty/dng_sdk/sample_files/04_PGTM2_per_profile.dng", 1000, 1000, true, "SDK per-profile sample"},
         {"3rdparty/dng_sdk/sample_files/05_PGTM2_unsigned8.dng", 200, 200, true, "SDK sample; round-trip support depends on decoded host format"},
         {"3rdparty/dng_sdk/sample_files/06_PGTM2_unsigned16.dng", 200, 200, true, "SDK uint16 sample"},
@@ -185,24 +210,29 @@ void TestDngRoundTrips() {
     int read_ok = 0;
     int write_ok = 0;
     const bool has_exiftool = ExifToolAvailable();
-    if (!has_exiftool) {
+    if (!has_exiftool)
+    {
         std::cout << "  SKIP: exiftool not available; metadata field checks disabled" << std::endl;
     }
 
-    for (const auto& sample : samples) {
+    for (const auto& sample : samples)
+    {
         const std::string in_path = root + "/" + sample.relative_path;
         const std::string name = BaseName(in_path);
 
-        if (!FileExists(in_path)) {
+        if (!FileExists(in_path))
+        {
             CHECK(false, std::string(sample.relative_path) + " exists");
             continue;
         }
 
-        try {
+        try
+        {
             burstmerge::DngReader reader(in_path.c_str());
             auto image = reader.Read();
 
-            if (!sample.expect_read_success) {
+            if (!sample.expect_read_success)
+            {
                 CHECK(false, std::string(sample.relative_path) + " should fail: " + sample.note);
                 continue;
             }
@@ -211,16 +241,19 @@ void TestDngRoundTrips() {
             std::cout << "  Read OK: " << name << " (" << image.metadata.width << "x" << image.metadata.height << ")" << std::endl;
             CheckMetadata(image, sample);
 
-            if (!SupportsRoundTrip(image)) {
+            if (!SupportsRoundTrip(image))
+            {
                 CHECK(image.pixels.format == burstmerge::PixelFormat::R8_Uint ||
                       image.pixels.format == burstmerge::PixelFormat::RGBA32_Float,
                       name + " unsupported roundtrip format recognized");
                 burstmerge::io::DngNegativeHolder* holder = image.metadata.dng_negative;
-                try {
+                try
+                {
                     burstmerge::DngWriter writer(holder);
                     writer.Write((out_dir + "/unsupported_" + name).c_str(), image);
                     CHECK(false, name + " unsupported roundtrip should throw");
-                } catch (const std::exception&) {
+                } catch (const std::exception&)
+                {
                     image.metadata.dng_negative = nullptr;
                     CHECK(true, name + " unsupported roundtrip throws");
                 }
@@ -246,25 +279,33 @@ void TestDngRoundTrips() {
             CHECK(reread.pixels.size > 0, name + " reread pixels exist");
             ++write_ok;
 
-            if (has_exiftool) {
-                const char* fields[] = {"Make", "Model", "ISO"};
-                for (const char* field : fields) {
+            if (has_exiftool)
+            {
+                const char* fields[] =
+                {"Make", "Model", "ISO"};
+                for (const char* field : fields)
+                {
                     const std::string original = ExifField(in_path, field);
                     const std::string written = ExifField(out_path, field);
-                    if (!original.empty()) {
+                    if (!original.empty())
+                    {
                         CHECK(original == written, name + std::string(" EXIF ") + field + " preserved");
                     }
                 }
             }
 
             std::remove(out_path.c_str());
-        } catch (const std::exception& e) {
-            if (sample.expect_read_success) {
+        } catch (const std::exception& e)
+        {
+            if (sample.expect_read_success)
+            {
                 CHECK(false, std::string(sample.relative_path) + " threw: " + e.what());
-            } else {
+            } else
+            {
                 std::cout << "  Expected failure: " << name << " (" << e.what() << ")" << std::endl;
             }
-        } catch (...) {
+        } catch (...)
+        {
             CHECK(!sample.expect_read_success, std::string(sample.relative_path) + " threw unknown exception");
         }
     }
@@ -273,27 +314,33 @@ void TestDngRoundTrips() {
     CHECK(write_ok >= 4, "at least four DNG samples write and reread successfully");
 }
 
-void TestInvalidInput() {
+void TestInvalidInput()
+{
     std::cout << "[test] invalid DNG input handling..." << std::endl;
 
-    try {
+    try
+    {
         burstmerge::DngReader reader("/definitely/not/a/real/file.dng");
         (void)reader.Read();
         CHECK(false, "nonexistent file should throw");
-    } catch (...) {
+    } catch (...)
+    {
         CHECK(true, "nonexistent file throws without crashing");
     }
 }
 
-bool OptionalConverterTestsEnabled() {
+bool OptionalConverterTestsEnabled()
+{
     const char* value = std::getenv("BURSTMERGE_TEST_DNG_CONVERTER");
     return value && std::strcmp(value, "0") != 0;
 }
 
-void TestAdobeDngConverterOptional() {
+void TestAdobeDngConverterOptional()
+{
 #ifdef _WIN32
     std::cout << "[test] Adobe DNG Converter API..." << std::endl;
-    if (!OptionalConverterTestsEnabled()) {
+    if (!OptionalConverterTestsEnabled())
+    {
         std::cout << "  SKIP: set BURSTMERGE_TEST_DNG_CONVERTER=1 to enable external converter test" << std::endl;
         return;
     }
@@ -305,7 +352,8 @@ void TestAdobeDngConverterOptional() {
     CreateDirectoryIfNotExist(root + "/build");
     CreateDirectoryIfNotExist(out_dir);
 
-    if (!FileExists(arw_path)) {
+    if (!FileExists(arw_path))
+    {
         std::cout << "  SKIP: ARW sample not found" << std::endl;
         return;
     }
@@ -313,15 +361,18 @@ void TestAdobeDngConverterOptional() {
     std::remove(expected_output.c_str());
 
     std::vector<std::string> output_files;
-    const bool ok = burstmerge::RunAdobeDngConverter({arw_path}, out_dir, output_files);
+    const bool ok = burstmerge::RunAdobeDngConverter(
+    {arw_path}, out_dir, output_files);
     CHECK(ok, "Adobe DNG Converter returns success");
     CHECK(output_files.size() == 1, "Adobe DNG Converter produced one file");
-    if (!output_files.empty()) {
+    if (!output_files.empty())
+    {
         CHECK(NormalizeWindowsPath(output_files[0]) == NormalizeWindowsPath(expected_output),
               "Adobe DNG Converter output path is deterministic");
     }
 
-    for (const auto& output : output_files) {
+    for (const auto& output : output_files)
+    {
         CHECK(FileExists(output), "converted DNG exists");
         burstmerge::DngReader reader(output.c_str());
         auto image = reader.Read();
@@ -334,7 +385,8 @@ void TestAdobeDngConverterOptional() {
 
 } // namespace
 
-int main() {
+int main()
+{
     TestDngRoundTrips();
     TestInvalidInput();
     TestAdobeDngConverterOptional();

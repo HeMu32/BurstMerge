@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -6,15 +6,18 @@
 #include <array>
 #include "burstmerge/internal/core/image_buffer.h"
 
-namespace burstmerge {
-namespace io {
+namespace burstmerge
+{
+namespace io
+{
 struct DngNegativeHolder;
 }
 
 // Maps to our internal Dng pixel types.
 // DNG SDK has no separate 12-bit pixel type; 12/14/16-bit data all use
 // ttShort (16-bit container). Effective bit depth is conveyed via white_level.
-enum class DngPixelType : uint32_t {
+enum class DngPixelType : uint32_t
+{
     Uint8  = 1,
     Uint16 = 2,
     Int16  = 3,
@@ -22,8 +25,10 @@ enum class DngPixelType : uint32_t {
     Float32 = 5,
 };
 
-static inline PixelFormat DngPixelTypeToFormat(DngPixelType dpt) {
-    switch (dpt) {
+static inline PixelFormat DngPixelTypeToFormat(DngPixelType dpt)
+{
+    switch (dpt)
+    {
         case DngPixelType::Uint8: return PixelFormat::R8_Uint;
         case DngPixelType::Uint16: return PixelFormat::R16_Uint;
         case DngPixelType::Float32: return PixelFormat::R32_Float;
@@ -31,8 +36,10 @@ static inline PixelFormat DngPixelTypeToFormat(DngPixelType dpt) {
     }
 }
 
-static inline uint32_t DngPixelTypeSize(DngPixelType dpt) {
-    switch (dpt) {
+static inline uint32_t DngPixelTypeSize(DngPixelType dpt)
+{
+    switch (dpt)
+    {
         case DngPixelType::Uint8:  return 1;
         case DngPixelType::Uint16: return 2;
         case DngPixelType::Int16:  return 2;
@@ -42,14 +49,18 @@ static inline uint32_t DngPixelTypeSize(DngPixelType dpt) {
     }
 }
 
-struct RawMetadata {
+struct RawMetadata
+{
     uint32_t  width               = 0;
     uint32_t  height              = 0;
     uint32_t  mosaic_pattern_width = 2;
-    std::array<uint16_t, 36> mosaic_pattern{};
+    std::array<uint16_t, 36> mosaic_pattern
+    {};
     uint32_t  white_level         = 65535;
-    float     black_level[4]      = {};
-    float     color_factors[4]    = {1.0f, 1.0f, 1.0f, 1.0f};
+    float     black_level[4]      =
+    {};
+    float     color_factors[4]    =
+    {1.0f, 1.0f, 1.0f, 1.0f};
     float     exposure_bias       = 0.0f;
     float     iso_exposure_time   = 0.0f;
     DngPixelType dng_pixel_type   = DngPixelType::Uint16;
@@ -66,12 +77,14 @@ struct RawMetadata {
     RawMetadata& operator=(RawMetadata&& other) noexcept;
 };
 
-struct RawImage {
+struct RawImage
+{
     RawMetadata  metadata;
     HostBuffer   pixels;
 };
 
-class DngReader {
+class DngReader
+{
 public:
     explicit DngReader(const char* path);
     ~DngReader();
@@ -87,7 +100,8 @@ private:
     void* impl_ = nullptr;
 };
 
-class DngWriter {
+class DngWriter
+{
 public:
     // Takes ownership: ref_negative will be set to nullptr after construction
     explicit DngWriter(io::DngNegativeHolder*& ref_negative);
@@ -111,7 +125,8 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
                           std::vector<std::string>& output_files);
 #endif
 
-namespace io {
+namespace io
+{
 void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level);
 void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4]);
 }

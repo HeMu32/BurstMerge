@@ -1,15 +1,20 @@
-#pragma once
+﻿#pragma once
 #include <cstdint>
 #include <cstddef>
 #include <memory>
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-enum class MemoryLocation { Host, Device };
-enum class PixelFormat    { R8_Uint, R16_Uint, R32_Float, RGBA32_Float };
-enum class BufferType     { Staging, DeviceLocal };
+enum class MemoryLocation
+{ Host, Device };
+enum class PixelFormat
+{ R8_Uint, R16_Uint, R32_Float, RGBA32_Float };
+enum class BufferType
+{ Staging, DeviceLocal };
 
-struct HostBuffer {
+struct HostBuffer
+{
     std::byte*  data        = nullptr;
     size_t      size        = 0;
     PixelFormat format      = PixelFormat::R16_Uint;
@@ -17,7 +22,8 @@ struct HostBuffer {
     uint32_t    height      = 0;
     uint32_t    row_stride  = 0;
 
-    ~HostBuffer() { delete[] data; data = nullptr; }
+    ~HostBuffer()
+    { delete[] data; data = nullptr; }
     HostBuffer() = default;
     HostBuffer(const HostBuffer&) = delete;
     HostBuffer& operator=(const HostBuffer&) = delete;
@@ -31,8 +37,10 @@ struct HostBuffer {
         other.height = 0;
         other.row_stride = 0;
     }
-    HostBuffer& operator=(HostBuffer&& other) noexcept {
-        if (this != &other) {
+    HostBuffer& operator=(HostBuffer&& other) noexcept
+    {
+        if (this != &other)
+        {
             delete[] data;
             data = other.data; other.data = nullptr;
             size = other.size; other.size = 0;
@@ -45,7 +53,8 @@ struct HostBuffer {
     }
 };
 
-struct DeviceBuffer {
+struct DeviceBuffer
+{
     uint64_t       handle      = 0;
     BufferType     type        = BufferType::DeviceLocal;
     PixelFormat    format      = PixelFormat::R32_Float;

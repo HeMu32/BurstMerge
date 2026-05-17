@@ -1,4 +1,4 @@
-#include <cstdio>
+﻿#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -23,7 +23,8 @@ static int g_failed = 0;
 
 #define CHECK(cond, msg) do { \
     g_tests++; \
-    if (!(cond)) { \
+    if (!(cond))
+    { \
         std::cerr << "  FAIL [" << __LINE__ << "]: " << msg << std::endl; \
         g_failed++; \
     } \
@@ -35,16 +36,19 @@ static int g_failed = 0;
 // ============================================================
 // 1. Internal type tests
 // ============================================================
-static void test_types() {
+static void test_types()
+{
     std::cout << "[test] internal types..." << std::endl;
 
     // TileInfo defaults
-    burstmerge::TileInfo ti{};
+    burstmerge::TileInfo ti
+    {};
     CHECK_EQ(ti.tile_x, 0u, "TileInfo.tile_x default");
     CHECK_EQ(ti.width, 0u, "TileInfo.width default");
 
     // Settings (public API) defaults
-    burstmerge::Settings s{};
+    burstmerge::Settings s
+    {};
     CHECK_EQ(s.tile_size, 32, "Settings.tile_size default");
     CHECK_EQ(s.search_distance, 64, "Settings.search_distance default");
     CHECK_EQ(s.noise_reduction, 13.0f, "Settings.noise_reduction default");
@@ -54,7 +58,8 @@ static void test_types() {
            "Settings.exposure_mode default Off");
 
     // RawMetadata defaults
-    burstmerge::RawMetadata rm{};
+    burstmerge::RawMetadata rm
+    {};
     CHECK_EQ(rm.width, 0u, "RawMetadata.width default");
     CHECK_EQ(rm.white_level, 65535u, "RawMetadata.white_level default");
     CHECK_EQ(rm.color_factors[0], 1.0f, "RawMetadata.color_factors[0] default");
@@ -69,11 +74,13 @@ static void test_types() {
 // ============================================================
 // 2. HostBuffer tests
 // ============================================================
-static void test_hostbuffer() {
+static void test_hostbuffer()
+{
     std::cout << "[test] HostBuffer..." << std::endl;
 
     // Default construction
-    burstmerge::HostBuffer hb{};
+    burstmerge::HostBuffer hb
+    {};
     CHECK_EQ(hb.data, nullptr, "HostBuffer default data is null");
     CHECK_EQ(hb.size, 0u, "HostBuffer default size is 0");
 
@@ -87,7 +94,8 @@ static void test_hostbuffer() {
     CHECK_NE(hb.data, nullptr, "HostBuffer allocated data not null");
 
     // Fill with pattern
-    for (size_t i = 0; i < hb.size; i++) {
+    for (size_t i = 0; i < hb.size; i++)
+    {
         hb.data[i] = static_cast<std::byte>(i & 0xFF);
     }
 
@@ -103,13 +111,15 @@ static void test_hostbuffer() {
     CHECK_EQ(hb2.height, 50u, "HostBuffer moved-to height");
 
     // Verify moved data integrity
-    for (size_t i = 0; i < hb2.size && i < 10; i++) {
+    for (size_t i = 0; i < hb2.size && i < 10; i++)
+    {
         CHECK_EQ(static_cast<int>(hb2.data[i]), static_cast<int>(i & 0xFF),
                  "HostBuffer moved data integrity");
     }
 
     // Move assign
-    burstmerge::HostBuffer hb3{};
+    burstmerge::HostBuffer hb3
+    {};
     hb3 = std::move(hb2);
     CHECK_EQ(hb2.data, nullptr, "HostBuffer move-assign source nullified");
     CHECK_NE(hb3.data, nullptr, "HostBuffer move-assign dest has data");
@@ -126,10 +136,12 @@ static void test_hostbuffer() {
 // ============================================================
 // 3. DeviceBuffer tests
 // ============================================================
-static void test_devicebuffer() {
+static void test_devicebuffer()
+{
     std::cout << "[test] DeviceBuffer..." << std::endl;
 
-    burstmerge::DeviceBuffer db{};
+    burstmerge::DeviceBuffer db
+    {};
     CHECK_EQ(db.handle, 0u, "DeviceBuffer.handle default");
     CHECK_EQ(db.width, 0u, "DeviceBuffer.width default");
     CHECK_EQ(db.height, 0u, "DeviceBuffer.height default");
@@ -149,7 +161,8 @@ static void test_devicebuffer() {
 // ============================================================
 // 4. DngReader tests
 // ============================================================
-static void test_dng_reader() {
+static void test_dng_reader()
+{
     std::cout << "[test] DngReader..." << std::endl;
 
     std::string sample_path = std::string(TEST_DATA_DIR)
@@ -157,7 +170,8 @@ static void test_dng_reader() {
 
     FILE* f = fopen(sample_path.c_str(), "rb");
     CHECK_NE(f, nullptr, "Sample DNG file exists");
-    if (!f) {
+    if (!f)
+    {
         std::cout << "  SKIP: sample file not found" << std::endl;
         return;
     }
@@ -189,15 +203,18 @@ static void test_dng_reader() {
     CHECK(image.pixels.size > 0, "DNG pixel data size > 0");
 
     bool has_data = false;
-    for (size_t i = 0; i < image.pixels.size && i < 1000; i++) {
-        if (image.pixels.data[i] != std::byte{0}) {
+    for (size_t i = 0; i < image.pixels.size && i < 1000; i++)
+    {
+        if (image.pixels.data[i] != std::byte
+        {0}) {
             has_data = true;
             break;
         }
     }
     CHECK(has_data, "DNG pixel data contains non-zero values");
 
-    switch (image.metadata.dng_pixel_type) {
+    switch (image.metadata.dng_pixel_type)
+    {
         case burstmerge::DngPixelType::Uint8:
             CHECK(image.pixels.format == burstmerge::PixelFormat::R8_Uint,
                   "Uint8 DNG maps to R8_Uint");
@@ -215,15 +232,18 @@ static void test_dng_reader() {
     }
 
     bool has_pattern = false;
-    for (int i = 0; i < 36; i++) {
-        if (image.metadata.mosaic_pattern[i] != 0) {
+    for (int i = 0; i < 36; i++)
+    {
+        if (image.metadata.mosaic_pattern[i] != 0)
+        {
             has_pattern = true;
             break;
         }
     }
     CHECK(has_pattern, "DNG mosaic pattern present");
 
-    for (int c = 0; c < 4; c++) {
+    for (int c = 0; c < 4; c++)
+    {
         CHECK(image.metadata.black_level[c] >= 0,
               "DNG black_level[" + std::to_string(c) + "] >= 0");
     }
@@ -234,7 +254,8 @@ static void test_dng_reader() {
 // ============================================================
 // 5. DngWriter round-trip test
 // ============================================================
-static void test_dng_writer_roundtrip() {
+static void test_dng_writer_roundtrip()
+{
     std::cout << "[test] DngWriter round-trip..." << std::endl;
 
     std::string sample_path = std::string(TEST_DATA_DIR)
@@ -243,7 +264,8 @@ static void test_dng_writer_roundtrip() {
         + "/build/test_roundtrip.dng";
 
     FILE* f = fopen(sample_path.c_str(), "rb");
-    if (!f) {
+    if (!f)
+    {
         std::cout << "  SKIP: sample file not found" << std::endl;
         return;
     }
@@ -267,7 +289,8 @@ static void test_dng_writer_roundtrip() {
     // Verify output file exists and has content
     f = fopen(out_path.c_str(), "rb");
     CHECK_NE(f, nullptr, "Output DNG file exists");
-    if (f) {
+    if (f)
+    {
         fseek(f, 0, SEEK_END);
         long out_size = ftell(f);
         fclose(f);
@@ -296,7 +319,8 @@ static void test_dng_writer_roundtrip() {
 // ============================================================
 // 6. C API tests
 // ============================================================
-static void test_c_api() {
+static void test_c_api()
+{
     std::cout << "[test] C API..." << std::endl;
 
     BM_Context ctx = BM_Create(0);
@@ -336,19 +360,23 @@ static void test_c_api() {
     std::cout << "  C API OK" << std::endl;
 }
 
-static void test_progress_callback() {
+static void test_progress_callback()
+{
     std::cout << "[test] progress callback..." << std::endl;
 
-    struct ProgressState {
+    struct ProgressState
+    {
         int calls = 0;
         float first = -1.0f;
         float last = -1.0f;
         std::string last_stage;
     } state;
 
-    auto callback = [](float percent, const char* stage, void* user) {
+    auto callback = [](float percent, const char* stage, void* user)
+    {
         auto* s = static_cast<ProgressState*>(user);
-        if (s->calls == 0) {
+        if (s->calls == 0)
+        {
             s->first = percent;
         }
         s->last = percent;
@@ -374,20 +402,24 @@ static void test_progress_callback() {
 // ============================================================
 // 7. Edge case tests
 // ============================================================
-static void test_edge_cases() {
+static void test_edge_cases()
+{
     std::cout << "[test] edge cases..." << std::endl;
 
     // DngReader with non-existent file (must not crash)
     {
         burstmerge::DngReader reader("/nonexistent/path.dng");
-        try {
+        try
+        {
             auto image = reader.Read();
             CHECK_EQ(image.pixels.data, nullptr, "Nonexistent file returns empty pixels");
             CHECK_EQ(image.metadata.dng_negative, nullptr,
                      "Nonexistent file has no negative");
-        } catch (const std::exception& e) {
+        } catch (const std::exception& e)
+        {
             std::cout << "  (non-existent file threw: " << e.what() << ")" << std::endl;
-        } catch (...) {
+        } catch (...)
+        {
             std::cout << "  (non-existent file threw unknown)" << std::endl;
         }
     }
@@ -395,20 +427,25 @@ static void test_edge_cases() {
     // DngWriter with null holder (singular ownership: must pass a variable)
     {
         burstmerge::io::DngNegativeHolder* null_holder = nullptr;
-        try {
+        try
+        {
             burstmerge::DngWriter writer(null_holder);
-            burstmerge::RawImage dummy{};
+            burstmerge::RawImage dummy
+            {};
             writer.Write("output.dng", dummy);
-        } catch (const std::exception& e) {
+        } catch (const std::exception& e)
+        {
             std::cout << "  (null writer threw: " << e.what() << ")" << std::endl;
-        } catch (...) {
+        } catch (...)
+        {
             std::cout << "  (null writer threw unknown)" << std::endl;
         }
     }
 
     // HostBuffer empty move + moved-from state fully reset
     {
-        burstmerge::HostBuffer empty{};
+        burstmerge::HostBuffer empty
+        {};
         burstmerge::HostBuffer moved(std::move(empty));
         CHECK_EQ(moved.data, nullptr, "Empty HostBuffer move produces null data");
         CHECK_EQ(moved.size, 0u, "Empty HostBuffer move produces 0 size");
@@ -416,7 +453,8 @@ static void test_edge_cases() {
 
     // RawMetadata empty move
     {
-        burstmerge::RawMetadata rm1{};
+        burstmerge::RawMetadata rm1
+        {};
         rm1.width = 100;
         rm1.height = 200;
         burstmerge::RawMetadata rm2(std::move(rm1));
@@ -441,10 +479,12 @@ static void test_edge_cases() {
 // ============================================================
 // 8. SubGraph type tests
 // ============================================================
-static void test_subgraph() {
+static void test_subgraph()
+{
     std::cout << "[test] SubGraph types..." << std::endl;
 
-    burstmerge::SubGraphNode sgn{};
+    burstmerge::SubGraphNode sgn
+    {};
     CHECK_EQ(sgn.input_handles.size(), 0u, "SubGraphNode empty inputs");
     CHECK_EQ(sgn.output_handles.size(), 0u, "SubGraphNode empty outputs");
 
@@ -464,24 +504,30 @@ static void test_subgraph() {
 // ============================================================
 // 9. Module parameter struct tests
 // ============================================================
-static void test_module_params() {
+static void test_module_params()
+{
     std::cout << "[test] module params..." << std::endl;
 
-    burstmerge::AlignParams ap{};
+    burstmerge::AlignParams ap
+    {};
     CHECK_EQ(ap.tile_size, 32, "AlignParams.tile_size default");
     CHECK_EQ(ap.search_distance, 64, "AlignParams.search_distance default");
     CHECK_EQ(ap.pyramid_levels, 3, "AlignParams.pyramid_levels default");
 
-    burstmerge::SpatialMergeParams sp{};
+    burstmerge::SpatialMergeParams sp
+    {};
     CHECK_EQ(sp.noise_reduction, 13.0f, "SpatialMergeParams.noise_reduction default");
 
-    burstmerge::FrequencyMergeParams fp{};
+    burstmerge::FrequencyMergeParams fp
+    {};
     CHECK_EQ(fp.tile_size, 32, "FrequencyMergeParams.tile_size default");
 
-    burstmerge::TemporalDenoiseParams tp{};
+    burstmerge::TemporalDenoiseParams tp
+    {};
     CHECK_EQ(tp.strength, 23.0f, "TemporalDenoiseParams.strength default");
 
-    burstmerge::ExposureParams ep{};
+    burstmerge::ExposureParams ep
+    {};
     CHECK_EQ(static_cast<int>(ep.mode), 0, "ExposureParams.mode default(Off)");
     CHECK_EQ(ep.stops, 0.0f, "ExposureParams.stops default");
 
@@ -491,7 +537,8 @@ static void test_module_params() {
 // ============================================================
 // Main
 // ============================================================
-int main() {
+int main()
+{
     test_types();
     test_hostbuffer();
     test_devicebuffer();

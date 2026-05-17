@@ -1,9 +1,11 @@
-#pragma once
+﻿#pragma once
 #include <cstdint>
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-struct TileInfo {
+struct TileInfo
+{
     uint32_t tile_x;
     uint32_t tile_y;
     uint32_t width;

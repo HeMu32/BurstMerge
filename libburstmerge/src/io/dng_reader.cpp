@@ -1,4 +1,4 @@
-#include "burstmerge/internal/io/dng_io.h"
+﻿#include "burstmerge/internal/io/dng_io.h"
 #include "dng_sdk_bridge.h"
 
 #include "dng_info.h"
@@ -9,22 +9,27 @@
 #include <windows.h>
 #endif
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-struct DngReaderImpl {
+struct DngReaderImpl
+{
     std::string filepath;
-    explicit DngReaderImpl(const char* path) : filepath(path) {}
+    explicit DngReaderImpl(const char* path) : filepath(path)
+    {}
 };
 
 DngReader::DngReader(const char* path)
     : impl_(new DngReaderImpl(path))
 {}
 
-DngReader::~DngReader() {
+DngReader::~DngReader()
+{
     delete static_cast<DngReaderImpl*>(impl_);
 }
 
-RawImage DngReader::Read() {
+RawImage DngReader::Read()
+{
     auto* p = static_cast<DngReaderImpl*>(impl_);
 
     // Create holder early so RAII cleanup applies even if exceptions are thrown
@@ -33,7 +38,8 @@ RawImage DngReader::Read() {
     RawImage result;
     result.metadata.dng_negative = holder;
 
-    try {
+    try
+    {
         dng_host& host = io::GetHost(holder);
 
 #ifdef _WIN32
@@ -73,15 +79,19 @@ RawImage DngReader::Read() {
 
         // Determine the actual DNG pixel type for the output buffer
         const dng_image* raw = negative.Stage1Image();
-        if (!raw) {
-            try { raw = &negative.RawImage(); }
-            catch (...) {}
+        if (!raw)
+        {
+            try
+            { raw = &negative.RawImage(); }
+            catch (...)
+            {}
         }
 
         uint32_t pixelType = raw ? static_cast<uint32_t>(raw->PixelType()) : static_cast<uint32_t>(ttShort);
         uint32_t planes    = raw ? raw->Planes() : 1;
 
-        switch (pixelType) {
+        switch (pixelType)
+        {
             case ttByte:  result.metadata.dng_pixel_type = DngPixelType::Uint8;  break;
             case ttShort: result.metadata.dng_pixel_type = DngPixelType::Uint16; break;
             case ttFloat: result.metadata.dng_pixel_type = DngPixelType::Float32; break;
@@ -98,7 +108,8 @@ RawImage DngReader::Read() {
         result.pixels.size = static_cast<size_t>(result.pixels.row_stride) * result.metadata.height;
         result.pixels.data = new std::byte[result.pixels.size]();
 
-        if (raw) {
+        if (raw)
+        {
             dng_pixel_buffer pb;
             pb.fArea = dng_rect(0, 0, result.metadata.height, result.metadata.width);
             pb.fPlane = 0;
@@ -114,7 +125,8 @@ RawImage DngReader::Read() {
 
         return result;
 
-    } catch (...) {
+    } catch (...)
+    {
         // result.metadata owns holder via dng_negative, will be cleaned up in ~RawMetadata()
         // But we need to clear it so the RawImage destructor doesn't double-free
         // Actually, since we're throwing, result is being destroyed,

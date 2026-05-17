@@ -1,11 +1,13 @@
-#pragma once
+﻿#pragma once
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/core/sub_graph.h"
 #include "burstmerge/api.h"
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-class IComputeBackend {
+class IComputeBackend
+{
 public:
     virtual ~IComputeBackend() = default;
 

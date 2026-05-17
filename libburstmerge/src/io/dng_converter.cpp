@@ -1,4 +1,4 @@
-#ifdef _WIN32
+﻿#ifdef _WIN32
 
 #include <string>
 #include <vector>
@@ -11,62 +11,77 @@
 #include "burstmerge/internal/io/dng_io.h"
 #include "dng_sdk_bridge.h"
 
-namespace burstmerge {
-namespace {
+namespace burstmerge
+{
+namespace
+{
 
-static std::wstring GetDngConverterPath() {
+static std::wstring GetDngConverterPath()
+{
     wchar_t buf[MAX_PATH];
     DWORD len = ExpandEnvironmentStringsW(
         L"C:\\Program Files\\Adobe\\Adobe DNG Converter\\Adobe DNG Converter.exe",
         buf, MAX_PATH);
-    if (len > 0 && len <= MAX_PATH) {
+    if (len > 0 && len <= MAX_PATH)
+    {
         return std::wstring(buf, len - 1);
     }
     return L"C:\\Program Files\\Adobe\\Adobe DNG Converter\\Adobe DNG Converter.exe";
 }
 
-static bool FileExists(const std::wstring& path) {
+static bool FileExists(const std::wstring& path)
+{
     DWORD attr = GetFileAttributesW(path.c_str());
     return (attr != INVALID_FILE_ATTRIBUTES) && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-static uint64_t GetFileSize(const std::wstring& path) {
+static uint64_t GetFileSize(const std::wstring& path)
+{
     WIN32_FILE_ATTRIBUTE_DATA info;
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info))
         return 0;
     return (static_cast<uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
 }
 
-static std::wstring ReplaceExtension(const std::wstring& path, const std::wstring& newExt) {
+static std::wstring ReplaceExtension(const std::wstring& path, const std::wstring& newExt)
+{
     size_t dot = path.find_last_of(L'.');
     size_t sep = path.find_last_of(L"\\/");
-    if (dot == std::wstring::npos || (sep != std::wstring::npos && dot < sep)) {
+    if (dot == std::wstring::npos || (sep != std::wstring::npos && dot < sep))
+    {
         return path + newExt;
     }
     return path.substr(0, dot) + newExt;
 }
 
-static std::wstring GetFileName(const std::wstring& path) {
+static std::wstring GetFileName(const std::wstring& path)
+{
     size_t sep = path.find_last_of(L"\\/");
-    if (sep != std::wstring::npos) {
+    if (sep != std::wstring::npos)
+    {
         return path.substr(sep + 1);
     }
     return path;
 }
 
-static std::wstring NormalizeWindowsPath(std::wstring path) {
+static std::wstring NormalizeWindowsPath(std::wstring path)
+{
     std::replace(path.begin(), path.end(), L'/', L'\\');
     return path;
 }
 
-static std::wstring StringToWide(const std::string& s) {
+static std::wstring StringToWide(const std::string& s)
+{
     return io::Utf8ToWide(s);
 }
 
-static std::string WideToString(const std::wstring& ws) {
-    if (ws.empty()) return {};
+static std::string WideToString(const std::wstring& ws)
+{
+    if (ws.empty()) return
+    {};
     int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return {};
+    if (len <= 0) return
+    {};
     std::string buf(static_cast<size_t>(len), '\0');
     WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, buf.data(), len, nullptr, nullptr);
     buf.pop_back();
@@ -82,7 +97,8 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
     output_files.clear();
 
     std::wstring converter_exe = GetDngConverterPath();
-    if (!FileExists(converter_exe)) {
+    if (!FileExists(converter_exe))
+    {
         return false;
     }
 
@@ -96,7 +112,8 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
                        output_dir_w + L"\"";
 
     std::vector<std::wstring> expected_outputs;
-    for (const auto& f : input_files) {
+    for (const auto& f : input_files)
+    {
         std::wstring wf = NormalizeWindowsPath(StringToWide(f));
         cmd += L" \"" + wf + L"\"";
         // Expected DNG name: same basename with .dng extension in the output directory
@@ -106,9 +123,11 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
     }
 
     // Create process
-    STARTUPINFOW si = {};
+    STARTUPINFOW si =
+    {};
     si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
+    PROCESS_INFORMATION pi =
+    {};
 
     // CreateProcessW needs a mutable command line
     std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
@@ -127,7 +146,8 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
         &pi
     );
 
-    if (!created) {
+    if (!created)
+    {
         return false;
     }
 
@@ -136,7 +156,8 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    if (wait_result == WAIT_FAILED) {
+    if (wait_result == WAIT_FAILED)
+    {
         return false;
     }
 
@@ -153,9 +174,11 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
     std::vector<bool> done(expected_outputs.size(), false);
 
     int elapsed = 0;
-    while (elapsed < max_poll_ms) {
+    while (elapsed < max_poll_ms)
+    {
         bool all_done = true;
-        for (size_t i = 0; i < expected_outputs.size(); i++) {
+        for (size_t i = 0; i < expected_outputs.size(); i++)
+        {
             if (done[i]) continue;
             all_done = false;
 
@@ -164,18 +187,22 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
             // If output_dir is absolute, the file will be placed there.
             // Otherwise, it's relative to the current directory.
             // The converter puts output in the specified -d dir.
-            if (!FileExists(dng_path)) {
+            if (!FileExists(dng_path))
+            {
                 continue;
             }
 
             uint64_t cur_size = GetFileSize(dng_path);
-            if (cur_size > 0 && cur_size == prev_sizes[i]) {
+            if (cur_size > 0 && cur_size == prev_sizes[i])
+            {
                 stable_counts[i]++;
-                if (stable_counts[i] >= stable_checks) {
+                if (stable_counts[i] >= stable_checks)
+                {
                     done[i] = true;
                     output_files.push_back(WideToString(dng_path));
                 }
-            } else {
+            } else
+            {
                 stable_counts[i] = 0;
             }
             prev_sizes[i] = cur_size;

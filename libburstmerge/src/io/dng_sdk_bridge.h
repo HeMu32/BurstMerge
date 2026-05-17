@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <string>
 #include <cstdint>
 #include <memory>
@@ -7,10 +7,13 @@
 struct dng_host;
 struct dng_negative;
 
-namespace burstmerge {
-namespace io {
+namespace burstmerge
+{
+namespace io
+{
 
-struct DngHostHolder {
+struct DngHostHolder
+{
     std::unique_ptr<dng_host, void(*)(dng_host*)> host;
 
     DngHostHolder();
@@ -20,10 +23,12 @@ struct DngHostHolder {
     DngHostHolder(DngHostHolder&&) = delete;
     DngHostHolder& operator=(DngHostHolder&&) = delete;
 
-    dng_host& get() { return *host; }
+    dng_host& get()
+    { return *host; }
 };
 
-struct DngNegativeHolder {
+struct DngNegativeHolder
+{
     std::unique_ptr<DngHostHolder> host_holder;
     dng_negative* negative = nullptr;
 
@@ -38,7 +43,8 @@ struct DngNegativeHolder {
 // UTF-8 -> UTF-16 conversion (Windows only)
 #ifdef _WIN32
 std::wstring Utf8ToWide(const char* utf8);
-inline std::wstring Utf8ToWide(const std::string& utf8) {
+inline std::wstring Utf8ToWide(const std::string& utf8)
+{
     return Utf8ToWide(utf8.c_str());
 }
 #endif
@@ -48,13 +54,16 @@ DngNegativeHolder* CreateNegativeHolder();
 void DestroyNegativeHolder(DngNegativeHolder* holder);
 
 // Accessors
-inline dng_negative* GetNegative(DngNegativeHolder* holder) {
+inline dng_negative* GetNegative(DngNegativeHolder* holder)
+{
     return holder ? holder->negative : nullptr;
 }
-inline dng_host& GetHost(DngNegativeHolder* holder) {
+inline dng_host& GetHost(DngNegativeHolder* holder)
+{
     return holder->host_holder->get();
 }
-inline void SetNegative(DngNegativeHolder* holder, dng_negative* neg) {
+inline void SetNegative(DngNegativeHolder* holder, dng_negative* neg)
+{
     if (holder) holder->negative = neg;
 }
 

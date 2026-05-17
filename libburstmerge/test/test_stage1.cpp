@@ -1,4 +1,4 @@
-#include "burstmerge/api.h"
+﻿#include "burstmerge/api.h"
 #include "burstmerge/internal/io/dng_io.h"
 #include "burstmerge/internal/core/float_image.h"
 
@@ -22,20 +22,23 @@ static int g_failed = 0;
 
 #define CHECK(cond, msg) do { \
     ++g_checks; \
-    if (!(cond)) { \
+    if (!(cond))
+    { \
         std::cerr << "  FAIL [" << __LINE__ << "]: " << msg << std::endl; \
         ++g_failed; \
     } \
 } while (0)
 
-bool FileExists(const std::string& path) {
+bool FileExists(const std::string& path)
+{
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return false;
     std::fclose(f);
     return true;
 }
 
-long FileSize(const std::string& path) {
+long FileSize(const std::string& path)
+{
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return -1;
     std::fseek(f, 0, SEEK_END);
@@ -44,9 +47,11 @@ long FileSize(const std::string& path) {
     return size;
 }
 
-std::vector<std::string> FilesWithExt(const fs::path& dir, const std::string& ext) {
+std::vector<std::string> FilesWithExt(const fs::path& dir, const std::string& ext)
+{
     std::vector<std::string> files;
-    for (const auto& entry : fs::directory_iterator(dir)) {
+    for (const auto& entry : fs::directory_iterator(dir))
+    {
         if (!entry.is_regular_file()) continue;
         std::string e = entry.path().extension().string();
         for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -56,7 +61,8 @@ std::vector<std::string> FilesWithExt(const fs::path& dir, const std::string& ex
     return files;
 }
 
-bool ConverterAvailable() {
+bool ConverterAvailable()
+{
 #ifdef _WIN32
     DWORD attr = GetFileAttributesA("C:\\Program Files\\Adobe\\Adobe DNG Converter\\Adobe DNG Converter.exe");
     return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
@@ -84,7 +90,8 @@ void ProcessAndVerify(const std::string& name,
 
     int progress_calls = 0;
     float last_progress = -1.0f;
-    bm.SetProgressCallback([&](float p, const std::string& stage) {
+    bm.SetProgressCallback([&](float p, const std::string& stage)
+    {
         (void)stage;
         ++progress_calls;
         last_progress = p;
@@ -93,7 +100,8 @@ void ProcessAndVerify(const std::string& name,
     for (const auto& input : inputs) bm.AddImage(input);
     auto result = bm.Process(output_path);
 
-    if (!result.success) {
+    if (!result.success)
+    {
         std::cout << "  error: " << result.error_msg << std::endl;
     }
     CHECK(result.success, name + " process succeeds");
@@ -103,7 +111,8 @@ void ProcessAndVerify(const std::string& name,
     CHECK(progress_calls >= 2, name + " progress callbacks");
     CHECK(last_progress == 1.0f, name + " progress reaches 1");
 
-    if (FileExists(output_path)) {
+    if (FileExists(output_path))
+    {
         burstmerge::DngReader reader(output_path.c_str());
         auto image = reader.Read();
         CHECK(image.metadata.width > 0, name + " readable output width");
@@ -112,9 +121,10 @@ void ProcessAndVerify(const std::string& name,
     }
 }
 
-void TestBitDepthOutput(const std::string& name, const std::string& input, int bit_depth, uint32_t expected_white_level, const std::string& output_path) {
+void TestBitDepthOutput(const std::string& name, const std::string& input, int bit_depth, uint32_t expected_white_level, const std::string& output_path)
+{
     std::cout << "[test] process " << name << " (bit depth " << bit_depth << ")..." << std::endl;
-    
+
     fs::create_directories(fs::path(output_path).parent_path());
     std::remove(output_path.c_str());
 
@@ -128,27 +138,30 @@ void TestBitDepthOutput(const std::string& name, const std::string& input, int b
     CHECK(result.success, name + " process succeeds");
     CHECK(FileExists(output_path), name + " output exists");
 
-    if (FileExists(output_path)) {
+    if (FileExists(output_path))
+    {
         burstmerge::DngReader reader(output_path.c_str());
         auto image = reader.Read();
-        
+
         uint32_t target_white = expected_white_level;
-        if (target_white == 0) {
+        if (target_white == 0)
+        {
             // Read original to find its native white level
             burstmerge::DngReader orig_reader(input.c_str());
             target_white = orig_reader.Read().metadata.white_level;
         }
 
-        CHECK(image.metadata.white_level == target_white, 
+        CHECK(image.metadata.white_level == target_white,
               name + " white level matches expected (" + std::to_string(target_white) + ", got " + std::to_string(image.metadata.white_level) + ")");
-              
+
         // We can also sample the image data to ensure it's bounded by the new white level
         burstmerge::FloatImage fi = burstmerge::HostBufferToFloatImage(image.pixels);
         float max_val = 0.0f;
-        for (float v : fi.data) {
+        for (float v : fi.data)
+        {
             if (v > max_val) max_val = v;
         }
-        CHECK(max_val <= static_cast<float>(target_white) * 1.001f, 
+        CHECK(max_val <= static_cast<float>(target_white) * 1.001f,
               name + " pixel max value within white level bounds");
     }
 }
@@ -156,7 +169,8 @@ void TestBitDepthOutput(const std::string& name, const std::string& input, int b
 // Regression: after merging a bracketed burst with a bright source at center,
 // the center pixels must stay near white_level and not be dragged down by
 // clipped comparison frames. This would manifest as purple/magenta highlights.
-void CheckCenterSaturated(const std::string& name, const std::string& dng_path) {
+void CheckCenterSaturated(const std::string& name, const std::string& dng_path)
+{
     if (!FileExists(dng_path)) return;
 
     burstmerge::DngReader reader(dng_path.c_str());
@@ -189,7 +203,8 @@ void CheckCenterSaturated(const std::string& name, const std::string& dng_path) 
               << (int)vals[2] << " " << (int)vals[3] << " (thresh=" << (int)threshold << ")" << std::endl;
 }
 
-int main() {
+int main()
+{
     fs::path root(TEST_DATA_DIR);
     fs::path build(TEST_BINARY_DIR);
     fs::path samples = root / "libburstmerge" / "test" / "samples";
@@ -210,21 +225,26 @@ int main() {
     // Test robustness: invalid/unsupported bit depth requests should gracefully fall back to the sensor's native white level.
     TestBitDepthOutput("single_invalid_bit", (samples / "X1M5_Wide.dng").string(), 99, 0, (out_dir / "single_invalid_bit_output.dng").string());
 
-    if (ConverterAvailable()) {
+    if (ConverterAvailable())
+    {
         auto seq = FilesWithExt(samples / "Seq", ".arw");
         // auto bkt = FilesWithExt(samples / "Bkt", ".arw");
         std::vector<std::string> bkt2;
-        if (fs::exists(samples / "Bkt2")) {
+        if (fs::exists(samples / "Bkt2"))
+        {
             bkt2 = FilesWithExt(samples / "Bkt2", ".arw");
         }
         ProcessAndVerify("seq_arw_5", seq, (out_dir / "seq_output.dng").string());
-        if (!bkt2.empty()) {
+        if (!bkt2.empty())
+        {
             ProcessAndVerify("bkt2_arw_5", bkt2, (out_dir / "bkt2_output.dng").string());
             CheckCenterSaturated("bkt2_center", (out_dir / "bkt2_output.dng").string());
-        } else {
+        } else
+        {
             std::cout << "[test] SKIP bkt2_arw_5 (samples/Bkt2 not found)" << std::endl;
         }
-    } else {
+    } else
+    {
         std::cout << "[test] SKIP ARW process tests: Adobe DNG Converter not installed" << std::endl;
     }
 

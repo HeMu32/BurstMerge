@@ -1,13 +1,15 @@
-#pragma once
+﻿#pragma once
 #include "burstmerge/api.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/core/float_image.h"
 
 #include <vector>
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-struct SpatialConstants {
+struct SpatialConstants
+{
     static constexpr int32_t kBinomialKernelSize = 16;
     static constexpr int32_t kBinomialRadius = 8;
     static constexpr float kNoiseFloorMin = 1.0f;
@@ -27,7 +29,8 @@ struct SpatialConstants {
 // Binomial weights: C(32, 16+k) for k=0..8 (reference kernel_size=16)
 extern const float kBinomialWeights[9];
 
-struct SpatialMergeParams {
+struct SpatialMergeParams
+{
     SpatialMergeMode mode = SpatialMergeMode::Legacy;
     float noise_reduction = 13.0f;
     float robustness = 1.0f;
