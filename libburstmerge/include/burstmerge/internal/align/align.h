@@ -50,6 +50,11 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
                                     const FloatImage& comparison,
                                     const AlignParams& params);
 
+AlignmentResult EstimateFrequencyTileField(
+    const std::vector<FloatImage>& ref_pyr,
+    const std::vector<FloatImage>& cmp_pyr,
+    const AlignParams& params);
+
 FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignment);
 
 } // namespace burstmerge

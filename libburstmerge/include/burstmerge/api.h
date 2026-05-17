@@ -14,7 +14,7 @@ enum class MergeAlgorithm
 enum class ExposureMode
 { Off, Linear, Curve };
 enum class AlignmentMode
-{ Legacy, DenseTile };
+{ Legacy, DenseTile, Frequency };
 enum class SpatialMergeMode
 { Legacy, Linear };
 enum class FrequencyMode

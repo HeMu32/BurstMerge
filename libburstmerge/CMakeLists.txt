@@ -5,6 +5,7 @@ add_library(burstmerge STATIC
     src/core/float_image.cpp
     src/core/pipeline.cpp
     src/align/align.cpp
+    src/align/freq_align.cpp
     src/merge/spatial.cpp
     src/merge/frequency.cpp
     src/denoise/temporal.cpp

@@ -667,6 +667,11 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
         return EstimateDenseTileField(ref_pyr, cmp_pyr, params);
     }
 
+    if (params.mode == AlignmentMode::Frequency)
+    {
+        return EstimateFrequencyTileField(ref_pyr, cmp_pyr, params);
+    }
+
     int best_x = 0;
     int best_y = 0;
     float best_score = std::numeric_limits<float>::max();
@@ -710,6 +715,9 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
     if (params.mode == AlignmentMode::DenseTile)
     {
         RefineTileFieldDense(reference, comparison, params, out);
+    } else if (params.mode == AlignmentMode::Frequency) {
+        // Frequency alignment already produced full tile field via
+        // EstimateFrequencyTileField above; no further refinement needed.
     } else
     {
         RefineTileField(reference, comparison, params, out);

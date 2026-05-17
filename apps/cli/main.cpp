@@ -28,6 +28,7 @@ bool ParseAlignmentMode(const std::string& value, burstmerge::AlignmentMode& out
     std::string v = Lower(value);
     if (v == "legacy") { out = burstmerge::AlignmentMode::Legacy; return true; }
     if (v == "dense" || v == "dense-tile") { out = burstmerge::AlignmentMode::DenseTile; return true; }
+    if (v == "freq" || v == "frequency") { out = burstmerge::AlignmentMode::Frequency; return true; }
     return false;
 }
 
@@ -78,7 +79,7 @@ int main(int argc, char* argv[]) {
         ("b,bit-depth", "Output bit depth (12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
         ("f,frequency", "Use frequency merge placeholder flag")
         ("n,noise-reduction", "Noise reduction strength (>=22.5 = temporal average)", cxxopts::value<float>())
-        ("alignment", "Alignment mode: legacy, dense", cxxopts::value<std::string>()->default_value("legacy"))
+        ("alignment", "Alignment mode: legacy, dense, freq", cxxopts::value<std::string>()->default_value("legacy"))
         ("spatial-mode", "Spatial merge mode: legacy, linear", cxxopts::value<std::string>()->default_value("legacy"))
         ("frequency-mode", "Frequency mode: laplacian, wiener", cxxopts::value<std::string>()->default_value("laplacian"))
         ("exposure-mode", "Exposure mode: off, linear, curve", cxxopts::value<std::string>()->default_value("off"))
@@ -121,7 +122,7 @@ int main(int argc, char* argv[]) {
         ? burstmerge::MergeAlgorithm::Frequency
         : burstmerge::MergeAlgorithm::Spatial;
     if (!ParseAlignmentMode(args["alignment"].as<std::string>(), settings.alignment_mode)) {
-        std::cerr << "Invalid alignment mode (use legacy or dense)" << std::endl;
+        std::cerr << "Invalid alignment mode (use legacy, dense, or freq)" << std::endl;
         return 2;
     }
     if (!ParseSpatialMode(args["spatial-mode"].as<std::string>(), settings.spatial_mode)) {
