@@ -27,7 +27,7 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale = 1.0f);
 HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_level);
 FloatImage Downsample2x(const FloatImage& src);
 FloatImage BoxBlur(const FloatImage& src, int radius);
-FloatImage WarpTranslateBilinear(const FloatImage& src, float shift_x, float shift_y);
+FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y);
 FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period);
 FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
                                      uint32_t mosaic_width,

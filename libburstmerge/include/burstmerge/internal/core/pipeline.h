@@ -17,6 +17,7 @@ struct PipelineConstants {
     static constexpr float kRobustnessDiv = 13.0f;
     static constexpr float kRobustnessMin = 0.2f;
     static constexpr float kTemporalNrThreshold = 22.5f;
+    static constexpr float kBracketTransmissionFallbackEv = 1.0f;
     static constexpr int32_t kProgressStart = 0;
     static constexpr float kProgressValidate = 0.03f;
     static constexpr float kProgressConvertStart = 0.08f;

@@ -132,7 +132,7 @@ FloatImage BoxBlur(const FloatImage& src, int radius) {
     return out;
 }
 
-FloatImage WarpTranslateBilinear(const FloatImage& src, float shift_x, float shift_y) {
+FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y) {
     FloatImage out;
     out.width = src.width;
     out.height = src.height;
@@ -143,6 +143,17 @@ FloatImage WarpTranslateBilinear(const FloatImage& src, float shift_x, float shi
         for (uint32_t x = 0; x < src.width; ++x) {
             float sx = static_cast<float>(x) - shift_x;
             float sy = static_cast<float>(y) - shift_y;
+            int nx = static_cast<int>(std::lround(sx));
+            int ny = static_cast<int>(std::lround(sy));
+
+            // Use nearest-neighbor for the simple alignment warp path.
+            // This can preserve edge acutance better than bilinear blending,
+            // so results may look slightly sharper.
+            for (uint32_t c = 0; c < src.channels; ++c) {
+                out.At(x, y, c) = SampleClamped(src, nx, ny, c);
+            }
+
+/*
             int x0 = static_cast<int>(std::floor(sx));
             int y0 = static_cast<int>(std::floor(sy));
             int x1 = x0 + 1;
@@ -159,6 +170,7 @@ FloatImage WarpTranslateBilinear(const FloatImage& src, float shift_x, float shi
                 float b = p01 * (1.0f - tx) + p11 * tx;
                 out.At(x, y, c) = a * (1.0f - ty) + b * ty;
             }
+*/
         }
     }
     return out;

@@ -250,6 +250,7 @@ std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images) {
 }
 
 std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& float_images,
+                                                const std::vector<RawImage>& raw_images,
                                                 size_t ref_idx,
                                                 const Settings& settings,
                                                 uint32_t cfa_period,
@@ -267,27 +268,109 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     // so the alignment does not need period snapping. Fall back to cfa_period=1.
     params.cfa_period = (float_images[0].channels > 1) ? 1u : std::max<uint32_t>(1, cfa_period);
 
-    const FloatImage& ref = float_images[ref_idx];
-    size_t processed = 0;
+    // NOTE: Advanced dense alignment in this pipeline is still under development.
+    // Current behavior is experimental and does not yet guarantee robust results
+    // across all bracketed-exposure scenes.
+    if (settings.alignment_mode == AlignmentMode::DenseTile) {
+        std::fprintf(stderr,
+            "[WARN] Advanced dense alignment is experimental and not fully implemented yet. Results may be unstable.\n");
+    }
+
+    auto align_and_warp = [&](const FloatImage& guide_ref,
+                              const FloatImage& source,
+                              size_t progress_idx,
+                              size_t total_count) -> FloatImage {
+        Report(progress,
+               PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange * static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
+               "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
+        AlignmentResult ar = EstimateTranslation(guide_ref, source, params);
+
+        Report(progress,
+               PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange * static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
+               "Warping frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
+        return WarpAligned(source, ar);
+    };
+
+    bool has_exposure = false;
+    float min_exp = std::numeric_limits<float>::max();
+    float max_exp = 0.0f;
+    std::vector<std::pair<float, size_t>> exposure_order;
+    exposure_order.reserve(raw_images.size());
+    for (size_t i = 0; i < raw_images.size(); ++i) {
+        float v = raw_images[i].metadata.iso_exposure_time;
+        if (v > 0.0f) {
+            has_exposure = true;
+            min_exp = std::min(min_exp, v);
+            max_exp = std::max(max_exp, v);
+            exposure_order.push_back({v, i});
+        }
+    }
+
+    const bool use_transmission = settings.alignment_mode == AlignmentMode::DenseTile &&
+                                  has_exposure &&
+                                  !exposure_order.empty() &&
+                                  max_exp > min_exp * std::pow(2.0f, PipelineConstants::kBracketTransmissionFallbackEv);
+
+    if (!use_transmission) {
+        const FloatImage& ref = float_images[ref_idx];
+        size_t processed = 0;
+        const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
+        for (size_t i = 0; i < float_images.size(); ++i) {
+            if (i == ref_idx) continue;
+            aligned.push_back(align_and_warp(ref, float_images[i], processed, total));
+            ++processed;
+        }
+        return aligned;
+    }
+
+    std::sort(exposure_order.begin(), exposure_order.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
     const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
+    size_t root_pos = 0;
+    for (size_t pos = 0; pos < exposure_order.size(); ++pos) {
+        if (exposure_order[pos].second == ref_idx) {
+            root_pos = pos;
+            break;
+        }
+    }
+    const size_t root_idx = exposure_order[root_pos].second;
+    std::vector<FloatImage> aligned_to_root(float_images.size());
+    std::vector<uint8_t> has_aligned(float_images.size(), 0);
+    aligned_to_root[root_idx] = float_images[root_idx];
+    has_aligned[root_idx] = 1;
+
+    size_t processed = 0;
+
+    for (size_t pos = root_pos; pos > 0; --pos) {
+        size_t parent_idx = exposure_order[pos].second;
+        size_t child_idx = exposure_order[pos - 1].second;
+        const FloatImage& parent_ref = has_aligned[parent_idx] ? aligned_to_root[parent_idx] : float_images[parent_idx];
+        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], processed, total);
+        aligned_to_root[child_idx] = std::move(child_aligned);
+        has_aligned[child_idx] = 1;
+        ++processed;
+    }
+
+    for (size_t pos = root_pos + 1; pos < exposure_order.size(); ++pos) {
+        size_t parent_idx = exposure_order[pos - 1].second;
+        size_t child_idx = exposure_order[pos].second;
+        const FloatImage& parent_ref = has_aligned[parent_idx] ? aligned_to_root[parent_idx] : float_images[parent_idx];
+        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], processed, total);
+        aligned_to_root[child_idx] = std::move(child_aligned);
+        has_aligned[child_idx] = 1;
+        ++processed;
+    }
+
     for (size_t i = 0; i < float_images.size(); ++i) {
         if (i == ref_idx) continue;
-
-        Report(progress,
-               PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange * static_cast<float>(processed) / static_cast<float>(std::max<size_t>(1, total)),
-               "Aligning frame " + std::to_string(processed + 1) + "/" + std::to_string(total));
-        AlignmentResult ar = EstimateTranslation(ref, float_images[i], params);
-
-        Report(progress,
-               PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange * static_cast<float>(processed) / static_cast<float>(std::max<size_t>(1, total)),
-               "Warping frame " + std::to_string(processed + 1) + "/" + std::to_string(total));
-        aligned.push_back(WarpAligned(float_images[i], ar));
-        ++processed;
+        if (has_aligned[i]) aligned.push_back(std::move(aligned_to_root[i]));
+        else aligned.push_back(align_and_warp(float_images[ref_idx], float_images[i], processed, total));
     }
     return aligned;
 }
 
-size_t SelectReferenceIndex(const std::vector<RawImage>& images) {
+size_t SelectExposureRefIndex(const std::vector<RawImage>& images) {
     if (images.empty()) return 0;
 
     bool has_exposure = false;
@@ -303,16 +386,20 @@ size_t SelectReferenceIndex(const std::vector<RawImage>& images) {
     }
 
     if (has_exposure && max_exp > min_exp * 1.25f) {
-        size_t idx = 0;
-        float best = std::numeric_limits<float>::max();
+        std::vector<std::pair<float, size_t>> exposure_order;
+        exposure_order.reserve(images.size());
         for (size_t i = 0; i < images.size(); ++i) {
             float v = images[i].metadata.iso_exposure_time;
-            if (v > 0.0f && v < best) {
-                best = v;
-                idx = i;
-            }
+            if (v > 0.0f) exposure_order.push_back({v, i});
         }
-        return idx;
+        if (!exposure_order.empty()) {
+            std::sort(exposure_order.begin(), exposure_order.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            // Use the darkest frame as the exposure/output anchor for bracketed sets.
+            // This keeps highlight headroom and avoids the brighter mid-exposure
+            // reference making the final DNG look globally over-lifted.
+            return exposure_order.front().second;
+        }
     }
 
     return images.size() / 2;
@@ -355,7 +442,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
 
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
-        size_t ref_idx = SelectReferenceIndex(images);
+        size_t ref_idx = SelectExposureRefIndex(images);
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
 
         Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
@@ -384,7 +471,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
 
         uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
-        std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, ref_idx, settings_, cfa_period, progress);
+        std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, progress);
 
         float ref_iso = images[ref_idx].metadata.iso_exposure_time;
         float ref_bias = images[ref_idx].metadata.exposure_bias;
@@ -456,8 +543,11 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             ? static_cast<float>(target_white) / static_cast<float>(sensor_white)
             : 1.0f;
 
-        // Scale signal to target bit depth (in black-subtracted space),
-        // then add back the scaled black level.
+        // Black level restore: exposure correction (LocalReinhard) uses a single
+        // mean black level for multi-channel images, so we must first add back
+        // ref_bl (mean), let exposure do its work, then inject per-channel delta
+        // afterward.  This way the DNG pixel data matches per-channel BlackLevel
+        // metadata without confusing the tone mapper.
         if (ref_bl > 1.0f) {
             float scaled_bl = ref_bl * bit_scale;
             if (bit_scale != 1.0f) {
@@ -483,6 +573,32 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             // Exposure correction operates on data that already has black restored,
             // so the white_level passed must be the final (rescaled) one.
             ApplyExposure(merged, target_white, params);
+        }
+
+        // After exposure (which uses mean black level for multi-channel images),
+        // inject per-channel delta so final pixel data matches per-channel
+        // BlackLevel metadata.  Only needed when the image is still in plane
+        // layout (4 channels) and per-channel black levels differ from the mean.
+        if (merged.channels == 4 && ref_bl > 1.0f) {
+            float bl_ch[4] = {};
+            bool has_per_channel = false;
+            for (int i = 0; i < 4 && i < static_cast<int>(merged.channels); ++i) {
+                float v = images[ref_idx].metadata.black_level[i];
+                if (v > 0.0f) { bl_ch[i] = v; has_per_channel = true; }
+                else { bl_ch[i] = ref_bl; }
+            }
+            if (has_per_channel) {
+                float delta[4];
+                for (int i = 0; i < 4; ++i) delta[i] = bl_ch[i] - ref_bl;
+                for (uint32_t y = 0; y < merged.height; ++y) {
+                    for (uint32_t x = 0; x < merged.width; ++x) {
+                        size_t base = (static_cast<size_t>(y) * merged.width + x) * 4;
+                        for (uint32_t c = 0; c < 4; ++c) {
+                            merged.data[base + c] += delta[c];
+                        }
+                    }
+                }
+            }
         }
 
         if (images[ref_idx].metadata.mosaic_pattern_width > 1 &&

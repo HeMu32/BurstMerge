@@ -196,9 +196,11 @@ FloatImage SpatialMerge(const FloatImage& reference,
             }
         }
     } else {
-        // Multi-channel (CFA planes or RGB): each channel gets its own weight
-        // from its own blurred diff, so one channel's misalignment does not
-        // penalize the others. Clipped-pixel detection remains global.
+        // Multi-channel (CFA planes or RGB): use a single shared weight per
+        // comparison frame (from max_diff across all channels) so that one
+        // channel's misalignment does not create different blend factors per
+        // channel. Per-channel weight divergence causes color banding and
+        // gradient mixing artifacts that look like demosaicing failures.
         for (uint32_t y = 0; y < out.height; ++y) {
             for (uint32_t x = 0; x < out.width; ++x) {
                 // Global saturated/clipped flags (shared across channels)
@@ -212,36 +214,39 @@ FloatImage SpatialMerge(const FloatImage& reference,
                     }
                 }
 
-                // For plane-image pipeline (channels > 1), compute a single shared weight
-                // per comparison frame per pixel to prevent per-channel weight divergence
-                // which causes color shifts in gradient regions when alignment is imperfect.
+                // Compute a single shared weight per comparison frame using
+                // max_diff across all channels (both linear and legacy modes).
                 std::vector<float> shared_w(aligned_comparisons.size(), 1.0f);
-                if (linear_mode) {
-                    for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
-                        bool cmp_clipped = false;
-                        if (params.clip_threshold > 0.0f && params.exposure_scales &&
-                            idx < params.num_scales && params.exposure_scales[idx] > 0.0f) {
-                            float estimated_original = cmp_raw_max[idx] / params.exposure_scales[idx];
-                            if (estimated_original >= params.clip_threshold) cmp_clipped = true;
+                for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
+                    bool cmp_clipped = false;
+                    if (params.clip_threshold > 0.0f && params.exposure_scales &&
+                        idx < params.num_scales && params.exposure_scales[idx] > 0.0f) {
+                        float estimated_original = cmp_raw_max[idx] / params.exposure_scales[idx];
+                        if (estimated_original >= params.clip_threshold) cmp_clipped = true;
+                    }
+                    if (cmp_clipped) {
+                        shared_w[idx] = 0.0f;
+                    } else if (ref_raw_guide >= highlight_threshold || cmp_raw_max[idx] >= highlight_threshold) {
+                        shared_w[idx] = 1.0f;
+                    } else {
+                        float max_diff = 0.0f;
+                        for (uint32_t c = 0; c < out.channels; ++c) {
+                            const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
+                            float d = std::abs(cmp_blurs[idx].data[ci] - ref_blur.data[ci]);
+                            max_diff = std::max(max_diff, d);
                         }
-                        if (cmp_clipped) {
-                            shared_w[idx] = 0.0f;
-                        } else if (ref_raw_guide >= highlight_threshold || cmp_raw_max[idx] >= highlight_threshold) {
-                            shared_w[idx] = 1.0f;
-                        } else {
-                            float max_diff = 0.0f;
-                            for (uint32_t c = 0; c < out.channels; ++c) {
-                                const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
-                                float d = std::abs(cmp_blurs[idx].data[ci] - ref_blur.data[ci]);
-                                max_diff = std::max(max_diff, d);
-                            }
+                        if (linear_mode) {
                             float threshold = std::max(1.0f, noise_floor / std::max(0.001f, robustness));
                             shared_w[idx] = max_diff >= threshold ? 0.0f : Clamp01(1.0f - max_diff / threshold);
+                        } else {
+                            float ratio = max_diff / noise_floor;
+                            shared_w[idx] = 1.0f / (1.0f + ratio * ratio * robustness);
+                            shared_w[idx] = ClampMin(shared_w[idx], min_comparison_weight);
                         }
                     }
                 }
 
-                // Per-channel merge using shared weights
+                // Per-channel merge using shared weights (identical across channels)
                 for (uint32_t c = 0; c < out.channels; ++c) {
                     const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
 
@@ -250,15 +255,6 @@ FloatImage SpatialMerge(const FloatImage& reference,
 
                     for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx) {
                         float w = shared_w[idx];
-                        if (!linear_mode) {
-                            float ref_g = ref_blur.data[ci];
-                            float cmp_g = cmp_blurs[idx].data[ci];
-                            float diff = std::abs(cmp_g - ref_g);
-                            float ratio = diff / noise_floor;
-                            w = 1.0f / (1.0f + ratio * ratio * robustness);
-                            w = ClampMin(w, min_comparison_weight);
-                        }
-
                         weighted_sum += aligned_comparisons[idx].data[ci] * w;
                         weight_sum += w;
                     }
