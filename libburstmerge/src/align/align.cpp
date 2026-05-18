@@ -484,8 +484,8 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
                                        const AlignParams& params)
 {
     // Seed the tile field with a global translation estimate at the coarsest level.
-    // Without this, the 5×5 search at the coarsest level (search_dist=2) can only
-    // capture ±2 pixels of motion, which is insufficient for typical camera movement.
+    // Without this, the local search at the coarsest level can only capture a
+    // small amount of motion, which is insufficient for typical camera movement.
     // The Reference uses this global alignment to initialize the tile field, then
     // hierarchical refinement adds per-tile local corrections via 5×5 search.
     const FloatImage& coarsest_ref = ref_pyr.back();
@@ -499,7 +499,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
     int global_dy = 0;
     float global_best = std::numeric_limits<float>::max();
     const uint32_t cfa = std::max<uint32_t>(1, params.cfa_period);
-    const int global_step = std::max(2, static_cast<int>(cfa) * 2);
+    const int global_step = std::max(3, static_cast<int>(cfa) * 3);
     for (int dy = -coarse_max_shift; dy <= coarse_max_shift; ++dy)
     {
         for (int dx = -coarse_max_shift; dx <= coarse_max_shift; ++dx)
@@ -582,7 +582,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
             corrected_y = prev_y;
         }
 
-        // Step 2: fixed 5×5 search around corrected seed
+        // Step 2: fixed local search around corrected seed
         AlignmentResult next;
         next.tile_size = static_cast<int32_t>(tile_size);
         next.tile_spacing = static_cast<int32_t>(half_tile);

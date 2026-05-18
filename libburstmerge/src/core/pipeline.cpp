@@ -593,6 +593,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.mode = settings_.frequency_mode;
             params.noise_reduction = settings_.noise_reduction;
             params.tile_size = settings_.tile_size;
+            params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
+            params.black_level = MeanBlackLevel(images[ref_idx].metadata);
+            params.num_scales = static_cast<uint32_t>(exp_scales.size());
+            params.exposure_scales = exp_scales.data();
             merged = FrequencyMerge(float_images[ref_idx], aligned, params);
         } else
         {

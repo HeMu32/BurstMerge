@@ -20,9 +20,9 @@ struct AlignConstants
     static constexpr int32_t kMinTileSize = 16;
 
     // Per-tile search: number of integer-position candidates in each direction.
-    // radius=2 → 5×5 brute-force centred on the propagated seed.
+    // radius=3 → 7×7 brute-force centred on the propagated seed.
     // In plane-pixel coordinates; at the finest level 1 plane-px ≡ 2 Bayer-px.
-    static constexpr int32_t kTileSearchRadius = 2;
+    static constexpr int32_t kTileSearchRadius = 3;
 
     // --- Pyramid geometry ------------------------------------------------
     // Pyramid follows a "2 then 4" pattern:
@@ -42,7 +42,7 @@ struct AlignConstants
     // --- Legacy global-search radius (Legacy path only) ------------------
     // Coarsest level searches 1/8 of the longest image side.
     // radius = max(kMinSearchRadius, longest >> (kSearchFractionShiftBase + ...))
-    static constexpr int32_t kMinSearchRadius = 2;
+    static constexpr int32_t kMinSearchRadius = 3;
     static constexpr int32_t kSearchFractionShiftBase = 3;  // 2^3 = 1/8
 
     // --- Legacy RefineTileField (Legacy path only) -----------------------
@@ -57,7 +57,7 @@ struct AlignConstants
     static constexpr int32_t kDefaultSearchDistance = 64;
 
     // --- Legacy DenseLocal / Smooth (Legacy RefineTileField) -------------
-    static constexpr int32_t kDenseLocalRadius = 2;
+    static constexpr int32_t kDenseLocalRadius = 3;
     static constexpr int32_t kSmoothNeighborRadius = 1;
 };
 

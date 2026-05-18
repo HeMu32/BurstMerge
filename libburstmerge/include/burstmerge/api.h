@@ -22,7 +22,7 @@ enum class AlignmentMode
 enum class SpatialMergeMode
 { Legacy, Linear };
 enum class FrequencyMode
-{ Laplacian, WienerFft };
+{ Laplacian, WienerFftLegacy, WienerFftRobust };
 enum class ExposureCurveMode
 { Global, LocalReinhard };
 

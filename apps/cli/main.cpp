@@ -52,7 +52,10 @@ bool ParseSpatialMode(const std::string& value, burstmerge::SpatialMergeMode& ou
 bool ParseFrequencyMode(const std::string& value, burstmerge::FrequencyMode& out) {
     std::string v = Lower(value);
     if (v == "laplacian" || v == "legacy") { out = burstmerge::FrequencyMode::Laplacian; return true; }
-    if (v == "wiener" || v == "wiener-fft" || v == "fft") { out = burstmerge::FrequencyMode::WienerFft; return true; }
+    if (v == "wiener-legacy" || v == "wiener-v1" || v == "fft-legacy") {
+        out = burstmerge::FrequencyMode::WienerFftLegacy; return true; }
+    if (v == "wiener" || v == "wiener-fft" || v == "wiener-robust" || v == "wiener-v2" || v == "fft") {
+        out = burstmerge::FrequencyMode::WienerFftRobust; return true; }
     return false;
 }
 
@@ -92,7 +95,7 @@ int main(int argc, char* argv[]) {
         ("merge-algo", "Merge algorithm: spatial, frequency, temporal", cxxopts::value<std::string>())
         ("alignment", "Alignment mode: legacy, dense, freq", cxxopts::value<std::string>()->default_value("legacy"))
         ("spatial-mode", "Spatial merge mode: legacy, linear", cxxopts::value<std::string>()->default_value("legacy"))
-        ("frequency-mode", "Frequency mode: laplacian, wiener", cxxopts::value<std::string>()->default_value("laplacian"))
+        ("frequency-mode", "Frequency mode: laplacian, wiener, wiener-legacy", cxxopts::value<std::string>()->default_value("laplacian"))
         ("exposure-mode", "Exposure mode: off, linear, curve", cxxopts::value<std::string>()->default_value("off"))
         ("exposure-stops", "Exposure correction stops", cxxopts::value<float>()->default_value("0"))
         ("exposure-curve", "Exposure curve mode: global, local", cxxopts::value<std::string>()->default_value("global"))
@@ -152,7 +155,7 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     if (!ParseFrequencyMode(args["frequency-mode"].as<std::string>(), settings.frequency_mode)) {
-        std::cerr << "Invalid frequency mode (use laplacian or wiener)" << std::endl;
+        std::cerr << "Invalid frequency mode (use laplacian, wiener, or wiener-legacy)" << std::endl;
         return 2;
     }
     if (!ParseExposureMode(args["exposure-mode"].as<std::string>(), settings.exposure_mode)) {

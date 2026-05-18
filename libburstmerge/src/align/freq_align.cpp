@@ -347,7 +347,7 @@ AlignmentResult EstimateFrequencyTileField(
     int gdy = 0;
     float gbest = std::numeric_limits<float>::max();
     const uint32_t cfa = std::max<uint32_t>(1, params.cfa_period);
-    const int gstep = std::max(2, static_cast<int>(cfa) * 2);
+    const int gstep = std::max(3, static_cast<int>(cfa) * 3);
 
     for (int dy = -coarse_max_shift; dy <= coarse_max_shift; ++dy)
     {

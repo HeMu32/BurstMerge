@@ -227,7 +227,7 @@ int main()
 
     if (ConverterAvailable())
     {
-        auto seq = FilesWithExt(samples / "Seq", ".arw");
+        auto seq = FilesWithExt(samples / "Seq1", ".arw");
         // auto bkt = FilesWithExt(samples / "Bkt", ".arw");
         std::vector<std::string> bkt2;
         if (fs::exists(samples / "Bkt2"))
