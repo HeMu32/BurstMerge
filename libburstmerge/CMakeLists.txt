@@ -4,7 +4,15 @@ add_library(burstmerge STATIC
     src/api_c.cpp
     src/core/float_image.cpp
     src/core/pipeline.cpp
+    src/core/pipeline_io.cpp
+    src/core/pipeline_frame.cpp
+    src/core/pipeline_align.cpp
     src/align/align.cpp
+    src/align/align_common.cpp
+    src/align/align_pyramid.cpp
+    src/align/align_legacy.cpp
+    src/align/align_dense.cpp
+    src/align/align_warp.cpp
     src/align/freq_align.cpp
     src/merge/spatial.cpp
     src/merge/frequency.cpp

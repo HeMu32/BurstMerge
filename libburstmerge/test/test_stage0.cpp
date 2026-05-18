@@ -23,7 +23,7 @@ static int g_failed = 0;
 
 #define CHECK(cond, msg) do { \
     g_tests++; \
-    if (!(cond))
+    if (!(cond)) \
     { \
         std::cerr << "  FAIL [" << __LINE__ << "]: " << msg << std::endl; \
         g_failed++; \
@@ -510,8 +510,8 @@ static void test_module_params()
 
     burstmerge::AlignParams ap
     {};
-    CHECK_EQ(ap.tile_size, 32, "AlignParams.tile_size default");
-    CHECK_EQ(ap.search_distance, 64, "AlignParams.search_distance default");
+    CHECK_EQ(ap.tile_size, burstmerge::AlignConstants::kDefaultTileSize, "AlignParams.tile_size default");
+    CHECK_EQ(ap.search_distance, burstmerge::AlignConstants::kDefaultSearchDistance, "AlignParams.search_distance default");
 
     burstmerge::SpatialMergeParams sp
     {};

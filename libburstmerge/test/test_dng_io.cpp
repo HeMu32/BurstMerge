@@ -26,7 +26,7 @@ int g_failed = 0;
 
 #define CHECK(cond, msg) do { \
     ++g_checks; \
-    if (!(cond))
+    if (!(cond)) \
     { \
         std::cerr << "  FAIL [" << __LINE__ << "]: " << msg << std::endl; \
         ++g_failed; \

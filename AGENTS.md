@@ -10,3 +10,13 @@ DNG格式参考 DNG_Spec_1_7_1_0
 
 项目采用MinGW / G++编译. 不允许使用MSVC编译. 
 目前项目只关注Windows平台适配性, 其余平台的支持暂时作为后续拓展考虑. 
+
+项目目录结构说明:
+	- CMakeLists.txt: 顶层 CMake 构建入口。
+	- apps/: 可执行程序目录，包含 cli/、console/ 等应用目标。
+	- libburstmerge/: 核心库源码和单元测试目录，包括 include/、src/、test/。
+	- 3rdparty/: 第三方依赖目录，例如 dng_sdk、openmp、pocketfft、vulkan 等。
+	- Reference/: 参考资料目录，包含 hdr-plus-swift、hdrplus-paper、LibRaw、DNG 规范等。
+	- docs/: 项目文档与计划文件。
+	- build/: CMake 生成的构建输出目录。
+
