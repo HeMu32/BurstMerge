@@ -512,7 +512,6 @@ static void test_module_params()
     {};
     CHECK_EQ(ap.tile_size, 32, "AlignParams.tile_size default");
     CHECK_EQ(ap.search_distance, 64, "AlignParams.search_distance default");
-    CHECK_EQ(ap.pyramid_levels, 3, "AlignParams.pyramid_levels default");
 
     burstmerge::SpatialMergeParams sp
     {};

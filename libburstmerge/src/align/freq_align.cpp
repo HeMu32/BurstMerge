@@ -270,21 +270,22 @@ FourierResult FourierShiftSearch(
 {
     const size_t n = static_cast<size_t>(fw) * fh;
     const double kPi = 3.14159265358979323846;
-    constexpr int kGrid = 7;
+    // 6×6 grid covering ≈ ±0.417 plane-px with step 1/6.
+    // (ix - 2.5) * step  →  -0.417, -0.25, -0.083, 0.083, 0.25, 0.417
+    constexpr int kGrid = 6;
     constexpr double kStep = 1.0 / 6.0;
-    constexpr int kHalf = kGrid / 2;
+    constexpr double kOffset = (kGrid - 1) / 2.0;  // 2.5
 
-    // Search 7×7 grid of sub-pixel shifts
     double best_diff = 1e300;
     double best_sx = 0.0;
     double best_sy = 0.0;
 
-    for (int iy = -kHalf; iy <= kHalf; ++iy)
+    for (int iy = 0; iy < kGrid; ++iy)
     {
-        for (int ix = -kHalf; ix <= kHalf; ++ix)
+        for (int ix = 0; ix < kGrid; ++ix)
         {
-            double sx = static_cast<double>(ix) * kStep;
-            double sy = static_cast<double>(iy) * kStep;
+            double sx = (static_cast<double>(ix) - kOffset) * kStep;
+            double sy = (static_cast<double>(iy) - kOffset) * kStep;
 
             double diff = 0.0;
             for (uint32_t fy = 0; fy < fh; ++fy)
@@ -337,7 +338,10 @@ AlignmentResult EstimateFrequencyTileField(
     // ---- coarse global seed (SparseSad) ------------------------------------
     const FloatImage& coarsest_ref = ref_pyr.back();
     const FloatImage& coarsest_cmp = cmp_pyr.back();
-    const int coarse_max_shift = std::max(2, params.search_distance >> (n_levels - 1));
+    const int coarse_shift = AlignConstants::kSearchFractionShiftBase;
+    const uint32_t coarse_longest = std::max(coarsest_ref.width, coarsest_ref.height);
+    const int coarse_max_shift = std::max(AlignConstants::kMinSearchRadius,
+                                           static_cast<int>(coarse_longest >> coarse_shift));
 
     int gdx = 0;
     int gdy = 0;
@@ -361,8 +365,7 @@ AlignmentResult EstimateFrequencyTileField(
 
     AlignmentResult cur;
     cur.cfa_period = cfa;
-    cur.tile_size = std::max<int32_t>(AlignConstants::kMinTileSize,
-        params.tile_size >> (n_levels - 1));
+    cur.tile_size = AlignConstants::kDefaultTileSize;
     cur.tile_spacing = cur.tile_size;
     cur.tiles_x = 1;
     cur.tiles_y = 1;
@@ -372,7 +375,7 @@ AlignmentResult EstimateFrequencyTileField(
     cur.shift_y = gdy;
     cur.confidence = 1.0f;
 
-    constexpr int kIntSearchRadius = 1;  // 3×3 integer search around seed
+    const int kTileSearchR = AlignConstants::kTileSearchRadius;
 
     for (int level = n_levels - 1; level >= 0; --level)
     {
@@ -380,8 +383,7 @@ AlignmentResult EstimateFrequencyTileField(
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
 
-        const uint32_t ts = static_cast<uint32_t>(std::max<int>(
-            AlignConstants::kMinTileSize, params.tile_size >> level));
+        const uint32_t ts = AlignConstants::kDefaultTileSize;
         const uint32_t half = ts / 2;
         const uint32_t fw = ts;
         const uint32_t fh = ts;
@@ -392,22 +394,29 @@ AlignmentResult EstimateFrequencyTileField(
         const uint32_t ny = std::max<uint32_t>(
             1, static_cast<uint32_t>(
                 std::ceil(static_cast<double>(ref.height) / half)) - 1);
-        const int ds = (level == n_levels - 1) ? 0 : 2;
+        const bool is_coarsest = (level == n_levels - 1);
+        const int level_scale = is_coarsest ? 0 :
+            static_cast<int>(ref_pyr[static_cast<size_t>(level)].width /
+                             ref_pyr[static_cast<size_t>(level) + 1].width);
 
         std::vector<int16_t> ux(static_cast<size_t>(nx) * ny, 0);
         std::vector<int16_t> uy(static_cast<size_t>(nx) * ny, 0);
-        if (ds)
+        if (!is_coarsest)
         {
+            const int tile_ratio_x = std::max<int>(1, static_cast<int>(nx) /
+                std::max<int>(1, static_cast<int>(cur.tiles_x)));
+            const int tile_ratio_y = std::max<int>(1, static_cast<int>(ny) /
+                std::max<int>(1, static_cast<int>(cur.tiles_y)));
             for (uint32_t ty = 0; ty < ny; ++ty)
             {
                 for (uint32_t tx = 0; tx < nx; ++tx)
                 {
-                    uint32_t ppx = std::min(cur.tiles_x - 1, tx / 2);
-                    uint32_t ppy = std::min(cur.tiles_y - 1, ty / 2);
+                    uint32_t ppx = std::min(cur.tiles_x - 1, tx / tile_ratio_x);
+                    uint32_t ppy = std::min(cur.tiles_y - 1, ty / tile_ratio_y);
                     size_t d = static_cast<size_t>(ty) * nx + tx;
                     size_t s = static_cast<size_t>(ppy) * cur.tiles_x + ppx;
-                    ux[d] = static_cast<int16_t>(cur.tile_shift_x[s] * ds);
-                    uy[d] = static_cast<int16_t>(cur.tile_shift_y[s] * ds);
+                    ux[d] = static_cast<int16_t>(cur.tile_shift_x[s] * level_scale);
+                    uy[d] = static_cast<int16_t>(cur.tile_shift_y[s] * level_scale);
                 }
             }
         }
@@ -437,9 +446,9 @@ AlignmentResult EstimateFrequencyTileField(
                 int best_int_y = seed_y;
                 float best_int_cost = std::numeric_limits<float>::max();
 
-                for (int iy = -kIntSearchRadius; iy <= kIntSearchRadius; ++iy)
+                for (int iy = -kTileSearchR; iy <= kTileSearchR; ++iy)
                 {
-                    for (int ix = -kIntSearchRadius; ix <= kIntSearchRadius; ++ix)
+                    for (int ix = -kTileSearchR; ix <= kTileSearchR; ++ix)
                     {
                         int cand_x = seed_x + ix;
                         int cand_y = seed_y + iy;

@@ -37,6 +37,13 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
                                      uint32_t mosaic_width,
                                      uint32_t mosaic_height,
                                      uint32_t cfa_period);
+// Average all channels of a plane image into a single grayscale image.
+// For Bayer plane images (channels=4, CFA period=2) this is equivalent
+// to averaging each 2×2 RGGB block of the original mosaic.
+// TODO(X-Trans): add an X-Trans specific path that handles the 6×6
+// CFA pattern; the current channel-average fallback may not preserve
+// the correct colour phase for non-Bayer patterns.
+FloatImage ConvertPlanesToGrayscale(const FloatImage& src);
 float MaxValue(const FloatImage& src);
 
 } // namespace burstmerge

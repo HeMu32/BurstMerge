@@ -18,7 +18,8 @@ struct PipelineConstants
     static constexpr float kNoiseFloorMin = 8.0f;
     static constexpr float kRobustnessDiv = 13.0f;
     static constexpr float kRobustnessMin = 0.2f;
-    static constexpr float kTemporalNrThreshold = 22.5f;
+    // NOTE: kTemporalNrThreshold (22.5) was removed; "frame average" is now selected
+    // by --merge-algo, not by noise_reduction threshold.
     static constexpr float kBracketTransmissionFallbackEv = 1.0f;
     static constexpr int32_t kProgressStart = 0;
     static constexpr float kProgressValidate = 0.03f;

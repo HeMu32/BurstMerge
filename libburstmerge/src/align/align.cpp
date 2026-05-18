@@ -441,7 +441,7 @@ void SearchDense5x5(const FloatImage& ref,
                      std::vector<int16_t>& out_x,
                      std::vector<int16_t>& out_y)
 {
-    constexpr int kSearchDist = 2;
+    const int kSearchDist = AlignConstants::kTileSearchRadius;
     for (uint32_t ty = 0; ty < tiles_y; ++ty)
     {
         for (uint32_t tx = 0; tx < tiles_x; ++tx)
@@ -490,8 +490,10 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
     // hierarchical refinement adds per-tile local corrections via 5×5 search.
     const FloatImage& coarsest_ref = ref_pyr.back();
     const FloatImage& coarsest_cmp = cmp_pyr.back();
-    const int n_levels = static_cast<int>(ref_pyr.size());
-    const int coarse_max_shift = std::max(2, params.search_distance >> (n_levels - 1));
+    const int coarse_shift = AlignConstants::kSearchFractionShiftBase;  // 1/8 of coarsest level
+    const uint32_t coarse_longest = std::max(coarsest_ref.width, coarsest_ref.height);
+    const int coarse_max_shift = std::max(AlignConstants::kMinSearchRadius,
+                                           static_cast<int>(coarse_longest >> coarse_shift));
 
     int global_dx = 0;
     int global_dy = 0;
@@ -514,8 +516,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
 
     AlignmentResult cur;
     cur.cfa_period = std::max<uint32_t>(1, params.cfa_period);
-    cur.tile_size = std::max<int32_t>(AlignConstants::kMinTileSize,
-        params.tile_size >> (n_levels - 1));
+    cur.tile_size = AlignConstants::kDefaultTileSize;
     cur.tile_spacing = cur.tile_size;
     cur.tiles_x = 1;
     cur.tiles_y = 1;
@@ -525,34 +526,41 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
     cur.shift_y = global_dy;
     cur.confidence = 1.0f;
 
-    for (int level = n_levels - 1; level >= 0; --level)
+    for (int level = static_cast<int>(ref_pyr.size()) - 1; level >= 0; --level)
     {
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
-        const uint32_t tile_size = static_cast<uint32_t>(
-            std::max<int>(AlignConstants::kMinTileSize, params.tile_size >> level));
+        const uint32_t tile_size = AlignConstants::kDefaultTileSize;
         const uint32_t half_tile = tile_size / 2;
         const uint32_t tiles_x = std::max<uint32_t>(1,
             static_cast<uint32_t>(std::ceil(static_cast<double>(ref.width) / static_cast<double>(half_tile))) - 1);
         const uint32_t tiles_y = std::max<uint32_t>(1,
             static_cast<uint32_t>(std::ceil(static_cast<double>(ref.height) / static_cast<double>(half_tile))) - 1);
-        const int downscale = (level == static_cast<int>(ref_pyr.size()) - 1) ? 0 : 2;
+        // Dynamic scaling between levels (handles 2-4-4 pyramid).
+        const bool is_coarsest = (level == static_cast<int>(ref_pyr.size()) - 1);
+        const int level_scale = is_coarsest ? 0 :
+            static_cast<int>(ref_pyr[static_cast<size_t>(level)].width /
+                             ref_pyr[static_cast<size_t>(level) + 1].width);
 
         // Upsample previous alignment
         std::vector<int16_t> prev_x(static_cast<size_t>(tiles_x) * tiles_y, 0);
         std::vector<int16_t> prev_y(static_cast<size_t>(tiles_x) * tiles_y, 0);
-        if (downscale != 0)
+        if (!is_coarsest)
         {
+            const int tile_ratio_x = std::max<int>(1, static_cast<int>(tiles_x) /
+                std::max<int>(1, static_cast<int>(cur.tiles_x)));
+            const int tile_ratio_y = std::max<int>(1, static_cast<int>(tiles_y) /
+                std::max<int>(1, static_cast<int>(cur.tiles_y)));
             for (uint32_t ty = 0; ty < tiles_y; ++ty)
             {
                 for (uint32_t tx = 0; tx < tiles_x; ++tx)
                 {
-                    uint32_t px = std::min(cur.tiles_x - 1, tx / 2);
-                    uint32_t py = std::min(cur.tiles_y - 1, ty / 2);
+                    uint32_t px = std::min(cur.tiles_x - 1, tx / tile_ratio_x);
+                    uint32_t py = std::min(cur.tiles_y - 1, ty / tile_ratio_y);
                     size_t dst = static_cast<size_t>(ty) * tiles_x + tx;
                     size_t src = static_cast<size_t>(py) * cur.tiles_x + px;
-                    prev_x[dst] = static_cast<int16_t>(cur.tile_shift_x[src] * downscale);
-                    prev_y[dst] = static_cast<int16_t>(cur.tile_shift_y[src] * downscale);
+                    prev_x[dst] = static_cast<int16_t>(cur.tile_shift_x[src] * level_scale);
+                    prev_y[dst] = static_cast<int16_t>(cur.tile_shift_y[src] * level_scale);
                 }
             }
         }
@@ -563,7 +571,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
         // Step 1: correct_upsampling_error — test 3 candidates after upsampling
         std::vector<int16_t> corrected_x(static_cast<size_t>(tiles_x) * tiles_y);
         std::vector<int16_t> corrected_y(static_cast<size_t>(tiles_x) * tiles_y);
-        if (downscale != 0)
+        if (!is_coarsest)
         {
             CorrectUpsamplingError(ref, cmp, tiles_x, tiles_y, tile_size, half_tile,
                                    prev_x, prev_y, sample_step, weight_ssd,
@@ -644,23 +652,67 @@ int ClampInt(int v, int lo, int hi)
     return std::max(lo, std::min(v, hi));
 }
 
+// Pyramid structure: last step before full res is 2×, the rest are 4×.
+// Number of levels is driven by kMinCoarseTiles / kMaxCoarseTiles.
+static void BuildPyramid(const FloatImage& ref, const FloatImage& cmp,
+                         std::vector<FloatImage>& ref_pyr,
+                         std::vector<FloatImage>& cmp_pyr)
+{
+    const uint32_t half = static_cast<uint32_t>(AlignConstants::kDefaultTileSize) / 2;
+
+    auto level_tiles = [half](uint32_t w, uint32_t h) -> uint32_t
+    {
+        uint32_t nx = std::max(1u, (w + half - 1) / half) - 1;
+        uint32_t ny = std::max(1u, (h + half - 1) / half) - 1;
+        return nx * ny;
+    };
+
+    ref_pyr = {ref};
+    cmp_pyr = {cmp};
+
+    // Level 1 : 2× half — add when the scaled image would still
+    //           have at least kMinCoarseTiles tiles.
+    //           Note: actual implementation uses Downsample2x(), not a
+    //           true bicubic resample.
+    if (level_tiles(ref.width / 2, ref.height / 2) >=
+        static_cast<uint32_t>(AlignConstants::kMinCoarseTiles))
+    {
+        ref_pyr.push_back(Downsample2x(ref));
+        cmp_pyr.push_back(Downsample2x(cmp));
+
+        // Levels 2+ : 4× of previous via two 2× steps.
+        // Keep adding while the current level exceeds kMaxCoarseTiles
+        // and the next 4× level would still have ≥ kMinCoarseTiles tiles.
+        while (ref_pyr.back().width > 1 && ref_pyr.back().height > 1)
+        {
+            uint32_t w = ref_pyr.back().width;
+            uint32_t h = ref_pyr.back().height;
+            if (level_tiles(w, h) <=
+                static_cast<uint32_t>(AlignConstants::kMaxCoarseTiles))
+                break;
+            uint32_t w4 = w / 4;
+            uint32_t h4 = h / 4;
+            if (w4 == 0 || h4 == 0) break;
+            if (level_tiles(w4, h4) <
+                static_cast<uint32_t>(AlignConstants::kMinCoarseTiles))
+                break;
+            auto r_half = Downsample2x(ref_pyr.back());
+            auto c_half = Downsample2x(cmp_pyr.back());
+            ref_pyr.push_back(Downsample2x(r_half));
+            cmp_pyr.push_back(Downsample2x(c_half));
+        }
+    }
+}
+
 } // namespace
 
 AlignmentResult EstimateTranslation(const FloatImage& reference,
                                     const FloatImage& comparison,
                                     const AlignParams& params)
 {
-    std::vector<FloatImage> ref_pyr
-    {reference};
-    std::vector<FloatImage> cmp_pyr
-    {comparison};
-    while (ref_pyr.back().width > static_cast<uint32_t>(AlignConstants::kPyramidMinDimension) &&
-           ref_pyr.back().height > static_cast<uint32_t>(AlignConstants::kPyramidMinDimension) &&
-           static_cast<int>(ref_pyr.size()) < params.pyramid_levels)
-           {
-        ref_pyr.push_back(Downsample2x(ref_pyr.back()));
-        cmp_pyr.push_back(Downsample2x(cmp_pyr.back()));
-    }
+    std::vector<FloatImage> ref_pyr;
+    std::vector<FloatImage> cmp_pyr;
+    BuildPyramid(reference, comparison, ref_pyr, cmp_pyr);
 
     if (params.mode == AlignmentMode::DenseTile)
     {
@@ -681,11 +733,21 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
 
-        best_x *= 2;
-        best_y *= 2;
-        int radius = std::max(1, params.search_distance >> level);
-        radius = std::min(radius, 8);
-        int step = std::max(1, params.tile_size >> (level + 1));
+        // Scale the coarser-level shift by the actual pixel ratio.
+        if (level < static_cast<int>(ref_pyr.size()) - 1)
+        {
+            const int scale = static_cast<int>(ref_pyr[static_cast<size_t>(level)].width /
+                ref_pyr[static_cast<size_t>(level) + 1].width);
+            best_x *= scale;
+            best_y *= scale;
+        }
+        // Adaptive radius: 1/8 of longest side at coarsest, halving each finer level
+        const int pyr_n = static_cast<int>(ref_pyr.size());
+        const int shift = AlignConstants::kSearchFractionShiftBase + (pyr_n - 1 - level);
+        const uint32_t longest = std::max(ref.width, ref.height);
+        int radius = std::max(AlignConstants::kMinSearchRadius,
+                               static_cast<int>(longest >> shift));
+        int step = std::max(1, AlignConstants::kDefaultTileSize >> (level + 1));
 
         float level_best = std::numeric_limits<float>::max();
         int level_x = best_x;

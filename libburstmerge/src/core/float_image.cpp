@@ -264,6 +264,36 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
     return out;
 }
 
+FloatImage ConvertPlanesToGrayscale(const FloatImage& src)
+{
+    // TODO(X-Trans): add an X-Trans specific path that handles the 6×6
+    // CFA pattern; the current channel-average fallback may not preserve
+    // the correct colour phase for non-Bayer patterns.
+    FloatImage dst;
+    dst.width = src.width;
+    dst.height = src.height;
+    dst.channels = 1;
+    dst.data.assign(static_cast<size_t>(dst.width) * dst.height, 0.0f);
+
+    const uint32_t ch = std::max<uint32_t>(1, src.channels);
+    const float inv_ch = 1.0f / static_cast<float>(ch);
+
+    for (uint32_t y = 0; y < src.height; ++y)
+    {
+        for (uint32_t x = 0; x < src.width; ++x)
+        {
+            float sum = 0.0f;
+            for (uint32_t c = 0; c < ch; ++c)
+            {
+                sum += src.At(x, y, c);
+            }
+            dst.At(x, y, 0) = sum * inv_ch;
+        }
+    }
+
+    return dst;
+}
+
 float MaxValue(const FloatImage& src)
 {
     if (src.data.empty()) return 0.0f;

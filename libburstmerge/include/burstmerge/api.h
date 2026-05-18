@@ -10,7 +10,11 @@ namespace burstmerge
 enum class BackendType
 { CPU, Vulkan };
 enum class MergeAlgorithm
-{ Spatial, Frequency };
+{
+    Spatial,         // Pixel-domain weighted blending (Legacy or Linear sub-mode)
+    Frequency,       // Frequency-domain merge (Laplacian or WienerFft sub-mode)
+    TemporalAverage  // Simple exposure-weighted frame average; ignores noise_reduction
+};
 enum class ExposureMode
 { Off, Linear, Curve };
 enum class AlignmentMode

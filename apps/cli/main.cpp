@@ -11,17 +11,27 @@
 
 namespace {
 
+std::string Lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool ParseMergeAlgorithm(const std::string& value, burstmerge::MergeAlgorithm& out) {
+    std::string v = Lower(value);
+    if (v == "spatial") { out = burstmerge::MergeAlgorithm::Spatial; return true; }
+    if (v == "frequency" || v == "freq") { out = burstmerge::MergeAlgorithm::Frequency; return true; }
+    if (v == "temporal" || v == "temporal-average" || v == "average" || v == "avg") {
+        out = burstmerge::MergeAlgorithm::TemporalAverage; return true; }
+    return false;
+}
+
 const char* MergeAlgoName(burstmerge::MergeAlgorithm algo) {
     switch (algo) {
         case burstmerge::MergeAlgorithm::Spatial: return "Spatial";
         case burstmerge::MergeAlgorithm::Frequency: return "Frequency";
+        case burstmerge::MergeAlgorithm::TemporalAverage: return "TemporalAverage";
     }
     return "Unknown";
-}
-
-std::string Lower(std::string s) {
-    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return s;
 }
 
 bool ParseAlignmentMode(const std::string& value, burstmerge::AlignmentMode& out) {
@@ -77,8 +87,9 @@ int main(int argc, char* argv[]) {
         ("o,output", "Output DNG path or output directory", cxxopts::value<std::string>()->default_value("./out"))
         ("t,tile", "Tile size", cxxopts::value<int>()->default_value("32"))
         ("b,bit-depth", "Output bit depth (12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
-        ("f,frequency", "Use frequency merge placeholder flag")
-        ("n,noise-reduction", "Noise reduction strength (>=22.5 = temporal average)", cxxopts::value<float>())
+        ("f,frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
+        ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal)", cxxopts::value<float>())
+        ("merge-algo", "Merge algorithm: spatial, frequency, temporal", cxxopts::value<std::string>())
         ("alignment", "Alignment mode: legacy, dense, freq", cxxopts::value<std::string>()->default_value("legacy"))
         ("spatial-mode", "Spatial merge mode: legacy, linear", cxxopts::value<std::string>()->default_value("legacy"))
         ("frequency-mode", "Frequency mode: laplacian, wiener", cxxopts::value<std::string>()->default_value("laplacian"))
@@ -118,9 +129,20 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     settings.dng_bit_depth = bit_depth;
-    settings.merge_algo = args.count("frequency")
-        ? burstmerge::MergeAlgorithm::Frequency
-        : burstmerge::MergeAlgorithm::Spatial;
+    settings.merge_algo = burstmerge::MergeAlgorithm::Spatial;
+    if (args.count("merge-algo") &&
+        !ParseMergeAlgorithm(args["merge-algo"].as<std::string>(), settings.merge_algo)) {
+        std::cerr << "Invalid merge algorithm (use spatial, frequency, or temporal)" << std::endl;
+        return 2;
+    }
+    // --frequency / -f is a deprecated shorthand for --merge-algo frequency
+    if (args.count("frequency") && args.count("merge-algo")) {
+        std::cerr << "Cannot specify both --frequency and --merge-algo; use --merge-algo" << std::endl;
+        return 2;
+    }
+    if (args.count("frequency")) {
+        settings.merge_algo = burstmerge::MergeAlgorithm::Frequency;
+    }
     if (!ParseAlignmentMode(args["alignment"].as<std::string>(), settings.alignment_mode)) {
         std::cerr << "Invalid alignment mode (use legacy, dense, or freq)" << std::endl;
         return 2;

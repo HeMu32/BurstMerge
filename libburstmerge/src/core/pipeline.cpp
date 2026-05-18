@@ -298,7 +298,6 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     AlignParams params;
     params.tile_size = settings.tile_size;
     params.search_distance = settings.search_distance;
-    params.pyramid_levels = AlignConstants::kDefaultPyramidLevels;
     params.mode = settings.alignment_mode;
     // On plane images (channels > 1) the CFA phase is already separated per channel,
     // so the alignment does not need period snapping. Fall back to cfa_period=1.
@@ -318,10 +317,17 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                               size_t progress_idx,
                               size_t total_count) -> FloatImage
                               {
+        // Align on grayscale (average of all colour planes), then warp the
+        // full colour-plane image using the result.  This reduces alignment
+        // computation to 1/4 of the per-plane approach with negligible loss
+        // of alignment accuracy (the HDR+ paper uses the same strategy).
+        const FloatImage gray_ref = ConvertPlanesToGrayscale(guide_ref);
+        const FloatImage gray_src = ConvertPlanesToGrayscale(source);
+
         Report(progress,
                PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange * static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
                "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
-        AlignmentResult ar = EstimateTranslation(guide_ref, source, params);
+        AlignmentResult ar = EstimateTranslation(gray_ref, gray_src, params);
 
         Report(progress,
                PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange * static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
@@ -563,11 +569,18 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
 
         FloatImage merged;
-        if (settings_.noise_reduction >= PipelineConstants::kTemporalNrThreshold)
+        //
+        // Merge algorithm selection: three mutually exclusive paths.
+        // Exposure scales (for clipped-pixel detection / temporal weighting)
+        // are computed unconditionally above.
+        //
+        if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
         {
+            // TemporalAverage: simple exposure-weighted frame average.
+            // noise_reduction is ignored — averaging is averaging.
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal average");
             TemporalDenoiseParams params;
-            params.strength = settings_.noise_reduction;
+            params.strength = settings_.noise_reduction;   // stored but unused by TemporalAverage
             params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
             params.black_level = MeanBlackLevel(images[ref_idx].metadata);
             params.num_scales = static_cast<uint32_t>(exp_scales.size());
