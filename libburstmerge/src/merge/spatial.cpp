@@ -31,6 +31,12 @@ float ClampMin(float v, float lo)
     return v < lo ? lo : v;
 }
 
+uint32_t GrainRowsForImage(uint32_t width, uint32_t channels, uint32_t min_pixels)
+{
+    const uint64_t denom = std::max<uint64_t>(1, static_cast<uint64_t>(width) * std::max<uint32_t>(1, channels));
+    return static_cast<uint32_t>(std::max<uint64_t>(16, (static_cast<uint64_t>(min_pixels) + denom - 1) / denom));
+}
+
 burstmerge::FloatImage BinomialBlur(const burstmerge::FloatImage& src, int radius = 8)
 {
     if (src.data.empty()) return src;
@@ -177,7 +183,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
     if (reference.channels == 1)
     {
         // Single-channel (mosaic): per-pixel weight, each position one guide value
-        ParallelForRows(out.height, 32, [&](uint32_t y_begin, uint32_t y_end)
+        ParallelForRows(out.height, GrainRowsForImage(out.width, 1, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
         {
             for (uint32_t y = y_begin; y < y_end; ++y)
             {
@@ -242,7 +248,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
         // channel's misalignment does not create different blend factors per
         // channel. Per-channel weight divergence causes color banding and
         // gradient mixing artifacts that look like demosaicing failures.
-        ParallelForRows(out.height, 16, [&](uint32_t y_begin, uint32_t y_end)
+        ParallelForRows(out.height, GrainRowsForImage(out.width, out.channels, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
         {
             for (uint32_t y = y_begin; y < y_end; ++y)
             {

@@ -27,6 +27,8 @@ void ParallelForRows(uint32_t begin_row,
                      uint32_t grain_rows,
                      const std::function<void(uint32_t, uint32_t)>& fn);
 
+bool CanRunInParallel();
+
 inline void ParallelForRows(uint32_t rows,
                             uint32_t grain_rows,
                             const std::function<void(uint32_t, uint32_t)>& fn)

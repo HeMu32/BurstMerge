@@ -9,6 +9,17 @@
 namespace burstmerge
 {
 
+namespace
+{
+
+uint32_t GrainRowsForWarp(uint32_t width, uint32_t channels)
+{
+    const uint64_t denom = std::max<uint64_t>(1, static_cast<uint64_t>(width) * std::max<uint32_t>(1, channels));
+    return static_cast<uint32_t>(std::max<uint64_t>(32, ((1u << 18) + denom - 1) / denom));
+}
+
+} // namespace
+
 FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignment)
 {
     // Warping is separated from motion estimation so resampling behavior can
@@ -27,7 +38,7 @@ FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignmen
     out.channels = source.channels;
     out.data.resize(source.data.size(), 0.0f);
 
-    ParallelForRows(source.height, 32, [&](uint32_t y_begin, uint32_t y_end)
+    ParallelForRows(source.height, GrainRowsForWarp(source.width, source.channels), [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {

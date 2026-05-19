@@ -10,6 +10,17 @@
 namespace burstmerge
 {
 
+namespace
+{
+
+uint32_t GrainRowsForImage(uint32_t width, uint32_t channels, uint32_t min_pixels)
+{
+    const uint64_t denom = std::max<uint64_t>(1, static_cast<uint64_t>(width) * std::max<uint32_t>(1, channels));
+    return static_cast<uint32_t>(std::max<uint64_t>(16, (static_cast<uint64_t>(min_pixels) + denom - 1) / denom));
+}
+
+} // namespace
+
 // Frame statistics and normalization helpers used by the orchestrator but not
 // part of orchestration control flow itself.
 
@@ -36,7 +47,8 @@ float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size)
     const uint32_t step = std::max<uint32_t>(1, guide_block_size);
 
     const uint32_t sample_rows = (image.height + step - 1) / step;
-    const uint32_t grain_rows = std::max<uint32_t>(1, 128 / std::max<uint32_t>(1, step));
+    const uint32_t grain_rows = std::max<uint32_t>(1,
+        GrainRowsForImage(image.width, image.channels, 1u << 17) / std::max<uint32_t>(1, step));
     std::vector<double> partial_sum_sq(sample_rows, 0.0);
     std::vector<uint64_t> partial_count(sample_rows, 0);
     ParallelForRows(image.height, grain_rows, [&](uint32_t y0, uint32_t y1)

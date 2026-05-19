@@ -174,4 +174,10 @@ void ParallelForRows(uint32_t begin_row,
                 });
 }
 
+bool CanRunInParallel()
+{
+    TaskExecutor& executor = GetExecutor();
+    return executor.WorkerCount() > 0 && !g_in_worker_thread;
+}
+
 } // namespace burstmerge

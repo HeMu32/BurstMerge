@@ -138,6 +138,27 @@ struct TileMergeResult
     std::vector<float> pixels;
 };
 
+struct LegacyTileContext
+{
+    const FloatImage& reference;
+    const std::vector<FloatImage>& aligned_comparisons;
+    const FrequencyMergeParams& params;
+    double robustness_norm = 0.0;
+    double read_noise = 0.0;
+    size_t stack_size = 0;
+};
+
+struct RobustTileContext
+{
+    const FloatImage& reference;
+    const std::vector<FloatImage>& aligned_comparisons;
+    const FrequencyMergeParams& params;
+    double robustness_norm = 0.0;
+    double read_noise = 0.0;
+    double max_motion_norm = 0.0;
+    size_t stack_size = 0;
+};
+
 void AccumulateTileResult(const TileMergeResult& tile_result,
                           FloatImage& out,
                           FloatImage& norm)
@@ -259,9 +280,7 @@ TileStats ComputeTileStats(const FloatImage& reference,
     return stats;
 }
 
-TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
-                                        const std::vector<FloatImage>& aligned_comparisons,
-                                        const FrequencyMergeParams& params,
+TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
                                         uint32_t x0,
                                         uint32_t y0)
 {
@@ -269,19 +288,14 @@ TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
     result.x0 = x0;
     result.y0 = y0;
 
-    std::vector<const FloatImage*> stack;
-    stack.reserve(aligned_comparisons.size() + 1);
-    stack.push_back(&reference);
-    for (const auto& img : aligned_comparisons) stack.push_back(&img);
-
     const uint32_t tile = static_cast<uint32_t>(FrequencyConstants::kWienerTileSize);
-    const size_t tw = std::min<uint32_t>(tile, reference.width - x0);
-    const size_t th = std::min<uint32_t>(tile, reference.height - y0);
+    const size_t tw = std::min<uint32_t>(tile, ctx.reference.width - x0);
+    const size_t th = std::min<uint32_t>(tile, ctx.reference.height - y0);
     const size_t n = tw * th;
     result.tw = static_cast<uint32_t>(tw);
     result.th = static_cast<uint32_t>(th);
     result.window.resize(n, 1.0);
-    result.pixels.assign(static_cast<size_t>(tw) * th * reference.channels, 0.0f);
+    result.pixels.assign(static_cast<size_t>(tw) * th * ctx.reference.channels, 0.0f);
 
     for (size_t yy = 0; yy < th; ++yy)
     {
@@ -292,24 +306,19 @@ TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
         }
     }
 
-    const double robustness_rev = 0.5 *
-        (FrequencyConstants::kRobustnessRevOffset - static_cast<double>(static_cast<int>(params.noise_reduction + 0.5f)));
-    const double robustness_norm = std::pow(2.0, -robustness_rev + FrequencyConstants::kRobustnessNormBase);
-    const double read_noise = std::pow(std::pow(2.0, -robustness_rev + FrequencyConstants::kReadNoiseBase), FrequencyConstants::kReadNoiseExp);
-
     std::vector<std::vector<std::complex<double>>> ref_spectra(
-        reference.channels, std::vector<std::complex<double>>(n));
+        ctx.reference.channels, std::vector<std::complex<double>>(n));
     std::vector<std::vector<std::complex<double>>> merged_spectra(
-        reference.channels, std::vector<std::complex<double>>(n));
+        ctx.reference.channels, std::vector<std::complex<double>>(n));
 
     double rms = 0.0;
-    for (uint32_t c = 0; c < reference.channels; ++c)
+    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
         for (size_t yy = 0; yy < th; ++yy)
         {
             for (size_t xx = 0; xx < tw; ++xx)
             {
-                const double sample = reference.At(
+                const double sample = ctx.reference.At(
                     x0 + static_cast<uint32_t>(xx),
                     y0 + static_cast<uint32_t>(yy), c);
                 ref_spectra[c][yy * tw + xx] = sample;
@@ -321,15 +330,15 @@ TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
     }
 
     rms = FrequencyConstants::kRmsScale * std::sqrt(rms) /
-        std::max<size_t>(1, n * reference.channels);
+        std::max<size_t>(1, n * ctx.reference.channels);
     const double noise_norm =
-        (rms + read_noise) * static_cast<double>(tile * tile) * robustness_norm;
+        (rms + ctx.read_noise) * static_cast<double>(tile * tile) * ctx.robustness_norm;
 
-    for (const auto& comp_img : aligned_comparisons)
+    for (const auto& comp_img : ctx.aligned_comparisons)
     {
         std::vector<std::vector<std::complex<double>>> comp_spectra(
-            reference.channels, std::vector<std::complex<double>>(n));
-        for (uint32_t c = 0; c < reference.channels; ++c)
+            ctx.reference.channels, std::vector<std::complex<double>>(n));
+        for (uint32_t c = 0; c < ctx.reference.channels; ++c)
         {
             for (size_t yy = 0; yy < th; ++yy)
             {
@@ -380,7 +389,7 @@ TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
                                 std::sin(-2.0 * kPi *
                                     (static_cast<double>(fx) * sx / static_cast<double>(tw) +
                                      static_cast<double>(fy) * sy / static_cast<double>(th))));
-                        for (uint32_t c = 0; c < reference.channels; ++c)
+                        for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                         {
                             const auto d = ref_spectra[c][fy * tw + fx] -
                                 comp_spectra[c][fy * tw + fx] * phase;
@@ -414,16 +423,16 @@ TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
                             (static_cast<double>(fx) * best_sx / static_cast<double>(tw) +
                              static_cast<double>(fy) * best_sy / static_cast<double>(th))));
                 double d2_mean = 0.0;
-                std::vector<std::complex<double>> shifted(reference.channels);
-                for (uint32_t c = 0; c < reference.channels; ++c)
+                std::vector<std::complex<double>> shifted(ctx.reference.channels);
+                for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
                     shifted[c] = comp_spectra[c][k] * phase;
                     d2_mean += std::norm(ref_spectra[c][k] - shifted[c]);
                 }
-                d2_mean /= static_cast<double>(reference.channels);
+                d2_mean /= static_cast<double>(ctx.reference.channels);
                 double weight = d2_mean / (d2_mean + std::max(1e-9, noise_norm));
                 if (k == 0) weight = 0.0;
-                for (uint32_t c = 0; c < reference.channels; ++c)
+                for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
                     merged_spectra[c][k] +=
                         (1.0 - weight) * shifted[c] + weight * ref_spectra[c][k];
@@ -432,8 +441,8 @@ TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
         }
     }
 
-    const double inv_stack = 1.0 / static_cast<double>(stack.size());
-    for (uint32_t c = 0; c < reference.channels; ++c)
+    const double inv_stack = 1.0 / static_cast<double>(ctx.stack_size);
+    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
         Fft2D(merged_spectra[c], tw, th, true);
         for (size_t yy = 0; yy < th; ++yy)
@@ -441,7 +450,7 @@ TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
             for (size_t xx = 0; xx < tw; ++xx)
             {
                 const size_t k = yy * tw + xx;
-                const size_t out_idx = (yy * tw + xx) * reference.channels + c;
+                const size_t out_idx = (yy * tw + xx) * ctx.reference.channels + c;
                 result.pixels[out_idx] =
                     static_cast<float>(merged_spectra[c][k].real() * inv_stack * result.window[k]);
             }
@@ -451,9 +460,7 @@ TileMergeResult ComputeLegacyTileResult(const FloatImage& reference,
     return result;
 }
 
-TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
-                                        const std::vector<FloatImage>& aligned_comparisons,
-                                        const FrequencyMergeParams& params,
+TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
                                         uint32_t x0,
                                         uint32_t y0)
 {
@@ -461,19 +468,14 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
     result.x0 = x0;
     result.y0 = y0;
 
-    std::vector<const FloatImage*> stack;
-    stack.reserve(aligned_comparisons.size() + 1);
-    stack.push_back(&reference);
-    for (const auto& img : aligned_comparisons) stack.push_back(&img);
-
     const uint32_t tile = static_cast<uint32_t>(FrequencyConstants::kWienerTileSize);
-    const size_t tw = std::min<uint32_t>(tile, reference.width - x0);
-    const size_t th = std::min<uint32_t>(tile, reference.height - y0);
+    const size_t tw = std::min<uint32_t>(tile, ctx.reference.width - x0);
+    const size_t th = std::min<uint32_t>(tile, ctx.reference.height - y0);
     const size_t n = tw * th;
     result.tw = static_cast<uint32_t>(tw);
     result.th = static_cast<uint32_t>(th);
     result.window.resize(n, 1.0);
-    result.pixels.assign(static_cast<size_t>(tw) * th * reference.channels, 0.0f);
+    result.pixels.assign(static_cast<size_t>(tw) * th * ctx.reference.channels, 0.0f);
 
     for (size_t yy = 0; yy < th; ++yy)
     {
@@ -484,24 +486,18 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
         }
     }
 
-    const double robustness_rev = 0.5 *
-        (FrequencyConstants::kRobustnessRevOffset - static_cast<double>(static_cast<int>(params.noise_reduction + 0.5f)));
-    const double robustness_norm = std::pow(2.0, -robustness_rev + FrequencyConstants::kRobustnessNormBase);
-    const double read_noise = std::pow(std::pow(2.0, -robustness_rev + FrequencyConstants::kReadNoiseBase), FrequencyConstants::kReadNoiseExp);
-    const double max_motion_norm = std::max(1.0, std::pow(1.3, 11.0 - robustness_rev));
-
     std::vector<std::vector<std::complex<double>>> ref_spectra(
-        reference.channels, std::vector<std::complex<double>>(n));
+        ctx.reference.channels, std::vector<std::complex<double>>(n));
     std::vector<std::vector<std::complex<double>>> merged_spectra(
-        reference.channels, std::vector<std::complex<double>>(n));
+        ctx.reference.channels, std::vector<std::complex<double>>(n));
 
-    for (uint32_t c = 0; c < reference.channels; ++c)
+    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
         for (size_t yy = 0; yy < th; ++yy)
         {
             for (size_t xx = 0; xx < tw; ++xx)
             {
-                ref_spectra[c][yy * tw + xx] = reference.At(
+                ref_spectra[c][yy * tw + xx] = ctx.reference.At(
                     x0 + static_cast<uint32_t>(xx),
                     y0 + static_cast<uint32_t>(yy), c);
             }
@@ -515,22 +511,22 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
         TileStats stats;
         double exposure_factor = 1.0;
     };
-    std::vector<CompTileStats> comp_stats(aligned_comparisons.size());
-    for (size_t comp_idx = 0; comp_idx < aligned_comparisons.size(); ++comp_idx)
+    std::vector<CompTileStats> comp_stats(ctx.aligned_comparisons.size());
+    for (size_t comp_idx = 0; comp_idx < ctx.aligned_comparisons.size(); ++comp_idx)
     {
         const double exposure_factor =
-            (params.exposure_scales != nullptr && comp_idx < static_cast<size_t>(params.num_scales))
-            ? std::max(1e-6f, params.exposure_scales[comp_idx])
+            (ctx.params.exposure_scales != nullptr && comp_idx < static_cast<size_t>(ctx.params.num_scales))
+            ? std::max(1e-6f, ctx.params.exposure_scales[comp_idx])
             : 1.0;
         comp_stats[comp_idx].exposure_factor = exposure_factor;
-        comp_stats[comp_idx].stats = ComputeTileStats(reference,
-                                                      aligned_comparisons[comp_idx],
+        comp_stats[comp_idx].stats = ComputeTileStats(ctx.reference,
+                                                      ctx.aligned_comparisons[comp_idx],
                                                       x0,
                                                       y0,
                                                       tw,
                                                       th,
                                                       exposure_factor,
-                                                      params);
+                                                      ctx.params);
     }
 
     const double mean_mismatch = comp_stats.empty() ? 0.0 : [&]()
@@ -548,15 +544,15 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
     }
 
     const double noise_norm =
-        (comp_stats.empty() ? 0.0 : comp_stats[0].stats.rms) + read_noise;
+        (comp_stats.empty() ? 0.0 : comp_stats[0].stats.rms) + ctx.read_noise;
 
-    for (size_t comp_idx = 0; comp_idx < aligned_comparisons.size(); ++comp_idx)
+    for (size_t comp_idx = 0; comp_idx < ctx.aligned_comparisons.size(); ++comp_idx)
     {
-        const FloatImage& comp_img = aligned_comparisons[comp_idx];
+        const FloatImage& comp_img = ctx.aligned_comparisons[comp_idx];
         const auto& tile_stats = comp_stats[comp_idx];
         std::vector<std::vector<std::complex<double>>> comp_spectra(
-            reference.channels, std::vector<std::complex<double>>(n));
-        for (uint32_t c = 0; c < reference.channels; ++c)
+            ctx.reference.channels, std::vector<std::complex<double>>(n));
+        for (uint32_t c = 0; c < ctx.reference.channels; ++c)
         {
             for (size_t yy = 0; yy < th; ++yy)
             {
@@ -607,7 +603,7 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
                                 std::sin(-2.0 * kPi *
                                     (static_cast<double>(fx) * sx / static_cast<double>(tw) +
                                      static_cast<double>(fy) * sy / static_cast<double>(th))));
-                        for (uint32_t c = 0; c < reference.channels; ++c)
+                        for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                         {
                             const auto d = ref_spectra[c][fy * tw + fx] -
                                 comp_spectra[c][fy * tw + fx] * phase;
@@ -629,9 +625,9 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
         const double mismatch_weight = ClampDouble(
             1.0 - 10.0 * (tile_stats.stats.mismatch - 0.2), 0.0, 1.0);
         const double motion_norm = ClampDouble(
-            max_motion_norm - (tile_stats.stats.mismatch - 0.02) *
-            (max_motion_norm - 1.0) / 0.15,
-            1.0, max_motion_norm);
+            ctx.max_motion_norm - (tile_stats.stats.mismatch - 0.02) *
+            (ctx.max_motion_norm - 1.0) / 0.15,
+            1.0, ctx.max_motion_norm);
         const double motion_norm_exposure =
             std::min(4.0, tile_stats.exposure_factor) * std::sqrt(motion_norm);
 
@@ -652,15 +648,15 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
                 double d2_mean = 0.0;
                 double ref_mag_sum = 0.0;
                 double shifted_mag_sum = 0.0;
-                std::vector<std::complex<double>> shifted(reference.channels);
-                for (uint32_t c = 0; c < reference.channels; ++c)
+                std::vector<std::complex<double>> shifted(ctx.reference.channels);
+                for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
                     shifted[c] = comp_spectra[c][k] * phase;
                     d2_mean += std::norm(ref_spectra[c][k] - shifted[c]);
                     ref_mag_sum += std::abs(ref_spectra[c][k]);
                     shifted_mag_sum += std::abs(shifted[c]);
                 }
-                d2_mean /= static_cast<double>(reference.channels);
+                d2_mean /= static_cast<double>(ctx.reference.channels);
                 double magnitude_norm = 1.0;
                 if (fx + fy > 0 && tile_stats.stats.mismatch < 0.3 &&
                     std::abs(tile_stats.exposure_factor - 1.0) < 1e-3)
@@ -672,11 +668,11 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
                 }
                 const double denom = d2_mean +
                     magnitude_norm * motion_norm_exposure *
-                    (noise_norm * static_cast<double>(tile * tile) * robustness_norm) *
+                    (noise_norm * static_cast<double>(tile * tile) * ctx.robustness_norm) *
                     tile_stats.stats.highlights_norm;
                 double weight = d2_mean / std::max(1e-9, denom);
                 if (k == 0) weight = 0.0;
-                for (uint32_t c = 0; c < reference.channels; ++c)
+                for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
                     merged_spectra[c][k] +=
                         (1.0 - weight) * shifted[c] + weight * ref_spectra[c][k];
@@ -690,7 +686,7 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
     const double mismatch_avg = comp_stats.empty() ? 0.0 :
         total_mismatch / static_cast<double>(comp_stats.size());
 
-    for (uint32_t c = 0; c < reference.channels; ++c)
+    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
         const size_t dc = 0;
         const double magnitude_zero = std::abs(merged_spectra[c][dc]);
@@ -714,8 +710,8 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
         }
     }
 
-    const double inv_stack = 1.0 / static_cast<double>(stack.size());
-    for (uint32_t c = 0; c < reference.channels; ++c)
+    const double inv_stack = 1.0 / static_cast<double>(ctx.stack_size);
+    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
         Fft2D(merged_spectra[c], tw, th, true);
         for (size_t yy = 0; yy < th; ++yy)
@@ -723,7 +719,7 @@ TileMergeResult ComputeRobustTileResult(const FloatImage& reference,
             for (size_t xx = 0; xx < tw; ++xx)
             {
                 const size_t k = yy * tw + xx;
-                const size_t out_idx = (yy * tw + xx) * reference.channels + c;
+                const size_t out_idx = (yy * tw + xx) * ctx.reference.channels + c;
                 result.pixels[out_idx] =
                     static_cast<float>(merged_spectra[c][k].real() * inv_stack * result.window[k]);
             }
@@ -815,6 +811,14 @@ FloatImage WienerFftMerge(const FloatImage& reference,
 
     const uint32_t tile = static_cast<uint32_t>(FrequencyConstants::kWienerTileSize);
     const uint32_t stride = std::max<uint32_t>(1, tile / 2);
+    const double robustness_rev = 0.5 *
+        (FrequencyConstants::kRobustnessRevOffset - static_cast<double>(static_cast<int>(params.noise_reduction + 0.5f)));
+    const double robustness_norm = std::pow(2.0, -robustness_rev + FrequencyConstants::kRobustnessNormBase);
+    const double read_noise = std::pow(std::pow(2.0, -robustness_rev + FrequencyConstants::kReadNoiseBase), FrequencyConstants::kReadNoiseExp);
+    const double max_motion_norm = std::max(1.0, std::pow(1.3, 11.0 - robustness_rev));
+    const RobustTileContext ctx{reference, aligned_comparisons, params,
+                                robustness_norm, read_noise, max_motion_norm,
+                                aligned_comparisons.size() + 1};
 
     const ShiftPass passes[FrequencyConstants::kWienerShiftPasses] =
     {
@@ -846,6 +850,16 @@ FloatImage WienerFftMerge(const FloatImage& reference,
                 x_coords.push_back(x0);
             }
 
+            if (!CanRunInParallel())
+            {
+                for (uint32_t x0 : x_coords)
+                {
+                    TileMergeResult tile_result = ComputeRobustTileResult(ctx, x0, y0);
+                    AccumulateTileResult(tile_result, pass_out, pass_norm);
+                }
+                continue;
+            }
+
             const size_t tile_batch = 16;
             for (size_t base = 0; base < x_coords.size(); base += tile_batch)
             {
@@ -855,9 +869,7 @@ FloatImage WienerFftMerge(const FloatImage& reference,
                 {
                     for (size_t i = i0; i < i1; ++i)
                     {
-                        row_results[i] = ComputeRobustTileResult(reference,
-                                                                 aligned_comparisons,
-                                                                 params,
+                        row_results[i] = ComputeRobustTileResult(ctx,
                                                                  x_coords[base + i],
                                                                  y0);
                     }
@@ -913,6 +925,13 @@ FloatImage WienerFftMergeLegacy(const FloatImage& reference,
 
     const uint32_t tile = static_cast<uint32_t>(FrequencyConstants::kWienerTileSize);
     const uint32_t stride = std::max<uint32_t>(1, tile / 2);
+    const double robustness_rev = 0.5 *
+        (FrequencyConstants::kRobustnessRevOffset - static_cast<double>(static_cast<int>(params.noise_reduction + 0.5f)));
+    const double robustness_norm = std::pow(2.0, -robustness_rev + FrequencyConstants::kRobustnessNormBase);
+    const double read_noise = std::pow(std::pow(2.0, -robustness_rev + FrequencyConstants::kReadNoiseBase), FrequencyConstants::kReadNoiseExp);
+    const LegacyTileContext ctx{reference, aligned_comparisons, params,
+                                robustness_norm, read_noise,
+                                aligned_comparisons.size() + 1};
 
     for (uint32_t y0 = 0; y0 < reference.height; y0 += stride)
     {
@@ -920,6 +939,16 @@ FloatImage WienerFftMergeLegacy(const FloatImage& reference,
         for (uint32_t x0 = 0; x0 < reference.width; x0 += stride)
         {
             x_coords.push_back(x0);
+        }
+
+        if (!CanRunInParallel())
+        {
+            for (uint32_t x0 : x_coords)
+            {
+                TileMergeResult tile_result = ComputeLegacyTileResult(ctx, x0, y0);
+                AccumulateTileResult(tile_result, out, norm);
+            }
+            continue;
         }
 
         const size_t tile_batch = 16;
@@ -931,9 +960,7 @@ FloatImage WienerFftMergeLegacy(const FloatImage& reference,
             {
                 for (size_t i = i0; i < i1; ++i)
                 {
-                    row_results[i] = ComputeLegacyTileResult(reference,
-                                                             aligned_comparisons,
-                                                             params,
+                    row_results[i] = ComputeLegacyTileResult(ctx,
                                                              x_coords[base + i],
                                                              y0);
                 }
