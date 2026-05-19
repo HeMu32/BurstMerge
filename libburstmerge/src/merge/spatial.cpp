@@ -1,5 +1,7 @@
 ﻿#include "burstmerge/internal/merge/spatial.h"
 
+#include "burstmerge/internal/core/task_executor.h"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -175,19 +177,21 @@ FloatImage SpatialMerge(const FloatImage& reference,
     if (reference.channels == 1)
     {
         // Single-channel (mosaic): per-pixel weight, each position one guide value
-        for (uint32_t y = 0; y < out.height; ++y)
+        ParallelForRows(out.height, 32, [&](uint32_t y_begin, uint32_t y_end)
         {
-            for (uint32_t x = 0; x < out.width; ++x)
+            for (uint32_t y = y_begin; y < y_end; ++y)
             {
-                const size_t i = (static_cast<size_t>(y) * out.width + x);
-
-                    float ref_guide = linear_mode ? ref_blur.data[i] : BlockMean(reference, x, y, guide_block);
-                float weighted_sum = reference.data[i];
-                float weight_sum = 1.0f;
-
-                for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+                for (uint32_t x = 0; x < out.width; ++x)
                 {
-                    float cmp_guide = linear_mode ? cmp_blurs[idx].data[i] : BlockMean(aligned_comparisons[idx], x, y, guide_block);
+                    const size_t i = (static_cast<size_t>(y) * out.width + x);
+
+                        float ref_guide = linear_mode ? ref_blur.data[i] : BlockMean(reference, x, y, guide_block);
+                    float weighted_sum = reference.data[i];
+                    float weight_sum = 1.0f;
+
+                    for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+                    {
+                        float cmp_guide = linear_mode ? cmp_blurs[idx].data[i] : BlockMean(aligned_comparisons[idx], x, y, guide_block);
 
                     // Detect clipped comparison pixels: estimated original value
                     // (before normalization scaling) above clip_threshold means
@@ -223,13 +227,14 @@ FloatImage SpatialMerge(const FloatImage& reference,
                         }
                     }
 
-                    weighted_sum += aligned_comparisons[idx].data[i] * w;
-                    weight_sum += w;
-                }
+                        weighted_sum += aligned_comparisons[idx].data[i] * w;
+                        weight_sum += w;
+                    }
 
-                out.data[i] = weighted_sum / weight_sum;
+                    out.data[i] = weighted_sum / weight_sum;
+                }
             }
-        }
+        });
     } else
     {
         // Multi-channel (CFA planes or RGB): use a single shared weight per
@@ -237,83 +242,81 @@ FloatImage SpatialMerge(const FloatImage& reference,
         // channel's misalignment does not create different blend factors per
         // channel. Per-channel weight divergence causes color banding and
         // gradient mixing artifacts that look like demosaicing failures.
-        for (uint32_t y = 0; y < out.height; ++y)
+        ParallelForRows(out.height, 16, [&](uint32_t y_begin, uint32_t y_end)
         {
-            for (uint32_t x = 0; x < out.width; ++x)
+            for (uint32_t y = y_begin; y < y_end; ++y)
             {
-                // Global saturated/clipped flags (shared across channels)
-                float ref_raw_guide = 0.0f;
-                float cmp_raw_max[32] =
-                {};
-                for (uint32_t c = 0; c < out.channels; ++c)
+                for (uint32_t x = 0; x < out.width; ++x)
                 {
-                    const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
-                    ref_raw_guide = std::max(ref_raw_guide, reference.data[ci]);
+                    float ref_raw_guide = 0.0f;
+                    float cmp_raw_max[32] = {};
+                    for (uint32_t c = 0; c < out.channels; ++c)
+                    {
+                        const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
+                        ref_raw_guide = std::max(ref_raw_guide, reference.data[ci]);
+                        for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+                        {
+                            cmp_raw_max[idx] = std::max(cmp_raw_max[idx], aligned_comparisons[idx].data[ci]);
+                        }
+                    }
+
+                    std::vector<float> shared_w(aligned_comparisons.size(), 1.0f);
                     for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
                     {
-                        cmp_raw_max[idx] = std::max(cmp_raw_max[idx], aligned_comparisons[idx].data[ci]);
-                    }
-                }
-
-                // Compute a single shared weight per comparison frame using
-                // max_diff across all channels (both linear and legacy modes).
-                std::vector<float> shared_w(aligned_comparisons.size(), 1.0f);
-                for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
-                {
-                    bool cmp_clipped = false;
-                    if (params.clip_threshold > 0.0f && params.exposure_scales &&
-                        idx < params.num_scales && params.exposure_scales[idx] > 0.0f)
+                        bool cmp_clipped = false;
+                        if (params.clip_threshold > 0.0f && params.exposure_scales &&
+                            idx < params.num_scales && params.exposure_scales[idx] > 0.0f)
                         {
-                        float estimated_original = cmp_raw_max[idx] / params.exposure_scales[idx];
-                        if (estimated_original >= params.clip_threshold) cmp_clipped = true;
-                    }
-                    if (cmp_clipped)
-                    {
-                        shared_w[idx] = 0.0f;
-                    } else if (ref_raw_guide >= highlight_threshold || cmp_raw_max[idx] >= highlight_threshold)
-                    {
-                        shared_w[idx] = 1.0f;
-                    } else
-                    {
-                        float max_diff = 0.0f;
-                        for (uint32_t c = 0; c < out.channels; ++c)
-                        {
-                            const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
-                            float d = std::abs(cmp_blurs[idx].data[ci] - ref_blur.data[ci]);
-                            max_diff = std::max(max_diff, d);
+                            float estimated_original = cmp_raw_max[idx] / params.exposure_scales[idx];
+                            if (estimated_original >= params.clip_threshold) cmp_clipped = true;
                         }
-                        if (linear_mode)
+                        if (cmp_clipped)
                         {
-                            float threshold = std::max(1.0f, noise_floor / std::max(0.001f, robustness));
-                            shared_w[idx] = max_diff >= threshold ? 0.0f : Clamp01(1.0f - max_diff / threshold);
+                            shared_w[idx] = 0.0f;
+                        } else if (ref_raw_guide >= highlight_threshold || cmp_raw_max[idx] >= highlight_threshold)
+                        {
+                            shared_w[idx] = 1.0f;
                         } else
                         {
-                            float ratio = max_diff / noise_floor;
-                            shared_w[idx] = 1.0f / (1.0f + ratio * ratio * robustness);
-                            shared_w[idx] = ClampMin(shared_w[idx], min_comparison_weight);
+                            float max_diff = 0.0f;
+                            for (uint32_t c = 0; c < out.channels; ++c)
+                            {
+                                const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
+                                float d = std::abs(cmp_blurs[idx].data[ci] - ref_blur.data[ci]);
+                                max_diff = std::max(max_diff, d);
+                            }
+                            if (linear_mode)
+                            {
+                                float threshold = std::max(1.0f, noise_floor / std::max(0.001f, robustness));
+                                shared_w[idx] = max_diff >= threshold ? 0.0f : Clamp01(1.0f - max_diff / threshold);
+                            } else
+                            {
+                                float ratio = max_diff / noise_floor;
+                                shared_w[idx] = 1.0f / (1.0f + ratio * ratio * robustness);
+                                shared_w[idx] = ClampMin(shared_w[idx], min_comparison_weight);
+                            }
                         }
                     }
-                }
 
-                // Per-channel merge using shared weights (identical across channels)
-                for (uint32_t c = 0; c < out.channels; ++c)
-                {
-                    const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
-
-                    float weighted_sum = reference.data[ci];
-                    float weight_sum = 1.0f;
-
-                    for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+                    for (uint32_t c = 0; c < out.channels; ++c)
                     {
-                        float w = shared_w[idx];
-                        weighted_sum += aligned_comparisons[idx].data[ci] * w;
-                        weight_sum += w;
-                    }
+                        const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
 
-                    out.data[ci] = weighted_sum / weight_sum;
+                        float weighted_sum = reference.data[ci];
+                        float weight_sum = 1.0f;
+
+                        for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+                        {
+                            float w = shared_w[idx];
+                            weighted_sum += aligned_comparisons[idx].data[ci] * w;
+                            weight_sum += w;
+                        }
+
+                        out.data[ci] = weighted_sum / weight_sum;
+                    }
                 }
             }
-        }
+        });
     }
     return out;
 }

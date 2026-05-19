@@ -1,5 +1,7 @@
 ﻿#include "burstmerge/internal/core/float_image.h"
 
+#include "burstmerge/internal/core/task_executor.h"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -43,20 +45,29 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale)
         case PixelFormat::R8_Uint:
         {
             const auto* p = reinterpret_cast<const uint8_t*>(src.data);
-            for (size_t i = 0; i < count; ++i) out.data[i] = static_cast<float>(p[i]) * scale;
+            ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
+            {
+                for (size_t i = i0; i < i1; ++i) out.data[i] = static_cast<float>(p[i]) * scale;
+            });
             break;
         }
         case PixelFormat::R16_Uint:
         {
             const auto* p = reinterpret_cast<const uint16_t*>(src.data);
-            for (size_t i = 0; i < count; ++i) out.data[i] = static_cast<float>(p[i]) * scale;
+            ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
+            {
+                for (size_t i = i0; i < i1; ++i) out.data[i] = static_cast<float>(p[i]) * scale;
+            });
             break;
         }
         case PixelFormat::R32_Float:
         case PixelFormat::RGBA32_Float:
         {
             const auto* p = reinterpret_cast<const float*>(src.data);
-            for (size_t i = 0; i < count; ++i) out.data[i] = p[i] * scale;
+            ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
+            {
+                for (size_t i = i0; i < i1; ++i) out.data[i] = p[i] * scale;
+            });
             break;
         }
     }
@@ -84,11 +95,14 @@ HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_le
     auto* dst = reinterpret_cast<uint16_t*>(out.data);
     const size_t count = static_cast<size_t>(src.width) * src.height;
     const float hi = static_cast<float>(white_level);
-    for (size_t i = 0; i < count; ++i)
+    ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
     {
-        float v = std::max(0.0f, std::min(src.data[i], hi));
-        dst[i] = static_cast<uint16_t>(std::lround(v));
-    }
+        for (size_t i = i0; i < i1; ++i)
+        {
+            float v = std::max(0.0f, std::min(src.data[i], hi));
+            dst[i] = static_cast<uint16_t>(std::lround(v));
+        }
+    });
     return out;
 }
 
@@ -100,28 +114,31 @@ FloatImage Downsample2x(const FloatImage& src)
     out.channels = src.channels;
     out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels, 0.0f);
 
-    for (uint32_t y = 0; y < out.height; ++y)
+    ParallelForRows(out.height, 32, [&](uint32_t y_begin, uint32_t y_end)
     {
-        for (uint32_t x = 0; x < out.width; ++x)
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            for (uint32_t c = 0; c < out.channels; ++c)
+            for (uint32_t x = 0; x < out.width; ++x)
             {
-                uint32_t sx = x * 2;
-                uint32_t sy = y * 2;
-                float sum = 0.0f;
-                int n = 0;
-                for (uint32_t dy = 0; dy < 2 && sy + dy < src.height; ++dy)
+                for (uint32_t c = 0; c < out.channels; ++c)
                 {
-                    for (uint32_t dx = 0; dx < 2 && sx + dx < src.width; ++dx)
+                    uint32_t sx = x * 2;
+                    uint32_t sy = y * 2;
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (uint32_t dy = 0; dy < 2 && sy + dy < src.height; ++dy)
                     {
-                        sum += src.At(sx + dx, sy + dy, c);
-                        ++n;
+                        for (uint32_t dx = 0; dx < 2 && sx + dx < src.width; ++dx)
+                        {
+                            sum += src.At(sx + dx, sy + dy, c);
+                            ++n;
+                        }
                     }
+                    out.At(x, y, c) = n > 0 ? sum / static_cast<float>(n) : 0.0f;
                 }
-                out.At(x, y, c) = n > 0 ? sum / static_cast<float>(n) : 0.0f;
             }
         }
-    }
+    });
     return out;
 }
 
@@ -134,26 +151,29 @@ FloatImage BoxBlur(const FloatImage& src, int radius)
     out.channels = src.channels;
     out.data.resize(src.data.size(), 0.0f);
 
-    for (uint32_t y = 0; y < src.height; ++y)
+    ParallelForRows(src.height, 16, [&](uint32_t y_begin, uint32_t y_end)
     {
-        for (uint32_t x = 0; x < src.width; ++x)
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            for (uint32_t c = 0; c < src.channels; ++c)
+            for (uint32_t x = 0; x < src.width; ++x)
             {
-                float sum = 0.0f;
-                int n = 0;
-                for (int dy = -radius; dy <= radius; ++dy)
+                for (uint32_t c = 0; c < src.channels; ++c)
                 {
-                    for (int dx = -radius; dx <= radius; ++dx)
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (int dy = -radius; dy <= radius; ++dy)
                     {
-                        sum += SampleClamped(src, static_cast<int>(x) + dx, static_cast<int>(y) + dy, c);
-                        ++n;
+                        for (int dx = -radius; dx <= radius; ++dx)
+                        {
+                            sum += SampleClamped(src, static_cast<int>(x) + dx, static_cast<int>(y) + dy, c);
+                            ++n;
+                        }
                     }
+                    out.At(x, y, c) = sum / static_cast<float>(n);
                 }
-                out.At(x, y, c) = sum / static_cast<float>(n);
             }
         }
-    }
+    });
     return out;
 }
 
@@ -165,44 +185,23 @@ FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y)
     out.channels = src.channels;
     out.data.resize(src.data.size(), 0.0f);
 
-    for (uint32_t y = 0; y < src.height; ++y)
+    ParallelForRows(src.height, 32, [&](uint32_t y_begin, uint32_t y_end)
     {
-        for (uint32_t x = 0; x < src.width; ++x)
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            float sx = static_cast<float>(x) - shift_x;
-            float sy = static_cast<float>(y) - shift_y;
-            int nx = static_cast<int>(std::lround(sx));
-            int ny = static_cast<int>(std::lround(sy));
-
-            // Use nearest-neighbor for the simple alignment warp path.
-            // This can preserve edge acutance better than bilinear blending,
-            // so results may look slightly sharper.
-            for (uint32_t c = 0; c < src.channels; ++c)
+            for (uint32_t x = 0; x < src.width; ++x)
             {
-                out.At(x, y, c) = SampleClamped(src, nx, ny, c);
+                float sx = static_cast<float>(x) - shift_x;
+                float sy = static_cast<float>(y) - shift_y;
+                int nx = static_cast<int>(std::lround(sx));
+                int ny = static_cast<int>(std::lround(sy));
+                for (uint32_t c = 0; c < src.channels; ++c)
+                {
+                    out.At(x, y, c) = SampleClamped(src, nx, ny, c);
+                }
             }
-
-/*
-            int x0 = static_cast<int>(std::floor(sx));
-            int y0 = static_cast<int>(std::floor(sy));
-            int x1 = x0 + 1;
-            int y1 = y0 + 1;
-            float tx = sx - static_cast<float>(x0);
-            float ty = sy - static_cast<float>(y0);
-
-            for (uint32_t c = 0; c < src.channels; ++c)
-            {
-                float p00 = SampleClamped(src, x0, y0, c);
-                float p10 = SampleClamped(src, x1, y0, c);
-                float p01 = SampleClamped(src, x0, y1, c);
-                float p11 = SampleClamped(src, x1, y1, c);
-                float a = p00 * (1.0f - tx) + p10 * tx;
-                float b = p01 * (1.0f - tx) + p11 * tx;
-                out.At(x, y, c) = a * (1.0f - ty) + b * ty;
-            }
-*/
         }
-    }
+    });
     return out;
 }
 
@@ -216,18 +215,21 @@ FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period)
     out.channels = cfa_period * cfa_period;
     out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels, 0.0f);
 
-    for (uint32_t y = 0; y < src.height; ++y)
+    ParallelForRows(src.height, 32, [&](uint32_t y_begin, uint32_t y_end)
     {
-        uint32_t py = y % cfa_period;
-        uint32_t oy = y / cfa_period;
-        for (uint32_t x = 0; x < src.width; ++x)
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            uint32_t px = x % cfa_period;
-            uint32_t ox = x / cfa_period;
-            uint32_t c = py * cfa_period + px;
-            out.At(ox, oy, c) = src.At(x, y, 0);
+            uint32_t py = y % cfa_period;
+            uint32_t oy = y / cfa_period;
+            for (uint32_t x = 0; x < src.width; ++x)
+            {
+                uint32_t px = x % cfa_period;
+                uint32_t ox = x / cfa_period;
+                uint32_t c = py * cfa_period + px;
+                out.At(ox, oy, c) = src.At(x, y, 0);
+            }
         }
-    }
+    });
 
     return out;
 }
@@ -248,18 +250,21 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
     out.channels = 1;
     out.data.resize(static_cast<size_t>(out.width) * out.height, 0.0f);
 
-    for (uint32_t y = 0; y < out.height; ++y)
+    ParallelForRows(out.height, 32, [&](uint32_t y_begin, uint32_t y_end)
     {
-        uint32_t py = y % cfa_period;
-        uint32_t sy = y / cfa_period;
-        for (uint32_t x = 0; x < out.width; ++x)
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            uint32_t px = x % cfa_period;
-            uint32_t sx = x / cfa_period;
-            uint32_t c = py * cfa_period + px;
-            out.At(x, y, 0) = src.At(sx, sy, c);
+            uint32_t py = y % cfa_period;
+            uint32_t sy = y / cfa_period;
+            for (uint32_t x = 0; x < out.width; ++x)
+            {
+                uint32_t px = x % cfa_period;
+                uint32_t sx = x / cfa_period;
+                uint32_t c = py * cfa_period + px;
+                out.At(x, y, 0) = src.At(sx, sy, c);
+            }
         }
-    }
+    });
 
     return out;
 }
@@ -278,18 +283,21 @@ FloatImage ConvertPlanesToGrayscale(const FloatImage& src)
     const uint32_t ch = std::max<uint32_t>(1, src.channels);
     const float inv_ch = 1.0f / static_cast<float>(ch);
 
-    for (uint32_t y = 0; y < src.height; ++y)
+    ParallelForRows(src.height, 32, [&](uint32_t y_begin, uint32_t y_end)
     {
-        for (uint32_t x = 0; x < src.width; ++x)
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            float sum = 0.0f;
-            for (uint32_t c = 0; c < ch; ++c)
+            for (uint32_t x = 0; x < src.width; ++x)
             {
-                sum += src.At(x, y, c);
+                float sum = 0.0f;
+                for (uint32_t c = 0; c < ch; ++c)
+                {
+                    sum += src.At(x, y, c);
+                }
+                dst.At(x, y, 0) = sum * inv_ch;
             }
-            dst.At(x, y, 0) = sum * inv_ch;
         }
-    }
+    });
 
     return dst;
 }

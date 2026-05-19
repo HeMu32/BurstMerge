@@ -2,6 +2,7 @@
 
 #include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
+#include "burstmerge/internal/core/task_executor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -95,14 +96,17 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     if (!use_transmission)
     {
         const FloatImage& ref = float_images[ref_idx];
-        size_t processed = 0;
         const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
-        for (size_t i = 0; i < float_images.size(); ++i)
+        aligned.resize(total);
+        ParallelFor(float_images.size(), 1, [&](size_t i0, size_t i1)
         {
-            if (i == ref_idx) continue;
-            aligned.push_back(align_and_warp(ref, float_images[i], processed, total));
-            ++processed;
-        }
+            for (size_t i = i0; i < i1; ++i)
+            {
+                if (i == ref_idx) continue;
+                const size_t out_idx = (i < ref_idx) ? i : (i - 1);
+                aligned[out_idx] = align_and_warp(ref, float_images[i], out_idx, total);
+            }
+        });
         return aligned;
     }
 

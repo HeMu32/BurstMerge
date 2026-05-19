@@ -2,6 +2,8 @@
 
 #include "burstmerge/internal/align/align_common.h"
 
+#include "burstmerge/internal/core/task_executor.h"
+
 #include <cmath>
 #include <limits>
 
@@ -25,45 +27,48 @@ void CorrectUpsamplingError(const FloatImage& ref,
                             std::vector<int16_t>& out_x,
                             std::vector<int16_t>& out_y)
 {
-    for (uint32_t ty = 0; ty < tiles_y; ++ty)
+    ParallelForRows(tiles_y, 16, [&](uint32_t ty_begin, uint32_t ty_end)
     {
-        for (uint32_t tx = 0; tx < tiles_x; ++tx)
+        for (uint32_t ty = ty_begin; ty < ty_end; ++ty)
         {
-            size_t idx = static_cast<size_t>(ty) * tiles_x + tx;
-            int cand_x[3] =
-            {static_cast<int>(tx), static_cast<int>(tx), static_cast<int>(tx)};
-            int cand_y[3] =
-            {static_cast<int>(ty), static_cast<int>(ty), static_cast<int>(ty)};
-            cand_x[1] = std::max(0, std::min(static_cast<int>(tiles_x) - 1,
-                static_cast<int>(tx) + ((tx % 2 == 0) ? -1 : 1)));
-            cand_y[2] = std::max(0, std::min(static_cast<int>(tiles_y) - 1,
-                static_cast<int>(ty) + ((ty % 2 == 0) ? -1 : 1)));
-
-            float best_score = std::numeric_limits<float>::max();
-            int best_dx = prev_x[idx];
-            int best_dy = prev_y[idx];
-
-            for (int c = 0; c < 3; ++c)
+            for (uint32_t tx = 0; tx < tiles_x; ++tx)
             {
-                size_t cidx = static_cast<size_t>(cand_y[c]) * tiles_x + static_cast<uint32_t>(cand_x[c]);
-                int dx = prev_x[cidx];
-                int dy = prev_y[cidx];
-                float score = TileCost(ref, cmp,
-                    tx * half_tile, ty * half_tile,
-                    tile_size, tile_size,
-                    dx, dy, sample_step, weight_ssd > 0);
-                if (score < best_score)
-                {
-                    best_score = score;
-                    best_dx = dx;
-                    best_dy = dy;
-                }
-            }
+                size_t idx = static_cast<size_t>(ty) * tiles_x + tx;
+                int cand_x[3] =
+                {static_cast<int>(tx), static_cast<int>(tx), static_cast<int>(tx)};
+                int cand_y[3] =
+                {static_cast<int>(ty), static_cast<int>(ty), static_cast<int>(ty)};
+                cand_x[1] = std::max(0, std::min(static_cast<int>(tiles_x) - 1,
+                    static_cast<int>(tx) + ((tx % 2 == 0) ? -1 : 1)));
+                cand_y[2] = std::max(0, std::min(static_cast<int>(tiles_y) - 1,
+                    static_cast<int>(ty) + ((ty % 2 == 0) ? -1 : 1)));
 
-            out_x[idx] = static_cast<int16_t>(best_dx);
-            out_y[idx] = static_cast<int16_t>(best_dy);
+                float best_score = std::numeric_limits<float>::max();
+                int best_dx = prev_x[idx];
+                int best_dy = prev_y[idx];
+
+                for (int c = 0; c < 3; ++c)
+                {
+                    size_t cidx = static_cast<size_t>(cand_y[c]) * tiles_x + static_cast<uint32_t>(cand_x[c]);
+                    int dx = prev_x[cidx];
+                    int dy = prev_y[cidx];
+                    float score = TileCost(ref, cmp,
+                        tx * half_tile, ty * half_tile,
+                        tile_size, tile_size,
+                        dx, dy, sample_step, weight_ssd > 0);
+                    if (score < best_score)
+                    {
+                        best_score = score;
+                        best_dx = dx;
+                        best_dy = dy;
+                    }
+                }
+
+                out_x[idx] = static_cast<int16_t>(best_dx);
+                out_y[idx] = static_cast<int16_t>(best_dy);
+            }
         }
-    }
+    });
 }
 
 void SearchDenseLocal(const FloatImage& ref,
@@ -81,41 +86,44 @@ void SearchDenseLocal(const FloatImage& ref,
                       std::vector<int16_t>& out_y)
 {
     const int kSearchDist = AlignConstants::kTileSearchRadius;
-    for (uint32_t ty = 0; ty < tiles_y; ++ty)
+    ParallelForRows(tiles_y, 16, [&](uint32_t ty_begin, uint32_t ty_end)
     {
-        for (uint32_t tx = 0; tx < tiles_x; ++tx)
+        for (uint32_t ty = ty_begin; ty < ty_end; ++ty)
         {
-            size_t idx = static_cast<size_t>(ty) * tiles_x + tx;
-            int sx0 = seed_x[idx];
-            int sy0 = seed_y[idx];
-
-            float best_score = std::numeric_limits<float>::max();
-            int best_x = sx0;
-            int best_y = sy0;
-
-            for (int dy = sy0 - kSearchDist; dy <= sy0 + kSearchDist; ++dy)
+            for (uint32_t tx = 0; tx < tiles_x; ++tx)
             {
-                for (int dx = sx0 - kSearchDist; dx <= sx0 + kSearchDist; ++dx)
+                size_t idx = static_cast<size_t>(ty) * tiles_x + tx;
+                int sx0 = seed_x[idx];
+                int sy0 = seed_y[idx];
+
+                float best_score = std::numeric_limits<float>::max();
+                int best_x = sx0;
+                int best_y = sy0;
+
+                for (int dy = sy0 - kSearchDist; dy <= sy0 + kSearchDist; ++dy)
                 {
-                    int sx = SnapToPeriod(dx, cfa_period);
-                    int sy = SnapToPeriod(dy, cfa_period);
-                    float score = TileCost(ref, cmp,
-                        tx * half_tile, ty * half_tile,
-                        tile_size, tile_size,
-                        sx, sy, sample_step, weight_ssd > 0);
-                    if (score < best_score)
+                    for (int dx = sx0 - kSearchDist; dx <= sx0 + kSearchDist; ++dx)
                     {
-                        best_score = score;
-                        best_x = sx;
-                        best_y = sy;
+                        int sx = SnapToPeriod(dx, cfa_period);
+                        int sy = SnapToPeriod(dy, cfa_period);
+                        float score = TileCost(ref, cmp,
+                            tx * half_tile, ty * half_tile,
+                            tile_size, tile_size,
+                            sx, sy, sample_step, weight_ssd > 0);
+                        if (score < best_score)
+                        {
+                            best_score = score;
+                            best_x = sx;
+                            best_y = sy;
+                        }
                     }
                 }
-            }
 
-            out_x[idx] = static_cast<int16_t>(best_x);
-            out_y[idx] = static_cast<int16_t>(best_y);
+                out_x[idx] = static_cast<int16_t>(best_x);
+                out_y[idx] = static_cast<int16_t>(best_y);
+            }
         }
-    }
+    });
 }
 
 } // namespace
@@ -185,18 +193,21 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
                 std::max<int>(1, static_cast<int>(cur.tiles_x)));
             const int tile_ratio_y = std::max<int>(1, static_cast<int>(tiles_y) /
                 std::max<int>(1, static_cast<int>(cur.tiles_y)));
-            for (uint32_t ty = 0; ty < tiles_y; ++ty)
+            ParallelForRows(tiles_y, 16, [&](uint32_t ty_begin, uint32_t ty_end)
             {
-                for (uint32_t tx = 0; tx < tiles_x; ++tx)
+                for (uint32_t ty = ty_begin; ty < ty_end; ++ty)
                 {
-                    uint32_t px = std::min(cur.tiles_x - 1, tx / tile_ratio_x);
-                    uint32_t py = std::min(cur.tiles_y - 1, ty / tile_ratio_y);
-                    size_t dst = static_cast<size_t>(ty) * tiles_x + tx;
-                    size_t src = static_cast<size_t>(py) * cur.tiles_x + px;
-                    prev_x[dst] = static_cast<int16_t>(cur.tile_shift_x[src] * level_scale);
-                    prev_y[dst] = static_cast<int16_t>(cur.tile_shift_y[src] * level_scale);
+                    for (uint32_t tx = 0; tx < tiles_x; ++tx)
+                    {
+                        uint32_t px = std::min(cur.tiles_x - 1, tx / tile_ratio_x);
+                        uint32_t py = std::min(cur.tiles_y - 1, ty / tile_ratio_y);
+                        size_t dst = static_cast<size_t>(ty) * tiles_x + tx;
+                        size_t src = static_cast<size_t>(py) * cur.tiles_x + px;
+                        prev_x[dst] = static_cast<int16_t>(cur.tile_shift_x[src] * level_scale);
+                        prev_y[dst] = static_cast<int16_t>(cur.tile_shift_y[src] * level_scale);
+                    }
                 }
-            }
+            });
         }
 
         const int weight_ssd = (level > 0) ? 1 : 0;
