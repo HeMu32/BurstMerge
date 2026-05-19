@@ -1,5 +1,6 @@
 ﻿#include "burstmerge/internal/merge/frequency.h"
 
+#include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"
 
 #include <algorithm>
@@ -159,26 +160,66 @@ struct RobustTileContext
     size_t stack_size = 0;
 };
 
-void AccumulateTileResult(const TileMergeResult& tile_result,
-                          FloatImage& out,
-                          FloatImage& norm)
+struct TileBandResult
+{
+    uint32_t y0 = 0;
+    FloatImage out;
+    FloatImage norm;
+};
+
+TileBandResult MakeBandResult(const FloatImage& reference,
+                              uint32_t y0,
+                              uint32_t y1)
+{
+    TileBandResult band;
+    band.y0 = y0;
+    band.out.width = reference.width;
+    band.out.height = y1 - y0;
+    band.out.channels = reference.channels;
+    band.out.data.assign(static_cast<size_t>(band.out.width) * band.out.height * band.out.channels, 0.0f);
+    band.norm.width = reference.width;
+    band.norm.height = y1 - y0;
+    band.norm.channels = 1;
+    band.norm.data.assign(static_cast<size_t>(band.norm.width) * band.norm.height, 0.0f);
+    return band;
+}
+
+void AccumulateTileResultToBand(const TileMergeResult& tile_result,
+                                TileBandResult& band)
 {
     for (uint32_t yy = 0; yy < tile_result.th; ++yy)
     {
+        const uint32_t gy = tile_result.y0 + yy;
+        if (gy < band.y0 || gy >= band.y0 + band.out.height) continue;
+        const uint32_t by = gy - band.y0;
         for (uint32_t xx = 0; xx < tile_result.tw; ++xx)
         {
             const size_t k = static_cast<size_t>(yy) * tile_result.tw + xx;
             const double w = tile_result.window[k];
-            for (uint32_t c = 0; c < out.channels; ++c)
+            for (uint32_t c = 0; c < band.out.channels; ++c)
             {
-                const size_t src_idx = (k * out.channels) + c;
-                out.At(tile_result.x0 + xx,
-                       tile_result.y0 + yy,
-                       c) += tile_result.pixels[src_idx];
+                const size_t src_idx = (k * band.out.channels) + c;
+                band.out.At(tile_result.x0 + xx, by, c) += tile_result.pixels[src_idx];
             }
-            norm.At(tile_result.x0 + xx,
-                    tile_result.y0 + yy,
-                    0) += static_cast<float>(w);
+            band.norm.At(tile_result.x0 + xx, by, 0) += static_cast<float>(w);
+        }
+    }
+}
+
+void MergeBandIntoImage(const TileBandResult& band,
+                        FloatImage& out,
+                        FloatImage& norm)
+{
+    for (uint32_t y = 0; y < band.out.height; ++y)
+    {
+        const uint32_t gy = band.y0 + y;
+        for (uint32_t x = 0; x < band.out.width; ++x)
+        {
+            for (uint32_t c = 0; c < band.out.channels; ++c)
+            {
+                out.At(x, gy, c) += band.out.At(x, y, c);
+            }
+            norm.At(x, gy, 0) += band.norm.At(x, y, 0);
         }
     }
 }
@@ -801,6 +842,7 @@ FloatImage WienerFftMerge(const FloatImage& reference,
                           const std::vector<FloatImage>& aligned_comparisons,
                           const FrequencyMergeParams& params)
 {
+    ProfileScope scope("time.merge.wiener_robust_total");
     if (aligned_comparisons.empty()) return reference;
 
     FloatImage out;
@@ -842,44 +884,45 @@ FloatImage WienerFftMerge(const FloatImage& reference,
         pass_norm.channels = 1;
         pass_norm.data.resize(static_cast<size_t>(reference.width) * reference.height, 0.0f);
 
+        std::vector<uint32_t> y_coords;
         for (uint32_t y0 = pass.y; y0 < reference.height; y0 += stride)
         {
-            std::vector<uint32_t> x_coords;
-            for (uint32_t x0 = pass.x; x0 < reference.width; x0 += stride)
-            {
-                x_coords.push_back(x0);
-            }
+            y_coords.push_back(y0);
+        }
 
-            if (!CanRunInParallel())
+        const size_t band_count = RecommendedBandCount(static_cast<uint32_t>(y_coords.size()), kBandCountPerThread, kBandCountMax);
+        std::vector<TileBandResult> bands(band_count);
+        ParallelFor(band_count, 1, [&](size_t b0, size_t b1)
+        {
+            for (size_t b = b0; b < b1; ++b)
             {
-                for (uint32_t x0 : x_coords)
+                const size_t row_begin = (y_coords.size() * b) / band_count;
+                const size_t row_end = (y_coords.size() * (b + 1)) / band_count;
+                if (row_begin >= row_end)
                 {
-                    TileMergeResult tile_result = ComputeRobustTileResult(ctx, x0, y0);
-                    AccumulateTileResult(tile_result, pass_out, pass_norm);
+                    bands[b] = MakeBandResult(reference, 0, 0);
+                    continue;
                 }
-                continue;
-            }
-
-            const size_t tile_batch = 16;
-            for (size_t base = 0; base < x_coords.size(); base += tile_batch)
-            {
-                const size_t batch_end = std::min(x_coords.size(), base + tile_batch);
-                std::vector<TileMergeResult> row_results(batch_end - base);
-                ParallelFor(batch_end - base, 1, [&](size_t i0, size_t i1)
+                const uint32_t band_y0 = y_coords[row_begin];
+                const uint32_t band_y1 = std::min<uint32_t>(reference.height,
+                    y_coords[row_end - 1] + tile);
+                TileBandResult band = MakeBandResult(reference, band_y0, band_y1);
+                for (size_t row = row_begin; row < row_end; ++row)
                 {
-                    for (size_t i = i0; i < i1; ++i)
+                    const uint32_t y0 = y_coords[row];
+                    for (uint32_t x0 = pass.x; x0 < reference.width; x0 += stride)
                     {
-                        row_results[i] = ComputeRobustTileResult(ctx,
-                                                                 x_coords[base + i],
-                                                                 y0);
+                        TileMergeResult tile_result = ComputeRobustTileResult(ctx, x0, y0);
+                        AccumulateTileResultToBand(tile_result, band);
                     }
-                });
-
-                for (const auto& tile_result : row_results)
-                {
-                    AccumulateTileResult(tile_result, pass_out, pass_norm);
                 }
+                bands[b] = std::move(band);
             }
+        });
+
+        for (const auto& band : bands)
+        {
+            MergeBandIntoImage(band, pass_out, pass_norm);
         }
 
         for (uint32_t y = 0; y < pass_out.height; ++y)
@@ -909,6 +952,7 @@ FloatImage WienerFftMergeLegacy(const FloatImage& reference,
                                 const std::vector<FloatImage>& aligned_comparisons,
                                 const FrequencyMergeParams& params)
 {
+    ProfileScope scope("time.merge.wiener_legacy_total");
     if (aligned_comparisons.empty()) return reference;
 
     FloatImage out;
@@ -933,44 +977,45 @@ FloatImage WienerFftMergeLegacy(const FloatImage& reference,
                                 robustness_norm, read_noise,
                                 aligned_comparisons.size() + 1};
 
+    std::vector<uint32_t> y_coords;
     for (uint32_t y0 = 0; y0 < reference.height; y0 += stride)
     {
-        std::vector<uint32_t> x_coords;
-        for (uint32_t x0 = 0; x0 < reference.width; x0 += stride)
-        {
-            x_coords.push_back(x0);
-        }
+        y_coords.push_back(y0);
+    }
 
-        if (!CanRunInParallel())
+    const size_t band_count = std::min<size_t>(y_coords.size(), std::max<size_t>(1, ParallelismHint() * 2));
+    std::vector<TileBandResult> bands(band_count);
+    ParallelFor(band_count, 1, [&](size_t b0, size_t b1)
+    {
+        for (size_t b = b0; b < b1; ++b)
         {
-            for (uint32_t x0 : x_coords)
+            const size_t row_begin = (y_coords.size() * b) / band_count;
+            const size_t row_end = (y_coords.size() * (b + 1)) / band_count;
+            if (row_begin >= row_end)
             {
-                TileMergeResult tile_result = ComputeLegacyTileResult(ctx, x0, y0);
-                AccumulateTileResult(tile_result, out, norm);
+                bands[b] = MakeBandResult(reference, 0, 0);
+                continue;
             }
-            continue;
-        }
-
-        const size_t tile_batch = 16;
-        for (size_t base = 0; base < x_coords.size(); base += tile_batch)
-        {
-            const size_t batch_end = std::min(x_coords.size(), base + tile_batch);
-            std::vector<TileMergeResult> row_results(batch_end - base);
-            ParallelFor(batch_end - base, 1, [&](size_t i0, size_t i1)
+            const uint32_t band_y0 = y_coords[row_begin];
+            const uint32_t band_y1 = std::min<uint32_t>(reference.height,
+                y_coords[row_end - 1] + tile);
+            TileBandResult band = MakeBandResult(reference, band_y0, band_y1);
+            for (size_t row = row_begin; row < row_end; ++row)
             {
-                for (size_t i = i0; i < i1; ++i)
+                const uint32_t y0 = y_coords[row];
+                for (uint32_t x0 = 0; x0 < reference.width; x0 += stride)
                 {
-                    row_results[i] = ComputeLegacyTileResult(ctx,
-                                                             x_coords[base + i],
-                                                             y0);
+                    TileMergeResult tile_result = ComputeLegacyTileResult(ctx, x0, y0);
+                    AccumulateTileResultToBand(tile_result, band);
                 }
-            });
-
-            for (const auto& tile_result : row_results)
-            {
-                AccumulateTileResult(tile_result, out, norm);
             }
+            bands[b] = std::move(band);
         }
+    });
+
+    for (const auto& band : bands)
+    {
+        MergeBandIntoImage(band, out, norm);
     }
 
     for (uint32_t y = 0; y < out.height; ++y)
@@ -994,6 +1039,7 @@ FloatImage FrequencyMerge(const FloatImage& reference,
                           const std::vector<FloatImage>& aligned_comparisons,
                           const FrequencyMergeParams& params)
 {
+    ProfileScope scope("time.merge.frequency_total");
     if (params.mode == FrequencyMode::WienerFftLegacy)
     {
         return WienerFftMergeLegacy(reference, aligned_comparisons, params);

@@ -1,5 +1,7 @@
 #include "burstmerge/internal/align/align.h"
+#include "burstmerge/internal/align/align_common.h"
 #include "burstmerge/internal/core/float_image.h"
+#include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"
 
 #include <algorithm>
@@ -93,136 +95,7 @@ void Fft2D(std::vector<std::complex<double>>& data, size_t w, size_t h,
 //    ref[x,y] vs cmp[x-dx, y-dy]  → best dx means cmp shifted RIGHT by dx.
 // ===========================================================================
 
-float SparseSad2(const FloatImage& a, const FloatImage& b, int dx, int dy,
-    int step)
-{
-    int mx = std::abs(dx);
-    int my = std::abs(dy);
-
-    if (a.width <= static_cast<uint32_t>(mx * 2) ||
-        a.height <= static_cast<uint32_t>(my * 2))
-    {
-        return std::numeric_limits<float>::max();
-    }
-
-    double sad = 0.0;
-    uint64_t cnt = 0;
-
-    for (int y = my; y < static_cast<int>(a.height) - my; y += step)
-    {
-        for (int x = mx; x < static_cast<int>(a.width) - mx; x += step)
-        {
-            for (uint32_t c = 0; c < a.channels; ++c)
-            {
-                sad += std::abs(
-                    a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
-                    b.At(static_cast<uint32_t>(x - dx), static_cast<uint32_t>(y - dy), c));
-                ++cnt;
-            }
-        }
-    }
-
-    return cnt ? static_cast<float>(sad / static_cast<double>(cnt))
-               : std::numeric_limits<float>::max();
-}
-
-// ---------------------------------------------------------------------------
-//  Per-tile SAD  (for integer search at a tile position)
-// ---------------------------------------------------------------------------
-
-float TileSad2(const FloatImage& ref, const FloatImage& cmp,
-    uint32_t x0, uint32_t y0, uint32_t tw, uint32_t th,
-    int dx, int dy)
-{
-    double sad = 0.0;
-    uint64_t cnt = 0;
-
-    for (uint32_t y = 0; y < th; ++y)
-    {
-        int by = static_cast<int>(y0 + y) - dy;
-        if (by < 0 || by >= static_cast<int>(cmp.height))
-        {
-            continue;
-        }
-
-        for (uint32_t x = 0; x < tw; ++x)
-        {
-            int bx = static_cast<int>(x0 + x) - dx;
-            if (bx < 0 || bx >= static_cast<int>(cmp.width))
-            {
-                continue;
-            }
-
-            for (uint32_t c = 0; c < ref.channels; ++c)
-            {
-                sad += std::abs(ref.At(x0 + x, y0 + y, c) -
-                                cmp.At(static_cast<uint32_t>(bx),
-                                       static_cast<uint32_t>(by), c));
-                ++cnt;
-            }
-        }
-    }
-
-    return cnt ? static_cast<float>(sad / static_cast<double>(cnt))
-               : std::numeric_limits<float>::max();
-}
-
-// ===========================================================================
-//  Smooth tile field
-// ===========================================================================
-
-void SmoothField(AlignmentResult& r)
-{
-    if (r.tiles_x == 0 || r.tiles_y == 0)
-    {
-        return;
-    }
-
-    auto sxv = r.tile_shift_x;
-    auto syv = r.tile_shift_y;
-
-    for (uint32_t ty = 0; ty < r.tiles_y; ++ty)
-    {
-        for (uint32_t tx = 0; tx < r.tiles_x; ++tx)
-        {
-            int sx = 0;
-            int sy = 0;
-            int n = 0;
-
-            for (int oy = -1; oy <= 1; ++oy)
-            {
-                int ny = static_cast<int>(ty) + oy;
-                if (ny < 0 || ny >= static_cast<int>(r.tiles_y))
-                {
-                    continue;
-                }
-
-                for (int ox = -1; ox <= 1; ++ox)
-                {
-                    int nx = static_cast<int>(tx) + ox;
-                    if (nx < 0 || nx >= static_cast<int>(r.tiles_x))
-                    {
-                        continue;
-                    }
-
-                    size_t i = static_cast<size_t>(ny) * r.tiles_x + static_cast<uint32_t>(nx);
-                    sx += r.tile_shift_x[i];
-                    sy += r.tile_shift_y[i];
-                    ++n;
-                }
-            }
-
-            size_t i = static_cast<size_t>(ty) * r.tiles_x + tx;
-            sxv[i] = static_cast<int16_t>(std::lround(static_cast<double>(sx) /
-                std::max(1, n)));
-            syv[i] = static_cast<int16_t>(std::lround(static_cast<double>(sy) /
-                std::max(1, n)));
-        }
-    }
-
-    r.tile_shift_x.swap(sxv);
-    r.tile_shift_y.swap(syv);
-}
+// SparseSad, TileSad, SmoothTileField are provided by align_common.h
 
 // ===========================================================================
 //  Fourier shift theorem sub-pixel refinement
@@ -334,6 +207,7 @@ AlignmentResult EstimateFrequencyTileField(
     const std::vector<FloatImage>& cmp_pyr,
     const AlignParams& params)
 {
+    ProfileScope scope("time.align.frequency_tile_field");
     const int n_levels = static_cast<int>(ref_pyr.size());
 
     // ---- coarse global seed (SparseSad) ------------------------------------
@@ -350,17 +224,36 @@ AlignmentResult EstimateFrequencyTileField(
     const uint32_t cfa = std::max<uint32_t>(1, params.cfa_period);
     const int gstep = std::max(3, static_cast<int>(cfa) * 3);
 
-    for (int dy = -coarse_max_shift; dy <= coarse_max_shift; ++dy)
+    const int dy_begin = -coarse_max_shift;
+    const int dy_end = coarse_max_shift + 1;
+    std::vector<SearchBest> partial(static_cast<size_t>(dy_end - dy_begin));
+    ParallelFor(partial.size(), 1, [&](size_t i0, size_t i1)
     {
-        for (int dx = -coarse_max_shift; dx <= coarse_max_shift; ++dx)
+        for (size_t i = i0; i < i1; ++i)
         {
-            float s = SparseSad2(coarsest_ref, coarsest_cmp, dx, dy, gstep);
-            if (s < gbest)
+            const int dy = dy_begin + static_cast<int>(i);
+            SearchBest best;
+            best.dy = dy;
+            for (int dx = -coarse_max_shift; dx <= coarse_max_shift; ++dx)
             {
-                gbest = s;
-                gdx = dx;
-                gdy = dy;
+                float s = SparseSad(coarsest_ref, coarsest_cmp, dx, dy, gstep);
+                if (s < best.score)
+                {
+                    best.score = s;
+                    best.dx = dx;
+                    best.dy = dy;
+                }
             }
+            partial[i] = best;
+        }
+    });
+    for (const auto& best : partial)
+    {
+        if (best.score < gbest)
+        {
+            gbest = best.score;
+            gdx = best.dx;
+            gdy = best.dy;
         }
     }
 
@@ -408,18 +301,24 @@ AlignmentResult EstimateFrequencyTileField(
                 std::max<int>(1, static_cast<int>(cur.tiles_x)));
             const int tile_ratio_y = std::max<int>(1, static_cast<int>(ny) /
                 std::max<int>(1, static_cast<int>(cur.tiles_y)));
-            ParallelForRows(ny, 16, [&](uint32_t ty_begin, uint32_t ty_end)
+            const uint32_t band_count = RecommendedBandCount(ny, kBandCountPerThread, kBandCountDenseMax);
+            ParallelFor(static_cast<size_t>(band_count), 1, [&](size_t b0, size_t b1)
             {
-                for (uint32_t ty = ty_begin; ty < ty_end; ++ty)
+                for (size_t band = b0; band < b1; ++band)
                 {
-                    for (uint32_t tx = 0; tx < nx; ++tx)
+                    const uint32_t ty_begin = (ny * static_cast<uint32_t>(band)) / band_count;
+                    const uint32_t ty_end = (ny * static_cast<uint32_t>(band + 1)) / band_count;
+                    for (uint32_t ty = ty_begin; ty < ty_end; ++ty)
                     {
-                        uint32_t ppx = std::min(cur.tiles_x - 1, tx / tile_ratio_x);
-                        uint32_t ppy = std::min(cur.tiles_y - 1, ty / tile_ratio_y);
-                        size_t d = static_cast<size_t>(ty) * nx + tx;
-                        size_t s = static_cast<size_t>(ppy) * cur.tiles_x + ppx;
-                        ux[d] = static_cast<int16_t>(cur.tile_shift_x[s] * level_scale);
-                        uy[d] = static_cast<int16_t>(cur.tile_shift_y[s] * level_scale);
+                        for (uint32_t tx = 0; tx < nx; ++tx)
+                        {
+                            uint32_t ppx = std::min(cur.tiles_x - 1, tx / tile_ratio_x);
+                            uint32_t ppy = std::min(cur.tiles_y - 1, ty / tile_ratio_y);
+                            size_t d = static_cast<size_t>(ty) * nx + tx;
+                            size_t s = static_cast<size_t>(ppy) * cur.tiles_x + ppx;
+                            ux[d] = static_cast<int16_t>(cur.tile_shift_x[s] * level_scale);
+                            uy[d] = static_cast<int16_t>(cur.tile_shift_y[s] * level_scale);
+                        }
                     }
                 }
             });
@@ -434,97 +333,103 @@ AlignmentResult EstimateFrequencyTileField(
         next.tile_shift_x.assign(static_cast<size_t>(nx) * ny, 0);
         next.tile_shift_y.assign(static_cast<size_t>(nx) * ny, 0);
 
-        ParallelForRows(ny, 8, [&](uint32_t ty_begin, uint32_t ty_end)
+        const uint32_t band_count2 = RecommendedBandCount(ny, kBandCountPerThread, kBandCountDenseMax);
+        ParallelFor(static_cast<size_t>(band_count2), 1, [&](size_t b0, size_t b1)
         {
-            for (uint32_t ty = ty_begin; ty < ty_end; ++ty)
+            for (size_t band = b0; band < b1; ++band)
             {
-                for (uint32_t tx = 0; tx < nx; ++tx)
+                const uint32_t ty_begin = (ny * static_cast<uint32_t>(band)) / band_count2;
+                const uint32_t ty_end = (ny * static_cast<uint32_t>(band + 1)) / band_count2;
+                for (uint32_t ty = ty_begin; ty < ty_end; ++ty)
                 {
-                    size_t idx = static_cast<size_t>(ty) * nx + tx;
-                    uint32_t x0 = tx * half;
-                    uint32_t y0 = ty * half;
-                    uint32_t tw = std::min(ts, ref.width - x0);
-                    uint32_t th = std::min(ts, ref.height - y0);
-                    int seed_x = ux[idx];
-                    int seed_y = uy[idx];
-
-                    int best_int_x = seed_x;
-                    int best_int_y = seed_y;
-                    float best_int_cost = std::numeric_limits<float>::max();
-
-                    for (int iy = -kTileSearchR; iy <= kTileSearchR; ++iy)
+                    for (uint32_t tx = 0; tx < nx; ++tx)
                     {
-                        for (int ix = -kTileSearchR; ix <= kTileSearchR; ++ix)
+                        size_t idx = static_cast<size_t>(ty) * nx + tx;
+                        uint32_t x0 = tx * half;
+                        uint32_t y0 = ty * half;
+                        uint32_t tw = std::min(ts, ref.width - x0);
+                        uint32_t th = std::min(ts, ref.height - y0);
+                        int seed_x = ux[idx];
+                        int seed_y = uy[idx];
+
+                        int best_int_x = seed_x;
+                        int best_int_y = seed_y;
+                        float best_int_cost = std::numeric_limits<float>::max();
+
+                        for (int iy = -kTileSearchR; iy <= kTileSearchR; ++iy)
                         {
-                            int cand_x = seed_x + ix;
-                            int cand_y = seed_y + iy;
-                            float cost = TileSad2(ref, cmp, x0, y0, tw, th,
-                                cand_x, cand_y);
-                            if (cost >= 0.0f && cost < best_int_cost)
+                            for (int ix = -kTileSearchR; ix <= kTileSearchR; ++ix)
                             {
-                                best_int_cost = cost;
-                                best_int_x = cand_x;
-                                best_int_y = cand_y;
-                            }
-                        }
-                    }
-
-                    int total_ix = best_int_x;
-                    int total_iy = best_int_y;
-
-                    if (is_finest)
-                    {
-                        int cmp_x0 = static_cast<int>(x0) + best_int_x;
-                        int cmp_y0 = static_cast<int>(y0) + best_int_y;
-
-                        if (cmp_x0 >= 0 &&
-                            cmp_x0 + static_cast<int>(tw) <= static_cast<int>(cmp.width) &&
-                            cmp_y0 >= 0 &&
-                            cmp_y0 + static_cast<int>(th) <= static_cast<int>(cmp.height))
-                        {
-                            const size_t n = static_cast<size_t>(fw) * fh;
-                            std::vector<std::complex<double>> ref_fft(n, 0.0);
-                            std::vector<std::complex<double>> cmp_fft(n, 0.0);
-                            const uint32_t ch = std::min(ref.channels, cmp.channels);
-                            const double inv_ch = 1.0 / std::max<uint32_t>(1, ch);
-
-                            for (uint32_t y = 0; y < th; ++y)
-                            {
-                                for (uint32_t x = 0; x < tw; ++x)
+                                int cand_x = seed_x + ix;
+                                int cand_y = seed_y + iy;
+                                float cost = TileSad(ref, cmp, x0, y0, tw, th,
+                                    cand_x, cand_y, 1);
+                                if (cost >= 0.0f && cost < best_int_cost)
                                 {
-                                    size_t k = static_cast<size_t>(y) * fw + x;
-                                    double ra = 0.0;
-                                    double ca = 0.0;
-                                    for (uint32_t c = 0; c < ch; ++c)
-                                    {
-                                        ra += ref.At(x0 + x, y0 + y, c);
-                                        ca += cmp.At(static_cast<uint32_t>(cmp_x0 + x),
-                                                     static_cast<uint32_t>(cmp_y0 + y), c);
-                                    }
-                                    ref_fft[k] = ra * inv_ch;
-                                    cmp_fft[k] = ca * inv_ch;
+                                    best_int_cost = cost;
+                                    best_int_x = cand_x;
+                                    best_int_y = cand_y;
                                 }
                             }
-
-                            Fft2D(ref_fft, fw, fh, false);
-                            Fft2D(cmp_fft, fw, fh, false);
-
-                            auto fs = FourierShiftSearch(ref_fft, cmp_fft, fw, fh);
-
-                            float total_x = static_cast<float>(best_int_x) + fs.dx;
-                            float total_y = static_cast<float>(best_int_y) + fs.dy;
-                            total_ix = static_cast<int>(std::lround(static_cast<double>(total_x)));
-                            total_iy = static_cast<int>(std::lround(static_cast<double>(total_y)));
                         }
-                    }
 
-                    next.tile_shift_x[idx] = static_cast<int16_t>(total_ix);
-                    next.tile_shift_y[idx] = static_cast<int16_t>(total_iy);
+                        int total_ix = best_int_x;
+                        int total_iy = best_int_y;
+
+                        if (is_finest)
+                        {
+                            int cmp_x0 = static_cast<int>(x0) + best_int_x;
+                            int cmp_y0 = static_cast<int>(y0) + best_int_y;
+
+                            if (cmp_x0 >= 0 &&
+                                cmp_x0 + static_cast<int>(tw) <= static_cast<int>(cmp.width) &&
+                                cmp_y0 >= 0 &&
+                                cmp_y0 + static_cast<int>(th) <= static_cast<int>(cmp.height))
+                            {
+                                const size_t n = static_cast<size_t>(fw) * fh;
+                                std::vector<std::complex<double>> ref_fft(n, 0.0);
+                                std::vector<std::complex<double>> cmp_fft(n, 0.0);
+                                const uint32_t ch = std::min(ref.channels, cmp.channels);
+                                const double inv_ch = 1.0 / std::max<uint32_t>(1, ch);
+
+                                for (uint32_t y = 0; y < th; ++y)
+                                {
+                                    for (uint32_t x = 0; x < tw; ++x)
+                                    {
+                                        size_t k = static_cast<size_t>(y) * fw + x;
+                                        double ra = 0.0;
+                                        double ca = 0.0;
+                                        for (uint32_t c = 0; c < ch; ++c)
+                                        {
+                                            ra += ref.At(x0 + x, y0 + y, c);
+                                            ca += cmp.At(static_cast<uint32_t>(cmp_x0 + x),
+                                                         static_cast<uint32_t>(cmp_y0 + y), c);
+                                        }
+                                        ref_fft[k] = ra * inv_ch;
+                                        cmp_fft[k] = ca * inv_ch;
+                                    }
+                                }
+
+                                Fft2D(ref_fft, fw, fh, false);
+                                Fft2D(cmp_fft, fw, fh, false);
+
+                                auto fs = FourierShiftSearch(ref_fft, cmp_fft, fw, fh);
+
+                                float total_x = static_cast<float>(best_int_x) + fs.dx;
+                                float total_y = static_cast<float>(best_int_y) + fs.dy;
+                                total_ix = static_cast<int>(std::lround(static_cast<double>(total_x)));
+                                total_iy = static_cast<int>(std::lround(static_cast<double>(total_y)));
+                            }
+                        }
+
+                        next.tile_shift_x[idx] = static_cast<int16_t>(total_ix);
+                        next.tile_shift_y[idx] = static_cast<int16_t>(total_iy);
+                    }
                 }
             }
         });
 
-        SmoothField(next);
+        SmoothTileField(next);
         cur = std::move(next);
     }
 

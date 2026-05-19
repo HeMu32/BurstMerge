@@ -28,14 +28,36 @@ float SparseSad(const FloatImage& a, const FloatImage& b, int dx, int dy, int st
 
     double sad = 0.0;
     uint64_t count = 0;
+    const uint32_t ch = a.channels;
+    const uint32_t aw = a.width;
+    const uint32_t bw = b.width;
+    if (ch == 1)
+    {
+        for (int y = margin_y; y < static_cast<int>(a.height) - margin_y; y += step)
+        {
+            for (int x = margin_x; x < static_cast<int>(a.width) - margin_x; x += step)
+            {
+                const size_t a_idx = static_cast<size_t>(y) * aw + static_cast<uint32_t>(x);
+                const size_t b_idx = static_cast<size_t>(static_cast<uint32_t>(y - dy)) * bw +
+                    static_cast<uint32_t>(x - dx);
+                sad += std::abs(a.data[a_idx] - b.data[b_idx]);
+                ++count;
+            }
+        }
+        return count ? static_cast<float>(sad / static_cast<double>(count))
+                     : std::numeric_limits<float>::max();
+    }
     for (int y = margin_y; y < static_cast<int>(a.height) - margin_y; y += step)
     {
         for (int x = margin_x; x < static_cast<int>(a.width) - margin_x; x += step)
         {
-            for (uint32_t c = 0; c < a.channels; ++c)
+            const size_t a_base = (static_cast<size_t>(y) * aw + static_cast<uint32_t>(x)) * ch;
+            const size_t b_base =
+                (static_cast<size_t>(static_cast<uint32_t>(y - dy)) * bw +
+                 static_cast<uint32_t>(x - dx)) * ch;
+            for (uint32_t c = 0; c < ch; ++c)
             {
-                sad += std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
-                                b.At(static_cast<uint32_t>(x - dx), static_cast<uint32_t>(y - dy), c));
+                sad += std::abs(a.data[a_base + c] - b.data[b_base + c]);
                 ++count;
             }
         }
@@ -60,6 +82,29 @@ float TileSad(const FloatImage& a,
 
     double sad = 0.0;
     uint64_t count = 0;
+    const uint32_t ch = a.channels;
+    const uint32_t aw = a.width;
+    const uint32_t bw = b.width;
+    if (ch == 1)
+    {
+        for (int y = ay0; y < ay1; y += sample_step)
+        {
+            int by = y - dy;
+            if (by < 0 || by >= static_cast<int>(b.height)) continue;
+            for (int x = ax0; x < ax1; x += sample_step)
+            {
+                int bx = x - dx;
+                if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
+                const size_t a_idx = static_cast<size_t>(y) * aw + static_cast<uint32_t>(x);
+                const size_t b_idx = static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
+                    static_cast<uint32_t>(bx);
+                sad += std::abs(a.data[a_idx] - b.data[b_idx]);
+                ++count;
+            }
+        }
+        return count ? static_cast<float>(sad / static_cast<double>(count))
+                     : std::numeric_limits<float>::max();
+    }
     for (int y = ay0; y < ay1; y += sample_step)
     {
         int by = y - dy;
@@ -68,10 +113,12 @@ float TileSad(const FloatImage& a,
         {
             int bx = x - dx;
             if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
-            for (uint32_t c = 0; c < a.channels; ++c)
+            const size_t a_base = (static_cast<size_t>(y) * aw + static_cast<uint32_t>(x)) * ch;
+            const size_t b_base = (static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
+                                   static_cast<uint32_t>(bx)) * ch;
+            for (uint32_t c = 0; c < ch; ++c)
             {
-                sad += std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
-                                b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by), c));
+                sad += std::abs(a.data[a_base + c] - b.data[b_base + c]);
                 ++count;
             }
         }
@@ -97,6 +144,29 @@ float TileCost(const FloatImage& a,
     const int ay1 = static_cast<int>(std::min<uint32_t>(a.height, y0 + tile_h));
     double cost = 0.0;
     uint64_t count = 0;
+    const uint32_t ch = a.channels;
+    const uint32_t aw = a.width;
+    const uint32_t bw = b.width;
+    if (ch == 1)
+    {
+        for (int y = ay0; y < ay1; y += sample_step)
+        {
+            int by = y - dy;
+            for (int x = ax0; x < ax1; x += sample_step)
+            {
+                int bx = x - dx;
+                if (bx < 0 || by < 0 || bx >= static_cast<int>(b.width) || by >= static_cast<int>(b.height)) continue;
+                const size_t a_idx = static_cast<size_t>(y) * aw + static_cast<uint32_t>(x);
+                const size_t b_idx = static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
+                    static_cast<uint32_t>(bx);
+                float d = std::abs(a.data[a_idx] - b.data[b_idx]);
+                cost += ssd ? static_cast<double>(d) * d : d;
+                ++count;
+            }
+        }
+        return count ? static_cast<float>(cost / static_cast<double>(count))
+                     : std::numeric_limits<float>::max();
+    }
     for (int y = ay0; y < ay1; y += sample_step)
     {
         int by = y - dy;
@@ -104,10 +174,12 @@ float TileCost(const FloatImage& a,
         {
             int bx = x - dx;
             if (bx < 0 || by < 0 || bx >= static_cast<int>(b.width) || by >= static_cast<int>(b.height)) continue;
-            for (uint32_t c = 0; c < a.channels; ++c)
+            const size_t a_base = (static_cast<size_t>(y) * aw + static_cast<uint32_t>(x)) * ch;
+            const size_t b_base = (static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
+                                   static_cast<uint32_t>(bx)) * ch;
+            for (uint32_t c = 0; c < ch; ++c)
             {
-                float d = std::abs(a.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c) -
-                                   b.At(static_cast<uint32_t>(bx), static_cast<uint32_t>(by), c));
+                float d = std::abs(a.data[a_base + c] - b.data[b_base + c]);
                 cost += ssd ? static_cast<double>(d) * d : d;
                 ++count;
             }
@@ -135,11 +207,12 @@ void SmoothTileField(AlignmentResult& result)
             {
                 int ny = static_cast<int>(ty) + oy;
                 if (ny < 0 || ny >= static_cast<int>(result.tiles_y)) continue;
+                const uint32_t row_base = static_cast<uint32_t>(ny) * result.tiles_x;
                 for (int ox = -1; ox <= 1; ++ox)
                 {
                     int nx = static_cast<int>(tx) + ox;
                     if (nx < 0 || nx >= static_cast<int>(result.tiles_x)) continue;
-                    size_t idx = static_cast<size_t>(ny) * result.tiles_x + static_cast<uint32_t>(nx);
+                    size_t idx = row_base + static_cast<uint32_t>(nx);
                     sx += result.tile_shift_x[idx];
                     sy += result.tile_shift_y[idx];
                     ++n;

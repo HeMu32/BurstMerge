@@ -29,9 +29,13 @@ static inline PixelFormat DngPixelTypeToFormat(DngPixelType dpt)
 {
     switch (dpt)
     {
-        case DngPixelType::Uint8: return PixelFormat::R8_Uint;
-        case DngPixelType::Uint16: return PixelFormat::R16_Uint;
+        case DngPixelType::Uint8:   return PixelFormat::R8_Uint;
+        case DngPixelType::Uint16:  return PixelFormat::R16_Uint;
         case DngPixelType::Float32: return PixelFormat::R32_Float;
+        // Int16 maps to R16_Uint (signed → unsigned, OK for non-negative data).
+        // Uint32 maps to R32_Float (32-bit int fits in float24 mantissa for <16M range).
+        case DngPixelType::Int16:   return PixelFormat::R16_Uint;
+        case DngPixelType::Uint32:  return PixelFormat::R32_Float;
         default: return PixelFormat::R16_Uint;
     }
 }

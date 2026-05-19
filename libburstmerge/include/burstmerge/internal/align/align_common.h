@@ -2,11 +2,21 @@
 
 #include "burstmerge/internal/align/align.h"
 
+#include <cstdint>
+#include <limits>
+
 namespace burstmerge
 {
 
 // Shared alignment primitives reused by multiple alignment modes and the warp
 // stage. Keeping them here avoids rebuilding a monolithic align.cpp.
+
+struct SearchBest
+{
+    float score = std::numeric_limits<float>::max();
+    int dx = 0;
+    int dy = 0;
+};
 
 int SnapToPeriod(int value, uint32_t period);
 float SparseSad(const FloatImage& a, const FloatImage& b, int dx, int dy, int step);

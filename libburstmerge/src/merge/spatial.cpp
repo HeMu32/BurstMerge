@@ -1,5 +1,6 @@
 ﻿#include "burstmerge/internal/merge/spatial.h"
 
+#include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"
 
 #include <algorithm>
@@ -29,12 +30,6 @@ float Clamp01(float v)
 float ClampMin(float v, float lo)
 {
     return v < lo ? lo : v;
-}
-
-uint32_t GrainRowsForImage(uint32_t width, uint32_t channels, uint32_t min_pixels)
-{
-    const uint64_t denom = std::max<uint64_t>(1, static_cast<uint64_t>(width) * std::max<uint32_t>(1, channels));
-    return static_cast<uint32_t>(std::max<uint64_t>(16, (static_cast<uint64_t>(min_pixels) + denom - 1) / denom));
 }
 
 burstmerge::FloatImage BinomialBlur(const burstmerge::FloatImage& src, int radius = 8)
@@ -124,21 +119,49 @@ float EstimateLinearNoise(const burstmerge::FloatImage& image, uint32_t sample_s
     return std::max(burstmerge::SpatialConstants::kNoiseFloorMin, static_cast<float>(sum / static_cast<double>(count)));
 }
 
-float BlockMean(const burstmerge::FloatImage& img, uint32_t x, uint32_t y, uint32_t block_size)
+burstmerge::FloatImage BuildBlockMeanGuide(const burstmerge::FloatImage& img,
+                                           uint32_t block_size)
 {
-    const uint32_t x0 = (x / block_size) * block_size;
-    const uint32_t y0 = (y / block_size) * block_size;
-    float sum = 0.0f;
-    uint32_t n = 0;
-    for (uint32_t yy = y0; yy < std::min(y0 + block_size, img.height); ++yy)
+    burstmerge::FloatImage guide;
+    guide.width = img.width;
+    guide.height = img.height;
+    guide.channels = 1;
+    guide.data.resize(static_cast<size_t>(guide.width) * guide.height, 0.0f);
+
+    block_size = std::max<uint32_t>(1, block_size);
+    const uint32_t by_count = (img.height + block_size - 1) / block_size;
+    burstmerge::ParallelFor(0, by_count, 1, [&](size_t by0, size_t by1)
     {
-        for (uint32_t xx = x0; xx < std::min(x0 + block_size, img.width); ++xx)
+        for (size_t by = by0; by < by1; ++by)
         {
-            sum += img.At(xx, yy, 0);
-            ++n;
+            const uint32_t y0 = static_cast<uint32_t>(by) * block_size;
+            const uint32_t y1 = std::min(y0 + block_size, img.height);
+            for (uint32_t x0 = 0; x0 < img.width; x0 += block_size)
+            {
+                const uint32_t x1 = std::min(x0 + block_size, img.width);
+                double sum = 0.0;
+                uint32_t n = 0;
+                for (uint32_t y = y0; y < y1; ++y)
+                {
+                    for (uint32_t x = x0; x < x1; ++x)
+                    {
+                        sum += img.At(x, y, 0);
+                        ++n;
+                    }
+                }
+                const float mean = n > 0 ? static_cast<float>(sum / static_cast<double>(n)) : 0.0f;
+                for (uint32_t y = y0; y < y1; ++y)
+                {
+                    for (uint32_t x = x0; x < x1; ++x)
+                    {
+                        guide.At(x, y, 0) = mean;
+                    }
+                }
+            }
         }
-    }
-    return n > 0 ? sum / static_cast<float>(n) : 0.0f;
+    });
+
+    return guide;
 }
 
 }
@@ -150,6 +173,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
                         const std::vector<FloatImage>& aligned_comparisons,
                         const SpatialMergeParams& params)
 {
+    ProfileScope scope("time.merge.spatial_total");
     if (aligned_comparisons.empty())
     {
         return reference;
@@ -179,11 +203,21 @@ FloatImage SpatialMerge(const FloatImage& reference,
         ? params.highlight_threshold
         : MaxValue(reference) * burstmerge::SpatialConstants::kHighlightThresholdFactor;
     const uint32_t guide_block = std::max<uint32_t>(1, params.guide_block_size);
+    const FloatImage ref_guide_map = linear_mode ? FloatImage{} : BuildBlockMeanGuide(reference, guide_block);
+    std::vector<FloatImage> cmp_guide_maps;
+    if (!linear_mode)
+    {
+        cmp_guide_maps.reserve(aligned_comparisons.size());
+        for (const auto& img : aligned_comparisons)
+        {
+            cmp_guide_maps.push_back(BuildBlockMeanGuide(img, guide_block));
+        }
+    }
 
     if (reference.channels == 1)
     {
         // Single-channel (mosaic): per-pixel weight, each position one guide value
-        ParallelForRows(out.height, GrainRowsForImage(out.width, 1, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
+        ParallelForRows(out.height, RecommendedImageRowGrain(out.width, 1, kRowGrainMinPixels, kRowGrainMinRows), [&](uint32_t y_begin, uint32_t y_end)
         {
             for (uint32_t y = y_begin; y < y_end; ++y)
             {
@@ -191,13 +225,13 @@ FloatImage SpatialMerge(const FloatImage& reference,
                 {
                     const size_t i = (static_cast<size_t>(y) * out.width + x);
 
-                        float ref_guide = linear_mode ? ref_blur.data[i] : BlockMean(reference, x, y, guide_block);
+                        float ref_guide = linear_mode ? ref_blur.data[i] : ref_guide_map.data[i];
                     float weighted_sum = reference.data[i];
                     float weight_sum = 1.0f;
 
                     for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
                     {
-                        float cmp_guide = linear_mode ? cmp_blurs[idx].data[i] : BlockMean(aligned_comparisons[idx], x, y, guide_block);
+                        float cmp_guide = linear_mode ? cmp_blurs[idx].data[i] : cmp_guide_maps[idx].data[i];
 
                     // Detect clipped comparison pixels: estimated original value
                     // (before normalization scaling) above clip_threshold means
@@ -248,8 +282,9 @@ FloatImage SpatialMerge(const FloatImage& reference,
         // channel's misalignment does not create different blend factors per
         // channel. Per-channel weight divergence causes color banding and
         // gradient mixing artifacts that look like demosaicing failures.
-        ParallelForRows(out.height, GrainRowsForImage(out.width, out.channels, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
+        ParallelForRows(out.height, RecommendedImageRowGrain(out.width, out.channels, kRowGrainMinPixels, kRowGrainMinRows), [&](uint32_t y_begin, uint32_t y_end)
         {
+            std::vector<float> shared_w(aligned_comparisons.size(), 1.0f);
             for (uint32_t y = y_begin; y < y_end; ++y)
             {
                 for (uint32_t x = 0; x < out.width; ++x)
@@ -266,7 +301,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
                         }
                     }
 
-                    std::vector<float> shared_w(aligned_comparisons.size(), 1.0f);
+                    std::fill(shared_w.begin(), shared_w.end(), 1.0f);
                     for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
                     {
                         bool cmp_clipped = false;

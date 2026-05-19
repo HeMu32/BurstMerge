@@ -2,6 +2,7 @@
 
 #include "burstmerge/internal/align/align_common.h"
 
+#include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"
 
 #include <cmath>
@@ -9,19 +10,9 @@
 namespace burstmerge
 {
 
-namespace
-{
-
-uint32_t GrainRowsForWarp(uint32_t width, uint32_t channels)
-{
-    const uint64_t denom = std::max<uint64_t>(1, static_cast<uint64_t>(width) * std::max<uint32_t>(1, channels));
-    return static_cast<uint32_t>(std::max<uint64_t>(32, ((1u << 18) + denom - 1) / denom));
-}
-
-} // namespace
-
 FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignment)
 {
+    ProfileScope scope("time.align.warp_aligned");
     // Warping is separated from motion estimation so resampling behavior can
     // evolve independently from search strategy and tile-field estimation.
     if (alignment.tile_shift_x.empty() || alignment.tile_shift_y.empty() ||
@@ -38,7 +29,7 @@ FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignmen
     out.channels = source.channels;
     out.data.resize(source.data.size(), 0.0f);
 
-    ParallelForRows(source.height, GrainRowsForWarp(source.width, source.channels), [&](uint32_t y_begin, uint32_t y_end)
+    ParallelForRows(source.height, RecommendedImageRowGrain(source.width, source.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {
@@ -59,42 +50,18 @@ FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignmen
                                                      x,
                                                      y);
 
-                if (source.channels == 1 || alignment.cfa_period > 1)
-                {
-                    int isx = SnapToPeriod(static_cast<int>(std::lround(shift_x)), alignment.cfa_period);
-                    int isy = SnapToPeriod(static_cast<int>(std::lround(shift_y)), alignment.cfa_period);
-                    int sx = ClampInt(static_cast<int>(x) - isx, 0, static_cast<int>(source.width) - 1);
-                    int sy = ClampInt(static_cast<int>(y) - isy, 0, static_cast<int>(source.height) - 1);
-                    for (uint32_t c = 0; c < source.channels; ++c)
-                    {
-                        out.At(x, y, c) = source.At(static_cast<uint32_t>(sx), static_cast<uint32_t>(sy), c);
-                    }
-                    continue;
-                }
-
-                float sx = static_cast<float>(x) - shift_x;
-                float sy = static_cast<float>(y) - shift_y;
-                int x0 = static_cast<int>(std::floor(sx));
-                int y0 = static_cast<int>(std::floor(sy));
-                int x1 = x0 + 1;
-                int y1 = y0 + 1;
-                float tx = sx - static_cast<float>(x0);
-                float ty = sy - static_cast<float>(y0);
-
-                for (uint32_t c = 0; c < source.channels; ++c)
-                {
-                    float p00 = source.At(static_cast<uint32_t>(ClampInt(x0, 0, static_cast<int>(source.width) - 1)),
-                                          static_cast<uint32_t>(ClampInt(y0, 0, static_cast<int>(source.height) - 1)), c);
-                    float p10 = source.At(static_cast<uint32_t>(ClampInt(x1, 0, static_cast<int>(source.width) - 1)),
-                                          static_cast<uint32_t>(ClampInt(y0, 0, static_cast<int>(source.height) - 1)), c);
-                    float p01 = source.At(static_cast<uint32_t>(ClampInt(x0, 0, static_cast<int>(source.width) - 1)),
-                                          static_cast<uint32_t>(ClampInt(y1, 0, static_cast<int>(source.height) - 1)), c);
-                    float p11 = source.At(static_cast<uint32_t>(ClampInt(x1, 0, static_cast<int>(source.width) - 1)),
-                                          static_cast<uint32_t>(ClampInt(y1, 0, static_cast<int>(source.height) - 1)), c);
-                    float a = p00 * (1.0f - tx) + p10 * tx;
-                    float b = p01 * (1.0f - tx) + p11 * tx;
-                    out.At(x, y, c) = a * (1.0f - ty) + b * ty;
-                }
+            // All current paths (mosaic + plane) use integer tile shifts, so
+            // integer copy with CFA-period snapping is the correct warp.
+            // (Bilinear branch removed — it was dead reachable only when the
+            // condition `ch==1 || ch>1` was tautological.)
+            int isx = SnapToPeriod(static_cast<int>(std::lround(shift_x)), alignment.cfa_period);
+            int isy = SnapToPeriod(static_cast<int>(std::lround(shift_y)), alignment.cfa_period);
+            int sx = ClampInt(static_cast<int>(x) - isx, 0, static_cast<int>(source.width) - 1);
+            int sy = ClampInt(static_cast<int>(y) - isy, 0, static_cast<int>(source.height) - 1);
+            for (uint32_t c = 0; c < source.channels; ++c)
+            {
+                out.At(x, y, c) = source.At(static_cast<uint32_t>(sx), static_cast<uint32_t>(sy), c);
+            }
             }
         }
     });

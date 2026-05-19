@@ -4,6 +4,7 @@
 #include "burstmerge/internal/core/pipeline_align.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/pipeline_io.h"
+#include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/denoise/temporal.h"
 #include "burstmerge/internal/exposure/exposure.h"
 #include "burstmerge/internal/core/image_buffer.h"
@@ -43,6 +44,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
     {false, "", ""};
     try
     {
+        ResetProfiler();
         Report(progress, 0.0f, "Starting");
         if (backend_ != BackendType::CPU)
         {
@@ -344,6 +346,11 @@ void PipelineOrchestrator::CleanupConvertDir()
         std::filesystem::is_empty(parent, ec))
         {
         std::filesystem::remove(parent, ec);
+    }
+
+    if (ProfileEnabled())
+    {
+        std::fprintf(stderr, "%s", BuildProfileReport().c_str());
     }
 }
 

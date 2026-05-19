@@ -1,163 +1,113 @@
 #include "burstmerge/internal/core/task_executor.h"
 
+#include "burstmerge/internal/core/profiler.h"
+
 #include <algorithm>
-#include <atomic>
-#include <condition_variable>
 #include <cstdlib>
-#include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <functional>
-#include <mutex>
-#include <thread>
-#include <vector>
+
+#include <omp.h>
 
 namespace burstmerge
 {
 namespace
 {
 
-thread_local bool g_in_worker_thread = false;
-
-class TaskExecutor
+int RequestedThreadCount()
 {
-public:
-    TaskExecutor()
+    if (const char* env = std::getenv("BURSTMERGE_THREADS"))
     {
-        unsigned n = 0;
-        bool env_override = false;
-        if (const char* env = std::getenv("BURSTMERGE_THREADS"))
-        {
-            int parsed = std::atoi(env);
-            if (parsed >= 1)
-            {
-                env_override = true;
-                // Keep one caller thread outside the pool.  BURSTMERGE_THREADS=1
-                // means fully serial execution.
-                n = static_cast<unsigned>(std::max(0, parsed - 1));
-            }
-        }
-        if (!env_override)
-        {
-            const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-            n = hw > 1 ? hw - 1 : 0;
-        }
-        workers_.reserve(n);
-        for (unsigned i = 0; i < n; ++i)
-        {
-            workers_.emplace_back([this]() { WorkerLoop(); });
-        }
+        int parsed = std::atoi(env);
+        if (parsed >= 1) return parsed;
     }
+    return std::max(1, omp_get_max_threads());
+}
 
-    ~TaskExecutor()
-    {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        for (auto& worker : workers_)
-        {
-            if (worker.joinable()) worker.join();
-        }
-    }
-
-    size_t WorkerCount() const
-    {
-        return workers_.size();
-    }
-
-    void RunTasks(size_t task_count, const std::function<void(size_t)>& fn)
-    {
-        if (task_count == 0) return;
-
-        std::mutex wait_mutex;
-        std::condition_variable wait_cv;
-        std::atomic<size_t> remaining(task_count);
-
-        for (size_t i = 0; i < task_count; ++i)
-        {
-            Enqueue([&, i]() {
-                fn(i);
-                if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
-                {
-                    std::lock_guard<std::mutex> lock(wait_mutex);
-                    wait_cv.notify_one();
-                }
-            });
-        }
-
-        std::unique_lock<std::mutex> lock(wait_mutex);
-        wait_cv.wait(lock, [&]() { return remaining.load(std::memory_order_acquire) == 0; });
-    }
-
-private:
-    void Enqueue(std::function<void()> task)
-    {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            queue_.push_back(std::move(task));
-        }
-        cv_.notify_one();
-    }
-
-    void WorkerLoop()
-    {
-        g_in_worker_thread = true;
-        for (;;)
-        {
-            std::function<void()> task;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [&]() { return stop_ || !queue_.empty(); });
-                if (stop_ && queue_.empty()) break;
-                task = std::move(queue_.front());
-                queue_.pop_front();
-            }
-            task();
-        }
-        g_in_worker_thread = false;
-    }
-
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::deque<std::function<void()>> queue_;
-    std::vector<std::thread> workers_;
-    bool stop_ = false;
-};
-
-TaskExecutor& GetExecutor()
+size_t GrainScale()
 {
-    static TaskExecutor executor;
-    return executor;
+    if (const char* env = std::getenv("BURSTMERGE_GRAIN_SCALE"))
+    {
+        int parsed = std::atoi(env);
+        if (parsed >= 1) return static_cast<size_t>(parsed);
+    }
+    return 1;
 }
 
 } // namespace
+
+size_t ParallelismHint()
+{
+    return static_cast<size_t>(std::max(1, RequestedThreadCount()));
+}
+
+uint32_t RecommendedImageRowGrain(uint32_t width,
+                                  uint32_t channels,
+                                  uint32_t min_pixels,
+                                  uint32_t min_rows)
+{
+    const uint64_t denom = std::max<uint64_t>(1,
+        static_cast<uint64_t>(width) * std::max<uint32_t>(1, channels));
+    return static_cast<uint32_t>(std::max<uint64_t>(min_rows,
+        (static_cast<uint64_t>(min_pixels) + denom - 1) / denom));
+}
+
+uint32_t RecommendedBandCount(uint32_t items,
+                              uint32_t bands_per_thread,
+                              uint32_t max_bands)
+{
+    if (items == 0) return 0;
+    const uint32_t threads = static_cast<uint32_t>(ParallelismHint());
+    const uint32_t target = std::max<uint32_t>(1, threads * std::max<uint32_t>(1, bands_per_thread));
+    return std::min(items, std::max<uint32_t>(1, std::min(target, max_bands)));
+}
 
 void ParallelFor(size_t begin,
                  size_t end,
                  size_t grain,
                  const std::function<void(size_t, size_t)>& fn)
 {
-    if (end <= begin) return;
-    const size_t total = end - begin;
-    if (grain == 0) grain = total;
-
-    TaskExecutor& executor = GetExecutor();
-    const size_t workers = executor.WorkerCount();
-    if (workers == 0 || total <= grain || g_in_worker_thread)
+    ProfileScope scope("time.parallel_for.total");
+    AddProfileCounter("counter.parallel_for.calls");
+    if (end <= begin)
     {
+        return;
+    }
+
+    const size_t total = end - begin;
+    if (grain == 0)
+    {
+        grain = total;
+    }
+
+    const int thread_count = RequestedThreadCount();
+    if (thread_count <= 1 || omp_in_parallel() || total <= grain)
+    {
+        AddProfileCounter("counter.parallel_for.serial_fallback");
         fn(begin, end);
         return;
     }
 
-    const size_t task_count = (total + grain - 1) / grain;
-    executor.RunTasks(task_count, [&](size_t task_idx)
+    grain *= GrainScale();
+    if (grain == 0)
     {
-        const size_t chunk_begin = begin + task_idx * grain;
-        const size_t chunk_end = std::min(end, chunk_begin + grain);
-        if (chunk_begin < chunk_end) fn(chunk_begin, chunk_end);
-    });
+        grain = total;
+    }
+
+    const size_t max_task_count = (total + grain - 1) / grain;
+    const size_t task_count = std::min<size_t>(max_task_count, static_cast<size_t>(thread_count));
+    const size_t chunk_size = (total + task_count - 1) / task_count;
+    AddProfileCounter("counter.parallel_for.parallel_calls");
+    AddProfileCounter("counter.parallel_for.tasks", static_cast<uint64_t>(task_count));
+
+#pragma omp parallel for schedule(static) num_threads(thread_count)
+    for (int task_idx = 0; task_idx < static_cast<int>(task_count); ++task_idx)
+    {
+        const size_t chunk_begin = begin + static_cast<size_t>(task_idx) * chunk_size;
+        const size_t chunk_end = std::min(end, chunk_begin + chunk_size);
+        if (chunk_begin < chunk_end)
+        {
+            fn(chunk_begin, chunk_end);
+        }
+    }
 }
 
 void ParallelForRows(uint32_t begin_row,
@@ -172,12 +122,6 @@ void ParallelForRows(uint32_t begin_row,
                 {
                     fn(static_cast<uint32_t>(y0), static_cast<uint32_t>(y1));
                 });
-}
-
-bool CanRunInParallel()
-{
-    TaskExecutor& executor = GetExecutor();
-    return executor.WorkerCount() > 0 && !g_in_worker_thread;
 }
 
 } // namespace burstmerge

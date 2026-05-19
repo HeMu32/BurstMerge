@@ -2,12 +2,12 @@
 
 #include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
+#include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <limits>
 #include <limits>
 
 namespace burstmerge
@@ -33,6 +33,7 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                                                 uint32_t cfa_period,
                                                 const PipelineOrchestrator::ProgressFn& progress)
 {
+    ProfileScope scope("time.pipeline.build_aligned_comparisons");
     // Pipeline-facing adapter around alignment: choose guides, dispatch to the
     // alignment code, and organize chaining for bracketed stacks.
     std::vector<FloatImage> aligned;
@@ -72,6 +73,33 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         return WarpAligned(source, ar);
     };
 
+    const FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
+    std::vector<FloatImage> gray_inputs;
+    gray_inputs.reserve(float_images.size());
+    for (const auto& img : float_images)
+    {
+        gray_inputs.push_back(ConvertPlanesToGrayscale(img));
+    }
+
+    auto align_and_warp_pregrays = [&](const FloatImage& gray_ref,
+                                       const FloatImage& gray_src,
+                                       const FloatImage& source,
+                                       size_t progress_idx,
+                                       size_t total_count) -> FloatImage
+    {
+        Report(progress,
+               PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange *
+                   static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
+               "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
+        AlignmentResult ar = EstimateTranslation(gray_ref, gray_src, params);
+
+        Report(progress,
+               PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange *
+                   static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
+               "Warping frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
+        return WarpAligned(source, ar);
+    };
+
     bool has_exposure = false;
     float min_exp = std::numeric_limits<float>::max();
     float max_exp = 0.0f;
@@ -95,18 +123,20 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 
     if (!use_transmission)
     {
-        const FloatImage& ref = float_images[ref_idx];
         const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
-        aligned.resize(total);
-        ParallelFor(float_images.size(), 1, [&](size_t i0, size_t i1)
+        aligned.clear();
+        aligned.reserve(total);
+        size_t processed = 0;
+        for (size_t i = 0; i < float_images.size(); ++i)
         {
-            for (size_t i = i0; i < i1; ++i)
-            {
-                if (i == ref_idx) continue;
-                const size_t out_idx = (i < ref_idx) ? i : (i - 1);
-                aligned[out_idx] = align_and_warp(ref, float_images[i], out_idx, total);
-            }
-        });
+            if (i == ref_idx) continue;
+            aligned.push_back(align_and_warp_pregrays(gray_ref_full,
+                                                      gray_inputs[i],
+                                                      float_images[i],
+                                                      processed,
+                                                      total));
+            ++processed;
+        }
         return aligned;
     }
 

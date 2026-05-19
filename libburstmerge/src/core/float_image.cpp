@@ -18,12 +18,6 @@ float SampleClamped(const FloatImage& src, int x, int y, uint32_t c)
     return src.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), c);
 }
 
-uint32_t GrainRowsForImage(uint32_t width, uint32_t channels, uint32_t min_pixels)
-{
-    const uint64_t denom = std::max<uint64_t>(1, static_cast<uint64_t>(width) * std::max<uint32_t>(1, channels));
-    return static_cast<uint32_t>(std::max<uint64_t>(32, (static_cast<uint64_t>(min_pixels) + denom - 1) / denom));
-}
-
 } // namespace
 
 uint32_t ChannelsForFormat(PixelFormat format)
@@ -120,7 +114,7 @@ FloatImage Downsample2x(const FloatImage& src)
     out.channels = src.channels;
     out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels, 0.0f);
 
-    ParallelForRows(out.height, GrainRowsForImage(out.width, out.channels, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
+    ParallelForRows(out.height, RecommendedImageRowGrain(out.width, out.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {
@@ -157,7 +151,7 @@ FloatImage BoxBlur(const FloatImage& src, int radius)
     out.channels = src.channels;
     out.data.resize(src.data.size(), 0.0f);
 
-    ParallelForRows(src.height, GrainRowsForImage(src.width, src.channels, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
+    ParallelForRows(src.height, RecommendedImageRowGrain(src.width, src.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {
@@ -191,7 +185,7 @@ FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y)
     out.channels = src.channels;
     out.data.resize(src.data.size(), 0.0f);
 
-    ParallelForRows(src.height, GrainRowsForImage(src.width, src.channels, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
+    ParallelForRows(src.height, RecommendedImageRowGrain(src.width, src.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {
@@ -221,7 +215,7 @@ FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period)
     out.channels = cfa_period * cfa_period;
     out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels, 0.0f);
 
-    ParallelForRows(src.height, GrainRowsForImage(src.width, 1, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
+    ParallelForRows(src.height, RecommendedImageRowGrain(src.width, 1, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {
@@ -256,7 +250,7 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
     out.channels = 1;
     out.data.resize(static_cast<size_t>(out.width) * out.height, 0.0f);
 
-    ParallelForRows(out.height, GrainRowsForImage(out.width, 1, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
+    ParallelForRows(out.height, RecommendedImageRowGrain(out.width, 1, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {
@@ -289,7 +283,7 @@ FloatImage ConvertPlanesToGrayscale(const FloatImage& src)
     const uint32_t ch = std::max<uint32_t>(1, src.channels);
     const float inv_ch = 1.0f / static_cast<float>(ch);
 
-    ParallelForRows(src.height, GrainRowsForImage(src.width, src.channels, 1u << 18), [&](uint32_t y_begin, uint32_t y_end)
+    ParallelForRows(src.height, RecommendedImageRowGrain(src.width, src.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {
