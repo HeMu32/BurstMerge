@@ -12,10 +12,7 @@
 #include <limits>
 #include <vector>
 
-extern "C"
-{
-#include "pocketfft.h"
-}
+#include "burstmerge/internal/core/fft_util.h"
 
 namespace burstmerge
 {
@@ -25,70 +22,6 @@ namespace
 // ===========================================================================
 //  FFT helpers
 // ===========================================================================
-
-void Fft2D(std::vector<std::complex<double>>& data, size_t w, size_t h,
-    bool inverse)
-{
-    if (w == 0 || h == 0)
-    {
-        return;
-    }
-
-    cfft_plan row = make_cfft_plan(w);
-    cfft_plan col = make_cfft_plan(h);
-    std::vector<double> tmp(2 * std::max(w, h));
-
-    for (size_t y = 0; y < h; ++y)
-    {
-        for (size_t x = 0; x < w; ++x)
-        {
-            auto v = data[y * w + x];
-            tmp[2 * x] = v.real();
-            tmp[2 * x + 1] = v.imag();
-        }
-
-        if (inverse)
-        {
-            cfft_backward(row, tmp.data(), 1.0);
-        }
-        else
-        {
-            cfft_forward(row, tmp.data(), 1.0);
-        }
-
-        for (size_t x = 0; x < w; ++x)
-        {
-            data[y * w + x] = {tmp[2 * x], tmp[2 * x + 1]};
-        }
-    }
-
-    for (size_t x = 0; x < w; ++x)
-    {
-        for (size_t y = 0; y < h; ++y)
-        {
-            auto v = data[y * w + x];
-            tmp[2 * y] = v.real();
-            tmp[2 * y + 1] = v.imag();
-        }
-
-        if (inverse)
-        {
-            cfft_backward(col, tmp.data(), 1.0 / static_cast<double>(w * h));
-        }
-        else
-        {
-            cfft_forward(col, tmp.data(), 1.0);
-        }
-
-        for (size_t y = 0; y < h; ++y)
-        {
-            data[y * w + x] = {tmp[2 * y], tmp[2 * y + 1]};
-        }
-    }
-
-    destroy_cfft_plan(row);
-    destroy_cfft_plan(col);
-}
 
 // ===========================================================================
 //  Sparse SAD (same convention as align.cpp)

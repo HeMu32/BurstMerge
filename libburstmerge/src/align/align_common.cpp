@@ -75,56 +75,7 @@ float TileSad(const FloatImage& a,
               int dy,
               int sample_step)
 {
-    const int ax0 = static_cast<int>(x0);
-    const int ay0 = static_cast<int>(y0);
-    const int ax1 = static_cast<int>(std::min<uint32_t>(a.width, x0 + tile_w));
-    const int ay1 = static_cast<int>(std::min<uint32_t>(a.height, y0 + tile_h));
-
-    double sad = 0.0;
-    uint64_t count = 0;
-    const uint32_t ch = a.channels;
-    const uint32_t aw = a.width;
-    const uint32_t bw = b.width;
-    if (ch == 1)
-    {
-        for (int y = ay0; y < ay1; y += sample_step)
-        {
-            int by = y - dy;
-            if (by < 0 || by >= static_cast<int>(b.height)) continue;
-            for (int x = ax0; x < ax1; x += sample_step)
-            {
-                int bx = x - dx;
-                if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
-                const size_t a_idx = static_cast<size_t>(y) * aw + static_cast<uint32_t>(x);
-                const size_t b_idx = static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
-                    static_cast<uint32_t>(bx);
-                sad += std::abs(a.data[a_idx] - b.data[b_idx]);
-                ++count;
-            }
-        }
-        return count ? static_cast<float>(sad / static_cast<double>(count))
-                     : std::numeric_limits<float>::max();
-    }
-    for (int y = ay0; y < ay1; y += sample_step)
-    {
-        int by = y - dy;
-        if (by < 0 || by >= static_cast<int>(b.height)) continue;
-        for (int x = ax0; x < ax1; x += sample_step)
-        {
-            int bx = x - dx;
-            if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
-            const size_t a_base = (static_cast<size_t>(y) * aw + static_cast<uint32_t>(x)) * ch;
-            const size_t b_base = (static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
-                                   static_cast<uint32_t>(bx)) * ch;
-            for (uint32_t c = 0; c < ch; ++c)
-            {
-                sad += std::abs(a.data[a_base + c] - b.data[b_base + c]);
-                ++count;
-            }
-        }
-    }
-
-    return count ? static_cast<float>(sad / static_cast<double>(count)) : std::numeric_limits<float>::max();
+    return TileCost(a, b, x0, y0, tile_w, tile_h, dx, dy, sample_step, false);
 }
 
 float TileCost(const FloatImage& a,
@@ -152,10 +103,11 @@ float TileCost(const FloatImage& a,
         for (int y = ay0; y < ay1; y += sample_step)
         {
             int by = y - dy;
+            if (by < 0 || by >= static_cast<int>(b.height)) continue;
             for (int x = ax0; x < ax1; x += sample_step)
             {
                 int bx = x - dx;
-                if (bx < 0 || by < 0 || bx >= static_cast<int>(b.width) || by >= static_cast<int>(b.height)) continue;
+                if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
                 const size_t a_idx = static_cast<size_t>(y) * aw + static_cast<uint32_t>(x);
                 const size_t b_idx = static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
                     static_cast<uint32_t>(bx);
@@ -170,10 +122,11 @@ float TileCost(const FloatImage& a,
     for (int y = ay0; y < ay1; y += sample_step)
     {
         int by = y - dy;
+        if (by < 0 || by >= static_cast<int>(b.height)) continue;
         for (int x = ax0; x < ax1; x += sample_step)
         {
             int bx = x - dx;
-            if (bx < 0 || by < 0 || bx >= static_cast<int>(b.width) || by >= static_cast<int>(b.height)) continue;
+            if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
             const size_t a_base = (static_cast<size_t>(y) * aw + static_cast<uint32_t>(x)) * ch;
             const size_t b_base = (static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
                                    static_cast<uint32_t>(bx)) * ch;

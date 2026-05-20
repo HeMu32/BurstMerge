@@ -336,21 +336,23 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
 void PipelineOrchestrator::CleanupConvertDir()
 {
-    if (convert_dir_.empty()) return;
-    std::error_code ec;
-    std::filesystem::remove_all(convert_dir_, ec);
-    // Also remove the parent burstmerge_converted/ if it became empty
-    std::filesystem::path parent = std::filesystem::path(convert_dir_).parent_path();
-    convert_dir_.clear();
-    if (std::filesystem::exists(parent) &&
-        std::filesystem::is_empty(parent, ec))
-        {
-        std::filesystem::remove(parent, ec);
+    if (!convert_dir_.empty())
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(convert_dir_, ec);
+        std::filesystem::path parent = std::filesystem::path(convert_dir_).parent_path();
+        convert_dir_.clear();
+        if (std::filesystem::exists(parent) &&
+            std::filesystem::is_empty(parent, ec))
+            {
+            std::filesystem::remove(parent, ec);
+        }
     }
 
     if (ProfileEnabled())
     {
         std::fprintf(stderr, "%s", BuildProfileReport().c_str());
+        std::fflush(stderr);
     }
 }
 

@@ -6,15 +6,11 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <map>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
 
-extern "C"
-{
-#include "pocketfft.h"
-}
+#include "burstmerge/internal/core/fft_util.h"
 
 namespace burstmerge
 {
@@ -39,16 +35,6 @@ double ModifiedMismatchWindow(int i, int n)
 double ClampDouble(double v, double lo, double hi)
 {
     return std::max(lo, std::min(v, hi));
-}
-
-cfft_plan GetCachedCfftPlan(size_t n)
-{
-    thread_local std::map<size_t, cfft_plan> cache;
-    auto it = cache.find(n);
-    if (it != cache.end()) return it->second;
-    cfft_plan plan = make_cfft_plan(n);
-    cache.emplace(n, plan);
-    return plan;
 }
 
 struct FourierPhaseTable
@@ -224,8 +210,6 @@ void MergeBandIntoImage(const TileBandResult& band,
     }
 }
 
-void Fft2D(std::vector<std::complex<double>>& data, size_t w, size_t h, bool inverse);
-
 TileStats ComputeTileStats(const FloatImage& reference,
                           const FloatImage& comparison,
                           uint32_t x0,
@@ -347,14 +331,14 @@ TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
         }
     }
 
-    std::vector<std::vector<std::complex<double>>> ref_spectra(
-        ctx.reference.channels, std::vector<std::complex<double>>(n));
-    std::vector<std::vector<std::complex<double>>> merged_spectra(
-        ctx.reference.channels, std::vector<std::complex<double>>(n));
+    const size_t stride = n;
+    std::vector<std::complex<double>> ref_spectra(ctx.reference.channels * n);
+    std::vector<std::complex<double>> merged_spectra(ctx.reference.channels * n);
 
     double rms = 0.0;
     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
+        std::complex<double>* dst = ref_spectra.data() + c * stride;
         for (size_t yy = 0; yy < th; ++yy)
         {
             for (size_t xx = 0; xx < tw; ++xx)
@@ -362,14 +346,13 @@ TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
                 const double sample = ctx.reference.At(
                     x0 + static_cast<uint32_t>(xx),
                     y0 + static_cast<uint32_t>(yy), c);
-                ref_spectra[c][yy * tw + xx] = sample;
+                dst[yy * tw + xx] = sample;
                 rms += std::max(0.0, sample) * std::max(0.0, sample);
             }
         }
-        Fft2D(ref_spectra[c], tw, th, false);
-        merged_spectra[c] = ref_spectra[c];
+        Fft2D(dst, tw, th, false);
+        std::copy_n(dst, n, merged_spectra.data() + c * stride);
     }
-
     rms = FrequencyConstants::kRmsScale * std::sqrt(rms) /
         std::max<size_t>(1, n * ctx.reference.channels);
     const double noise_norm =
@@ -377,20 +360,20 @@ TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
 
     for (const auto& comp_img : ctx.aligned_comparisons)
     {
-        std::vector<std::vector<std::complex<double>>> comp_spectra(
-            ctx.reference.channels, std::vector<std::complex<double>>(n));
+        std::vector<std::complex<double>> comp_spectra(ctx.reference.channels * n);
         for (uint32_t c = 0; c < ctx.reference.channels; ++c)
         {
+            std::complex<double>* dst = comp_spectra.data() + c * stride;
             for (size_t yy = 0; yy < th; ++yy)
             {
                 for (size_t xx = 0; xx < tw; ++xx)
                 {
-                    comp_spectra[c][yy * tw + xx] = comp_img.At(
+                    dst[yy * tw + xx] = comp_img.At(
                         x0 + static_cast<uint32_t>(xx),
                         y0 + static_cast<uint32_t>(yy), c);
                 }
             }
-            Fft2D(comp_spectra[c], tw, th, false);
+            Fft2D(dst, tw, th, false);
         }
 
         const double kPi = 3.14159265358979323846;
@@ -421,6 +404,7 @@ TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
                 {
                     for (size_t fx = 0; fx < tw; ++fx)
                     {
+                        const size_t k = fy * tw + fx;
                         const std::complex<double> phase = use_phase_table
                             ? phase_table->At(shift_idx, fy, fx)
                             : std::complex<double>(
@@ -432,8 +416,8 @@ TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
                                      static_cast<double>(fy) * sy / static_cast<double>(th))));
                         for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                         {
-                            const auto d = ref_spectra[c][fy * tw + fx] -
-                                comp_spectra[c][fy * tw + fx] * phase;
+                            const auto d = ref_spectra[c * stride + k] -
+                                comp_spectra[c * stride + k] * phase;
                             diff_sum += std::norm(d);
                         }
                     }
@@ -467,16 +451,16 @@ TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
                 std::vector<std::complex<double>> shifted(ctx.reference.channels);
                 for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
-                    shifted[c] = comp_spectra[c][k] * phase;
-                    d2_mean += std::norm(ref_spectra[c][k] - shifted[c]);
+                    shifted[c] = comp_spectra[c * stride + k] * phase;
+                    d2_mean += std::norm(ref_spectra[c * stride + k] - shifted[c]);
                 }
                 d2_mean /= static_cast<double>(ctx.reference.channels);
                 double weight = d2_mean / (d2_mean + std::max(1e-9, noise_norm));
                 if (k == 0) weight = 0.0;
                 for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
-                    merged_spectra[c][k] +=
-                        (1.0 - weight) * shifted[c] + weight * ref_spectra[c][k];
+                    merged_spectra[c * stride + k] +=
+                        (1.0 - weight) * shifted[c] + weight * ref_spectra[c * stride + k];
                 }
             }
         }
@@ -485,7 +469,8 @@ TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
     const double inv_stack = 1.0 / static_cast<double>(ctx.stack_size);
     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
-        Fft2D(merged_spectra[c], tw, th, true);
+        std::complex<double>* src = merged_spectra.data() + c * stride;
+        Fft2D(src, tw, th, true);
         for (size_t yy = 0; yy < th; ++yy)
         {
             for (size_t xx = 0; xx < tw; ++xx)
@@ -493,7 +478,7 @@ TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
                 const size_t k = yy * tw + xx;
                 const size_t out_idx = (yy * tw + xx) * ctx.reference.channels + c;
                 result.pixels[out_idx] =
-                    static_cast<float>(merged_spectra[c][k].real() * inv_stack * result.window[k]);
+                    static_cast<float>(src[k].real() * inv_stack * result.window[k]);
             }
         }
     }
@@ -527,24 +512,29 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
         }
     }
 
-    std::vector<std::vector<std::complex<double>>> ref_spectra(
-        ctx.reference.channels, std::vector<std::complex<double>>(n));
-    std::vector<std::vector<std::complex<double>>> merged_spectra(
-        ctx.reference.channels, std::vector<std::complex<double>>(n));
+    const size_t stride = n;
+    std::vector<std::complex<double>> ref_spectra(ctx.reference.channels * n);
+    std::vector<std::complex<double>> merged_spectra(ctx.reference.channels * n);
 
-    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
-        for (size_t yy = 0; yy < th; ++yy)
+        ProfileScope scope("time.merge.wiener_ref_fft");
+        for (uint32_t c = 0; c < ctx.reference.channels; ++c)
         {
-            for (size_t xx = 0; xx < tw; ++xx)
+            std::complex<double>* dst = ref_spectra.data() + c * stride;
+            for (size_t yy = 0; yy < th; ++yy)
             {
-                ref_spectra[c][yy * tw + xx] = ctx.reference.At(
-                    x0 + static_cast<uint32_t>(xx),
-                    y0 + static_cast<uint32_t>(yy), c);
+                for (size_t xx = 0; xx < tw; ++xx)
+                {
+                    const double v = std::max(0.0,
+                        static_cast<double>(ctx.reference.At(
+                            x0 + static_cast<uint32_t>(xx),
+                            y0 + static_cast<uint32_t>(yy), c)));
+                    dst[yy * tw + xx] = v;
+                }
             }
+            Fft2D(dst, tw, th, false);
+            std::copy_n(dst, n, merged_spectra.data() + c * stride);
         }
-        Fft2D(ref_spectra[c], tw, th, false);
-        merged_spectra[c] = ref_spectra[c];
     }
 
     struct CompTileStats
@@ -560,14 +550,17 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
             ? std::max(1e-6f, ctx.params.exposure_scales[comp_idx])
             : 1.0;
         comp_stats[comp_idx].exposure_factor = exposure_factor;
-        comp_stats[comp_idx].stats = ComputeTileStats(ctx.reference,
-                                                      ctx.aligned_comparisons[comp_idx],
-                                                      x0,
-                                                      y0,
-                                                      tw,
-                                                      th,
-                                                      exposure_factor,
-                                                      ctx.params);
+        {
+            ProfileScope scope("time.merge.wiener_tile_stats");
+            comp_stats[comp_idx].stats = ComputeTileStats(ctx.reference,
+                                                           ctx.aligned_comparisons[comp_idx],
+                                                           x0,
+                                                           y0,
+                                                           tw,
+                                                           th,
+                                                           exposure_factor,
+                                                           ctx.params);
+        }
     }
 
     const double mean_mismatch = comp_stats.empty() ? 0.0 : [&]()
@@ -587,136 +580,139 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
     const double noise_norm =
         (comp_stats.empty() ? 0.0 : comp_stats[0].stats.rms) + ctx.read_noise;
 
-    for (size_t comp_idx = 0; comp_idx < ctx.aligned_comparisons.size(); ++comp_idx)
     {
-        const FloatImage& comp_img = ctx.aligned_comparisons[comp_idx];
-        const auto& tile_stats = comp_stats[comp_idx];
-        std::vector<std::vector<std::complex<double>>> comp_spectra(
-            ctx.reference.channels, std::vector<std::complex<double>>(n));
-        for (uint32_t c = 0; c < ctx.reference.channels; ++c)
+        ProfileScope scope("time.merge.wiener_comp_merge");
+        for (size_t comp_idx = 0; comp_idx < ctx.aligned_comparisons.size(); ++comp_idx)
         {
-            for (size_t yy = 0; yy < th; ++yy)
+            const FloatImage& comp_img = ctx.aligned_comparisons[comp_idx];
+            const auto& tile_stats = comp_stats[comp_idx];
+            std::vector<std::complex<double>> comp_spectra(ctx.reference.channels * n);
+            for (uint32_t c = 0; c < ctx.reference.channels; ++c)
             {
-                for (size_t xx = 0; xx < tw; ++xx)
+                std::complex<double>* dst = comp_spectra.data() + c * stride;
+                for (size_t yy = 0; yy < th; ++yy)
                 {
-                    comp_spectra[c][yy * tw + xx] = comp_img.At(
-                        x0 + static_cast<uint32_t>(xx),
-                        y0 + static_cast<uint32_t>(yy), c);
-                }
-            }
-            Fft2D(comp_spectra[c], tw, th, false);
-        }
-
-        const double kPi = 3.14159265358979323846;
-        double best_diff = 1e300;
-        double best_sx = 0.0;
-        double best_sy = 0.0;
-        int best_shift_idx = 0;
-        const int grid = FrequencyConstants::kFourierSearchGrid;
-        const double range = FrequencyConstants::kFourierSearchRange;
-        const int half = grid / 2;
-        const bool use_phase_table =
-            (tw == static_cast<size_t>(FrequencyConstants::kWienerTileSize) &&
-             th == static_cast<size_t>(FrequencyConstants::kWienerTileSize));
-        const auto* phase_table = use_phase_table
-            ? &GetCachedPhaseTable(grid, FrequencyConstants::kWienerTileSize, range)
-            : nullptr;
-        int shift_idx = 0;
-        for (int iy = -half; iy <= half; ++iy)
-        {
-            for (int ix = -half; ix <= half; ++ix)
-            {
-                const double sx = range * static_cast<double>(ix) /
-                    static_cast<double>(half);
-                const double sy = range * static_cast<double>(iy) /
-                    static_cast<double>(half);
-                double diff_sum = 0.0;
-                for (size_t fy = 0; fy < th; ++fy)
-                {
-                    for (size_t fx = 0; fx < tw; ++fx)
+                    for (size_t xx = 0; xx < tw; ++xx)
                     {
-                        const std::complex<double> phase = use_phase_table
-                            ? phase_table->At(shift_idx, fy, fx)
-                            : std::complex<double>(
-                                std::cos(-2.0 * kPi *
-                                    (static_cast<double>(fx) * sx / static_cast<double>(tw) +
-                                     static_cast<double>(fy) * sy / static_cast<double>(th))),
-                                std::sin(-2.0 * kPi *
-                                    (static_cast<double>(fx) * sx / static_cast<double>(tw) +
-                                     static_cast<double>(fy) * sy / static_cast<double>(th))));
-                        for (uint32_t c = 0; c < ctx.reference.channels; ++c)
-                        {
-                            const auto d = ref_spectra[c][fy * tw + fx] -
-                                comp_spectra[c][fy * tw + fx] * phase;
-                            diff_sum += std::norm(d);
-                        }
+                        dst[yy * tw + xx] = comp_img.At(
+                            x0 + static_cast<uint32_t>(xx),
+                            y0 + static_cast<uint32_t>(yy), c);
                     }
                 }
-                if (diff_sum < best_diff)
-                {
-                    best_diff = diff_sum;
-                    best_sx = sx;
-                    best_sy = sy;
-                    best_shift_idx = shift_idx;
-                }
-                ++shift_idx;
+                Fft2D(dst, tw, th, false);
             }
-        }
 
-        const double mismatch_weight = ClampDouble(
-            1.0 - 10.0 * (tile_stats.stats.mismatch - 0.2), 0.0, 1.0);
-        const double motion_norm = ClampDouble(
-            ctx.max_motion_norm - (tile_stats.stats.mismatch - 0.02) *
-            (ctx.max_motion_norm - 1.0) / 0.15,
-            1.0, ctx.max_motion_norm);
-        const double motion_norm_exposure =
-            std::min(4.0, tile_stats.exposure_factor) * std::sqrt(motion_norm);
-
-        for (size_t fy = 0; fy < th; ++fy)
-        {
-            for (size_t fx = 0; fx < tw; ++fx)
+            const double kPi = 3.14159265358979323846;
+            double best_diff = 1e300;
+            double best_sx = 0.0;
+            double best_sy = 0.0;
+            int best_shift_idx = 0;
+            const int grid = FrequencyConstants::kFourierSearchGrid;
+            const double range = FrequencyConstants::kFourierSearchRange;
+            const int half = grid / 2;
+            const bool use_phase_table =
+                (tw == static_cast<size_t>(FrequencyConstants::kWienerTileSize) &&
+                 th == static_cast<size_t>(FrequencyConstants::kWienerTileSize));
+            const auto* phase_table = use_phase_table
+                ? &GetCachedPhaseTable(grid, FrequencyConstants::kWienerTileSize, range)
+                : nullptr;
+            int shift_idx = 0;
+            for (int iy = -half; iy <= half; ++iy)
             {
-                const size_t k = fy * tw + fx;
-                const std::complex<double> phase = use_phase_table
-                    ? phase_table->At(best_shift_idx, fy, fx)
-                    : std::complex<double>(
-                        std::cos(-2.0 * kPi *
-                            (static_cast<double>(fx) * best_sx / static_cast<double>(tw) +
-                             static_cast<double>(fy) * best_sy / static_cast<double>(th))),
-                        std::sin(-2.0 * kPi *
-                            (static_cast<double>(fx) * best_sx / static_cast<double>(tw) +
-                             static_cast<double>(fy) * best_sy / static_cast<double>(th))));
-                double d2_mean = 0.0;
-                double ref_mag_sum = 0.0;
-                double shifted_mag_sum = 0.0;
-                std::vector<std::complex<double>> shifted(ctx.reference.channels);
-                for (uint32_t c = 0; c < ctx.reference.channels; ++c)
+                for (int ix = -half; ix <= half; ++ix)
                 {
-                    shifted[c] = comp_spectra[c][k] * phase;
-                    d2_mean += std::norm(ref_spectra[c][k] - shifted[c]);
-                    ref_mag_sum += std::abs(ref_spectra[c][k]);
-                    shifted_mag_sum += std::abs(shifted[c]);
+                    const double sx = range * static_cast<double>(ix) /
+                        static_cast<double>(half);
+                    const double sy = range * static_cast<double>(iy) /
+                        static_cast<double>(half);
+                    double diff_sum = 0.0;
+                    for (size_t fy = 0; fy < th; ++fy)
+                    {
+                        for (size_t fx = 0; fx < tw; ++fx)
+                        {
+                            const std::complex<double> phase = use_phase_table
+                                ? phase_table->At(shift_idx, fy, fx)
+                                : std::complex<double>(
+                                    std::cos(-2.0 * kPi *
+                                        (static_cast<double>(fx) * sx / static_cast<double>(tw) +
+                                         static_cast<double>(fy) * sy / static_cast<double>(th))),
+                                    std::sin(-2.0 * kPi *
+                                        (static_cast<double>(fx) * sx / static_cast<double>(tw) +
+                                         static_cast<double>(fy) * sy / static_cast<double>(th))));
+                            for (uint32_t c = 0; c < ctx.reference.channels; ++c)
+                            {
+                                const auto d = ref_spectra[c * stride + fy * tw + fx] -
+                                    comp_spectra[c * stride + fy * tw + fx] * phase;
+                                diff_sum += std::norm(d);
+                            }
+                        }
+                    }
+                    if (diff_sum < best_diff)
+                    {
+                        best_diff = diff_sum;
+                        best_sx = sx;
+                        best_sy = sy;
+                        best_shift_idx = shift_idx;
+                    }
+                    ++shift_idx;
                 }
-                d2_mean /= static_cast<double>(ctx.reference.channels);
-                double magnitude_norm = 1.0;
-                if (fx + fy > 0 && tile_stats.stats.mismatch < 0.3 &&
-                    std::abs(tile_stats.exposure_factor - 1.0) < 1e-3)
+            }
+
+            const double mismatch_weight = ClampDouble(
+                1.0 - 10.0 * (tile_stats.stats.mismatch - 0.2), 0.0, 1.0);
+            const double motion_norm = ClampDouble(
+                ctx.max_motion_norm - (tile_stats.stats.mismatch - 0.02) *
+                (ctx.max_motion_norm - 1.0) / 0.15,
+                1.0, ctx.max_motion_norm);
+            const double motion_norm_exposure =
+                std::min(4.0, tile_stats.exposure_factor) * std::sqrt(motion_norm);
+
+            for (size_t fy = 0; fy < th; ++fy)
+            {
+                for (size_t fx = 0; fx < tw; ++fx)
                 {
-                    const double ratio = shifted_mag_sum /
-                        std::max(1e-12, ref_mag_sum);
-                    magnitude_norm = mismatch_weight *
-                        ClampDouble(ratio * ratio * ratio * ratio, 0.5, 3.0);
-                }
-                const double denom = d2_mean +
-                    magnitude_norm * motion_norm_exposure *
-                    (noise_norm * static_cast<double>(tile * tile) * ctx.robustness_norm) *
-                    tile_stats.stats.highlights_norm;
-                double weight = d2_mean / std::max(1e-9, denom);
-                if (k == 0) weight = 0.0;
-                for (uint32_t c = 0; c < ctx.reference.channels; ++c)
-                {
-                    merged_spectra[c][k] +=
-                        (1.0 - weight) * shifted[c] + weight * ref_spectra[c][k];
+                    const size_t k = fy * tw + fx;
+                    const std::complex<double> phase = use_phase_table
+                        ? phase_table->At(best_shift_idx, fy, fx)
+                        : std::complex<double>(
+                            std::cos(-2.0 * kPi *
+                                (static_cast<double>(fx) * best_sx / static_cast<double>(tw) +
+                                 static_cast<double>(fy) * best_sy / static_cast<double>(th))),
+                            std::sin(-2.0 * kPi *
+                                (static_cast<double>(fx) * best_sx / static_cast<double>(tw) +
+                                 static_cast<double>(fy) * best_sy / static_cast<double>(th))));
+                    double d2_mean = 0.0;
+                    double ref_mag_sum = 0.0;
+                    double shifted_mag_sum = 0.0;
+                    std::complex<double> shifted[4];
+                    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
+                    {
+                        shifted[c] = comp_spectra[c * stride + k] * phase;
+                        d2_mean += std::norm(ref_spectra[c * stride + k] - shifted[c]);
+                        ref_mag_sum += std::abs(ref_spectra[c * stride + k]);
+                        shifted_mag_sum += std::abs(shifted[c]);
+                    }
+                    d2_mean /= static_cast<double>(ctx.reference.channels);
+                    double magnitude_norm = 1.0;
+                    if (fx + fy > 0 && tile_stats.stats.mismatch < 0.3 &&
+                        std::abs(tile_stats.exposure_factor - 1.0) < 1e-3)
+                    {
+                        const double ratio = shifted_mag_sum /
+                            std::max(1e-12, ref_mag_sum);
+                        magnitude_norm = mismatch_weight *
+                            ClampDouble(ratio * ratio * ratio * ratio, 0.5, 3.0);
+                    }
+                    const double denom = d2_mean +
+                        magnitude_norm * motion_norm_exposure *
+                        (noise_norm * static_cast<double>(tile * tile) * ctx.robustness_norm) *
+                        tile_stats.stats.highlights_norm;
+                    double weight = d2_mean / std::max(1e-9, denom);
+                    if (k == 0) weight = 0.0;
+                    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
+                    {
+                        merged_spectra[c * stride + k] +=
+                            (1.0 - weight) * shifted[c] + weight * ref_spectra[c * stride + k];
+                    }
                 }
             }
         }
@@ -729,40 +725,44 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
 
     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
-        const size_t dc = 0;
-        const double magnitude_zero = std::abs(merged_spectra[c][dc]);
+        std::complex<double>* ms = merged_spectra.data() + c * stride;
+        const double magnitude_zero = std::abs(ms[0]);
         for (size_t fy = 0; fy < th; ++fy)
         {
             for (size_t fx = 0; fx < tw; ++fx)
             {
                 if (fx + fy == 0 || mismatch_avg >= 0.3) continue;
                 const size_t k = fy * tw + fx;
-                const double magnitude = std::abs(merged_spectra[c][k]);
+                const double magnitude = std::abs(ms[k]);
                 const double mismatch_weight = ClampDouble(
                     1.0 - 10.0 * (mismatch_avg - 0.2), 0.0, 1.0);
                 const double deconv_weight = mismatch_weight * ClampDouble(
                     1.25 - 25.0 * magnitude / std::max(1e-12, magnitude_zero), 0.0, 1.0);
                 static const double cw[8] =
                 {0.00, 0.02, 0.04, 0.08, 0.04, 0.08, 0.04, 0.02};
-                merged_spectra[c][k] *=
+                ms[k] *=
                     (1.0 + deconv_weight * cw[std::min<size_t>(fx, 7)]) *
                     (1.0 + deconv_weight * cw[std::min<size_t>(fy, 7)]);
             }
         }
     }
 
-    const double inv_stack = 1.0 / static_cast<double>(ctx.stack_size);
-    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
-        Fft2D(merged_spectra[c], tw, th, true);
-        for (size_t yy = 0; yy < th; ++yy)
+        ProfileScope scope("time.merge.wiener_ifft");
+        const double inv_stack = 1.0 / static_cast<double>(ctx.stack_size);
+        for (uint32_t c = 0; c < ctx.reference.channels; ++c)
         {
-            for (size_t xx = 0; xx < tw; ++xx)
+            std::complex<double>* ms = merged_spectra.data() + c * stride;
+            Fft2D(ms, tw, th, true);
+            for (size_t yy = 0; yy < th; ++yy)
             {
-                const size_t k = yy * tw + xx;
-                const size_t out_idx = (yy * tw + xx) * ctx.reference.channels + c;
-                result.pixels[out_idx] =
-                    static_cast<float>(merged_spectra[c][k].real() * inv_stack * result.window[k]);
+                for (size_t xx = 0; xx < tw; ++xx)
+                {
+                    const size_t k = yy * tw + xx;
+                    const size_t out_idx = (yy * tw + xx) * ctx.reference.channels + c;
+                    result.pixels[out_idx] =
+                        static_cast<float>(ms[k].real() * inv_stack * result.window[k]);
+                }
             }
         }
     }
@@ -792,48 +792,6 @@ void ReduceTileBorderArtifacts(FloatImage& image,
                 float& dst = image.At(x, y, c);
                 dst = std::max(dst, min_value);
             }
-        }
-    }
-}
-
-void Fft2D(std::vector<std::complex<double>>& data, size_t w, size_t h, bool inverse)
-{
-    if (w == 0 || h == 0) return;
-    cfft_plan row_plan = GetCachedCfftPlan(w);
-    cfft_plan col_plan = GetCachedCfftPlan(h);
-    std::vector<double> scratch(2 * std::max(w, h), 0.0);
-
-    for (size_t y = 0; y < h; ++y)
-    {
-        for (size_t x = 0; x < w; ++x)
-        {
-            auto v = data[y * w + x];
-            scratch[2 * x] = v.real();
-            scratch[2 * x + 1] = v.imag();
-        }
-        if (inverse) cfft_backward(row_plan, scratch.data(), 1.0);
-        else cfft_forward(row_plan, scratch.data(), 1.0);
-        for (size_t x = 0; x < w; ++x)
-        {
-            data[y * w + x] =
-            {scratch[2 * x], scratch[2 * x + 1]};
-        }
-    }
-
-    for (size_t x = 0; x < w; ++x)
-    {
-        for (size_t y = 0; y < h; ++y)
-        {
-            auto v = data[y * w + x];
-            scratch[2 * y] = v.real();
-            scratch[2 * y + 1] = v.imag();
-        }
-        if (inverse) cfft_backward(col_plan, scratch.data(), 1.0 / static_cast<double>(w * h));
-        else cfft_forward(col_plan, scratch.data(), 1.0);
-        for (size_t y = 0; y < h; ++y)
-        {
-            data[y * w + x] =
-            {scratch[2 * y], scratch[2 * y + 1]};
         }
     }
 }

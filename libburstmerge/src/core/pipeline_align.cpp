@@ -52,27 +52,6 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
             "[WARN] Advanced dense alignment is experimental and not fully implemented yet. Results may be unstable.\n");
     }
 
-    auto align_and_warp = [&](const FloatImage& guide_ref,
-                              const FloatImage& source,
-                              size_t progress_idx,
-                              size_t total_count) -> FloatImage
-    {
-        const FloatImage gray_ref = ConvertPlanesToGrayscale(guide_ref);
-        const FloatImage gray_src = ConvertPlanesToGrayscale(source);
-
-        Report(progress,
-               PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange *
-                   static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
-               "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
-        AlignmentResult ar = EstimateTranslation(gray_ref, gray_src, params);
-
-        Report(progress,
-               PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange *
-                   static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
-               "Warping frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
-        return WarpAligned(source, ar);
-    };
-
     const FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
     std::vector<FloatImage> gray_inputs;
     gray_inputs.reserve(float_images.size());
@@ -98,6 +77,19 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                    static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
                "Warping frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
         return WarpAligned(source, ar);
+    };
+
+    auto align_and_warp = [&](const FloatImage& guide_ref,
+                              const FloatImage& source,
+                              size_t progress_idx,
+                              size_t total_count) -> FloatImage
+    {
+        return align_and_warp_pregrays(
+            ConvertPlanesToGrayscale(guide_ref),
+            ConvertPlanesToGrayscale(source),
+            source,
+            progress_idx,
+            total_count);
     };
 
     bool has_exposure = false;
