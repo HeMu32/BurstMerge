@@ -16,7 +16,10 @@ struct TemporalDenoiseParams
     const float* exposure_scales = nullptr;
 };
 
-void RepairHotPixels(std::vector<FloatImage>& images, float white_level, uint32_t cfa_period);
+void RepairHotPixels(std::vector<FloatImage>& images,
+                     float white_level,
+                     const float black_level[4],
+                     uint32_t cfa_period);
 FloatImage TemporalAverage(const FloatImage& reference,
                            const std::vector<FloatImage>& aligned_comparisons,
                            const TemporalDenoiseParams& params);
