@@ -115,32 +115,60 @@ void WriteGrayBmpRgba(const char* path,
     {
         for (uint32_t x = 0; x < width; ++x)
         {
-            int sx = static_cast<int>(x);
-            int sy = y;
+            float sample_value = gray.At(x, static_cast<uint32_t>(y), 0);
+            bool covered = true;
             if (transparent_outside && alignment)
             {
-                float shift_x = InterpolateTileShift(alignment->tile_shift_x,
-                                                     alignment->tiles_x,
-                                                     alignment->tiles_y,
-                                                     alignment->tile_size,
-                                                     alignment->tile_spacing,
-                                                     x,
-                                                     static_cast<uint32_t>(y));
-                float shift_y = InterpolateTileShift(alignment->tile_shift_y,
-                                                     alignment->tiles_x,
-                                                     alignment->tiles_y,
-                                                     alignment->tile_size,
-                                                     alignment->tile_spacing,
-                                                     x,
-                                                     static_cast<uint32_t>(y));
-                int isx = SnapToPeriod(static_cast<int>(std::lround(shift_x)), alignment->cfa_period);
-                int isy = SnapToPeriod(static_cast<int>(std::lround(shift_y)), alignment->cfa_period);
-                sx = static_cast<int>(x) - isx;
-                sy = y - isy;
+                const float spacing = static_cast<float>(alignment->tile_spacing > 0 ? alignment->tile_spacing : alignment->tile_size);
+                const float fx = (static_cast<float>(x) + 0.5f) / spacing - 1.0f;
+                const float fy = (static_cast<float>(y) + 0.5f) / spacing - 1.0f;
+
+                int x0 = static_cast<int>(std::floor(fx));
+                int y0 = static_cast<int>(std::floor(fy));
+                const float tx = fx - static_cast<float>(x0);
+                const float ty = fy - static_cast<float>(y0);
+
+                auto sample_shift = [&](const std::vector<int16_t>& field, int ix, int iy) -> int
+                {
+                    ix = std::max(0, std::min(ix, static_cast<int>(alignment->tiles_x) - 1));
+                    iy = std::max(0, std::min(iy, static_cast<int>(alignment->tiles_y) - 1));
+                    const size_t idx = static_cast<size_t>(iy) * alignment->tiles_x + static_cast<uint32_t>(ix);
+                    return SnapToPeriod(static_cast<int>(field[idx]), alignment->cfa_period);
+                };
+
+                auto sample_value_at = [&](int sx_shift, int sy_shift) -> float
+                {
+                    const int sx = static_cast<int>(x) - sx_shift;
+                    const int sy = y - sy_shift;
+                    if (sx < 0 || sx >= static_cast<int>(width) || sy < 0 || sy >= static_cast<int>(height))
+                    {
+                        covered = false;
+                        return 0.0f;
+                    }
+                    return gray.At(static_cast<uint32_t>(sx), static_cast<uint32_t>(sy), 0);
+                };
+
+                const int dx00 = sample_shift(alignment->tile_shift_x, x0, y0);
+                const int dx10 = sample_shift(alignment->tile_shift_x, x0 + 1, y0);
+                const int dx01 = sample_shift(alignment->tile_shift_x, x0, y0 + 1);
+                const int dx11 = sample_shift(alignment->tile_shift_x, x0 + 1, y0 + 1);
+                const int dy00 = sample_shift(alignment->tile_shift_y, x0, y0);
+                const int dy10 = sample_shift(alignment->tile_shift_y, x0 + 1, y0);
+                const int dy01 = sample_shift(alignment->tile_shift_y, x0, y0 + 1);
+                const int dy11 = sample_shift(alignment->tile_shift_y, x0 + 1, y0 + 1);
+                const float w00 = (1.0f - tx) * (1.0f - ty);
+                const float w10 = tx * (1.0f - ty);
+                const float w01 = (1.0f - tx) * ty;
+                const float w11 = tx * ty;
+
+                sample_value = w00 * sample_value_at(dx00, dy00) +
+                               w10 * sample_value_at(dx10, dy10) +
+                               w01 * sample_value_at(dx01, dy01) +
+                               w11 * sample_value_at(dx11, dy11);
             }
 
             const size_t base = static_cast<size_t>(x) * 4u;
-            if (sx < 0 || sx >= static_cast<int>(width) || sy < 0 || sy >= static_cast<int>(height))
+            if (!covered)
             {
                 row[base + 0] = 0;
                 row[base + 1] = 0;
@@ -149,7 +177,7 @@ void WriteGrayBmpRgba(const char* path,
                 continue;
             }
 
-            float v = gray.At(static_cast<uint32_t>(sx), static_cast<uint32_t>(sy), 0);
+            float v = sample_value;
             v = std::max(0.0f, std::min(1.0f, v / 1023.0f));
             const uint8_t g = static_cast<uint8_t>(std::lround(v * 255.0f));
             row[base + 0] = g;

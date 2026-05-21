@@ -145,6 +145,12 @@ void SmoothTileField(AlignmentResult& result)
 {
     if (result.tiles_x == 0 || result.tiles_y == 0) return;
 
+    // Temporary experiment: disable tile-field smoothing globally to verify
+    // whether cross-boundary averaging is the primary source of large local
+    // geometric distortions. Keep the function in place so all alignment
+    // paths (legacy / dense / freq) share the same switch.
+    return;
+
     std::vector<int16_t> smoothed_x = result.tile_shift_x;
     std::vector<int16_t> smoothed_y = result.tile_shift_y;
     const int rad = AlignConstants::kSmoothNeighborRadius;
