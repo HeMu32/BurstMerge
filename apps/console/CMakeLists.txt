@@ -1,2 +1,5 @@
 add_executable(burstmerge_console main.cpp)
 target_link_libraries(burstmerge_console PRIVATE burstmerge)
+
+add_executable(burstmerge_compare compare_dng_pixels.cpp)
+target_link_libraries(burstmerge_compare PRIVATE burstmerge)

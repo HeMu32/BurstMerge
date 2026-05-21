@@ -2,8 +2,29 @@
 .SYNOPSIS
   Inject Sony lens correction into DNG via OpcodeList3.
 #>
-param([string]$RefFile,[string]$DngFile,[string]$OutputFile='',[switch]$NoVig)
+param([string]$RefFile,[string]$DngFile,[string]$OutputFile='',[switch]$NoVig,[switch]$Help)
 $ErrorActionPreference='Stop'
+
+function Show-Usage {
+  Write-Host "Usage: SyncARWLensCorr.ps1 <RefFile> <DngFile> [<OutputFile>] [-NoVig] [-Help]"
+  Write-Host "" 
+  Write-Host "Arguments:"
+  Write-Host "  RefFile     Sony reference ARW file containing lens correction metadata."
+  Write-Host "  DngFile     Target DNG file to inject corrected OpcodeList3 data into."
+  Write-Host "  OutputFile  Optional output filename. If omitted, writes '<DngFile>_corr.dng'."
+  Write-Host "" 
+  Write-Host "Options:"
+  Write-Host "  -NoVig      Skip vignetting correction and inject only distortion correction."
+  Write-Host "  -Help       Show this usage information."
+  Write-Host "" 
+  Write-Host "Example:"
+  Write-Host "  .\SyncARWLensCorr.ps1 ref.ARW target.dng output_corr.dng"
+  Write-Host "  .\SyncARWLensCorr.ps1 ref.ARW target.dng -NoVig"
+  exit 0
+}
+if ($Help -or -not $RefFile -or -not $DngFile) {
+  Show-Usage
+}
 $exif="C:\MultiMediaTools\Bin\exiftool.exe"
 
 function rx($a){

@@ -1,31 +1,55 @@
-#pragma once
+﻿#pragma once
 #include <string>
 #include <vector>
 #include <functional>
 #include <memory>
 
-namespace burstmerge {
+namespace burstmerge
+{
 
-enum class BackendType      { CPU, Vulkan };
-enum class MergeAlgorithm   { Spatial, Frequency };
-enum class ExposureMode     { Off, Linear, Curve };
+enum class BackendType
+{ CPU, Vulkan };
+enum class MergeAlgorithm
+{
+    Spatial,         // Pixel-domain weighted blending (Legacy or Linear sub-mode)
+    Frequency,       // Frequency-domain merge (Laplacian or WienerFft sub-mode)
+    TemporalAverage  // Simple exposure-weighted frame average; ignores noise_reduction
+};
+enum class ExposureMode
+{ Off, Linear, Curve };
+enum class AlignmentMode
+{ Legacy, DenseTile, Frequency };
+enum class SpatialMergeMode
+{ Legacy, Linear };
+enum class FrequencyMode
+{ Laplacian, WienerFftLegacy, WienerFftRobust };
+enum class ExposureCurveMode
+{ Global, LocalReinhard };
 
-struct Settings {
+struct Settings
+{
     int            tile_size        = 32;
     int            search_distance  = 64;
     MergeAlgorithm merge_algo       = MergeAlgorithm::Spatial;
+    AlignmentMode   alignment_mode  = AlignmentMode::Legacy;
+    SpatialMergeMode spatial_mode   = SpatialMergeMode::Legacy;
+    FrequencyMode   frequency_mode  = FrequencyMode::Laplacian;
+    ExposureCurveMode exposure_curve_mode = ExposureCurveMode::Global;
     float          noise_reduction  = 13.0f;
     ExposureMode   exposure_mode    = ExposureMode::Off;
-    int            exposure_stops   = 0;
+    float          exposure_stops   = 0.0f;
+    int            dng_bit_depth    = 14;   // 12, 14, or 16
 };
 
-struct Result {
+struct Result
+{
     bool        success;
     std::string output_path;
     std::string error_msg;
 };
 
-class BurstMerge {
+class BurstMerge
+{
 public:
     explicit BurstMerge(BackendType backend);
     ~BurstMerge();

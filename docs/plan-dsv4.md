@@ -167,7 +167,9 @@ set(VULKAN_LIBRARY     "${VULKAN_ROOT}/Lib/vulkan-1.lib")
 set(CXXOPTS_INCLUDE    "${PROJECT_ROOT}/3rdparty/cxxopts/include")
 
 # ---- OpenMP (MinGW) ----
-set(OPENMP_RUNTIME_DLL "${PROJECT_ROOT}/3rdparty/openmp/libgomp-1.dll")
+# 当前 MinGW (GCC 11.2.0) 静态链接 libgomp.a, 无需运行时 DLL
+# 若切换到 MSVC 或动态 MinGW 构建, 取消下行注释
+# set(OPENMP_RUNTIME_DLL "${PROJECT_ROOT}/3rdparty/openmp/libgomp-1.dll")
 ```
 
 ### 3rdparty 目录职责
@@ -180,8 +182,8 @@ set(OPENMP_RUNTIME_DLL "${PROJECT_ROOT}/3rdparty/openmp/libgomp-1.dll")
 ├── vulkan/           # MinGW: 手动放置 Vulkan SDK Include/ + Lib/
 │   ├── Include/vulkan/vulkan.h
 │   └── Lib/vulkan-1.lib
-└── openmp/           # 运行时 DLL 的拷贝, 供打包分发
-    └── libgomp-1.dll
+└── openmp/           # 运行时 DLL 拷贝 (当前 MinGW 静态链接 libgomp.a, 不需要)
+    └── readme.txt     # 见 readme.txt 说明
 ```
 
 ### CMakeLists.txt 顶层引用方式

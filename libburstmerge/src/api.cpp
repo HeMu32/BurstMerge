@@ -1,10 +1,17 @@
-#include "burstmerge/api.h"
+﻿#include "burstmerge/api.h"
 
-namespace burstmerge {
+#include "burstmerge/internal/core/pipeline.h"
 
-struct BurstMerge::Impl {
+namespace burstmerge
+{
+
+struct BurstMerge::Impl
+{
     BackendType backend;
     Settings settings;
+    std::vector<std::string> input_paths;
+    ProgressFn progress_cb;
+    std::string last_error;
 };
 
 BurstMerge::BurstMerge(BackendType backend)
@@ -15,25 +22,32 @@ BurstMerge::BurstMerge(BackendType backend)
 
 BurstMerge::~BurstMerge() = default;
 
-void BurstMerge::AddImage(const std::string& path) {
-    (void)path;
+void BurstMerge::AddImage(const std::string& path)
+{
+    impl_->input_paths.push_back(path);
 }
 
-void BurstMerge::Configure(const Settings& settings) {
+void BurstMerge::Configure(const Settings& settings)
+{
     impl_->settings = settings;
 }
 
-void BurstMerge::SetProgressCallback(ProgressFn cb) {
-    (void)cb;
+void BurstMerge::SetProgressCallback(ProgressFn cb)
+{
+    impl_->progress_cb = std::move(cb);
 }
 
-Result BurstMerge::Process(const std::string& output_dir) {
-    (void)output_dir;
-    return Result{true, "", ""};
+Result BurstMerge::Process(const std::string& output_dir)
+{
+    PipelineOrchestrator pipeline(impl_->backend, impl_->settings);
+    Result result = pipeline.Process(impl_->input_paths, output_dir, impl_->progress_cb);
+    impl_->last_error = result.error_msg;
+    return result;
 }
 
-std::string BurstMerge::LastError() const {
-    return {};
+std::string BurstMerge::LastError() const
+{
+    return impl_->last_error;
 }
 
 } // namespace burstmerge
