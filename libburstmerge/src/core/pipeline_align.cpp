@@ -2,11 +2,12 @@
 
 #include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
+#include "burstmerge/internal/core/profiler.h"
+#include "burstmerge/internal/core/task_executor.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <limits>
 #include <limits>
 
 namespace burstmerge
@@ -32,6 +33,7 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                                                 uint32_t cfa_period,
                                                 const PipelineOrchestrator::ProgressFn& progress)
 {
+    ProfileScope scope("time.pipeline.build_aligned_comparisons");
     // Pipeline-facing adapter around alignment: choose guides, dispatch to the
     // alignment code, and organize chaining for bracketed stacks.
     std::vector<FloatImage> aligned;
@@ -50,14 +52,20 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
             "[WARN] Advanced dense alignment is experimental and not fully implemented yet. Results may be unstable.\n");
     }
 
-    auto align_and_warp = [&](const FloatImage& guide_ref,
-                              const FloatImage& source,
-                              size_t progress_idx,
-                              size_t total_count) -> FloatImage
+    const FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
+    std::vector<FloatImage> gray_inputs;
+    gray_inputs.reserve(float_images.size());
+    for (const auto& img : float_images)
     {
-        const FloatImage gray_ref = ConvertPlanesToGrayscale(guide_ref);
-        const FloatImage gray_src = ConvertPlanesToGrayscale(source);
+        gray_inputs.push_back(ConvertPlanesToGrayscale(img));
+    }
 
+    auto align_and_warp_pregrays = [&](const FloatImage& gray_ref,
+                                       const FloatImage& gray_src,
+                                       const FloatImage& source,
+                                       size_t progress_idx,
+                                       size_t total_count) -> FloatImage
+    {
         Report(progress,
                PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange *
                    static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
@@ -69,6 +77,19 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                    static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
                "Warping frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
         return WarpAligned(source, ar);
+    };
+
+    auto align_and_warp = [&](const FloatImage& guide_ref,
+                              const FloatImage& source,
+                              size_t progress_idx,
+                              size_t total_count) -> FloatImage
+    {
+        return align_and_warp_pregrays(
+            ConvertPlanesToGrayscale(guide_ref),
+            ConvertPlanesToGrayscale(source),
+            source,
+            progress_idx,
+            total_count);
     };
 
     bool has_exposure = false;
@@ -94,13 +115,18 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 
     if (!use_transmission)
     {
-        const FloatImage& ref = float_images[ref_idx];
-        size_t processed = 0;
         const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
+        aligned.clear();
+        aligned.reserve(total);
+        size_t processed = 0;
         for (size_t i = 0; i < float_images.size(); ++i)
         {
             if (i == ref_idx) continue;
-            aligned.push_back(align_and_warp(ref, float_images[i], processed, total));
+            aligned.push_back(align_and_warp_pregrays(gray_ref_full,
+                                                      gray_inputs[i],
+                                                      float_images[i],
+                                                      processed,
+                                                      total));
             ++processed;
         }
         return aligned;

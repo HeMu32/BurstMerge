@@ -1,8 +1,12 @@
 #include "burstmerge/internal/core/pipeline_frame.h"
 
+#include "burstmerge/internal/core/profiler.h"
+#include "burstmerge/internal/core/task_executor.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 
 namespace burstmerge
 {
@@ -26,27 +30,42 @@ float ComputeRobustness(float noise_reduction)
 
 float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size)
 {
+    ProfileScope scope("time.pipeline.estimate_noise_floor");
     if (image.data.empty()) return 8.0f;
 
     const int blur_radius = 2;
     const FloatImage blurred = BoxBlur(image, blur_radius);
     const uint32_t step = std::max<uint32_t>(1, guide_block_size);
 
-    double sum_sq = 0.0;
-    uint64_t count = 0;
-    for (uint32_t y = 0; y < image.height; y += step)
+    const uint32_t sample_rows = (image.height + step - 1) / step;
+    const uint32_t grain_rows = std::max<uint32_t>(1,
+        RecommendedImageRowGrain(image.width, image.channels, kRowGrainMinPixels / 2, kRowGrainMinRows) / std::max<uint32_t>(1, step));
+    std::vector<double> partial_sum_sq(sample_rows, 0.0);
+    std::vector<uint64_t> partial_count(sample_rows, 0);
+    ParallelForRows(image.height, grain_rows, [&](uint32_t y0, uint32_t y1)
     {
-        for (uint32_t x = 0; x < image.width; x += step)
+        uint32_t sample_idx = y0 / step;
+        for (uint32_t y = y0; y < y1; y += step, ++sample_idx)
         {
-            size_t idx = (static_cast<size_t>(y) * image.width + x) * image.channels;
-            for (uint32_t c = 0; c < image.channels; ++c)
+            double local_sum_sq = 0.0;
+            uint64_t local_count = 0;
+            for (uint32_t x = 0; x < image.width; x += step)
             {
-                float d = image.data[idx + c] - blurred.data[idx + c];
-                sum_sq += static_cast<double>(d) * static_cast<double>(d);
-                ++count;
+                size_t idx = (static_cast<size_t>(y) * image.width + x) * image.channels;
+                for (uint32_t c = 0; c < image.channels; ++c)
+                {
+                    float d = image.data[idx + c] - blurred.data[idx + c];
+                    local_sum_sq += static_cast<double>(d) * static_cast<double>(d);
+                    ++local_count;
+                }
             }
+            partial_sum_sq[sample_idx] = local_sum_sq;
+            partial_count[sample_idx] = local_count;
         }
-    }
+    });
+
+    double sum_sq = std::accumulate(partial_sum_sq.begin(), partial_sum_sq.end(), 0.0);
+    uint64_t count = std::accumulate(partial_count.begin(), partial_count.end(), uint64_t(0));
 
     if (count == 0) return 8.0f;
     float rms = static_cast<float>(std::sqrt(sum_sq / static_cast<double>(count)));
@@ -69,37 +88,48 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                      const std::vector<RawImage>& raw_images,
                      size_t ref_idx)
 {
+    ProfileScope scope("time.pipeline.normalize_frames");
     float ref_iso = raw_images[ref_idx].metadata.iso_exposure_time;
 
-    for (size_t i = 0; i < float_images.size(); ++i)
+    ParallelFor(float_images.size(), 1, [&](size_t i0, size_t i1)
     {
-        const auto& meta = raw_images[i].metadata;
-        FloatImage& img = float_images[i];
-
-        float bl = MeanBlackLevel(meta);
-        if (bl > 1.0f)
+        for (size_t i = i0; i < i1; ++i)
         {
-            for (float& v : img.data) v -= bl;
-        }
+            const auto& meta = raw_images[i].metadata;
+            FloatImage& img = float_images[i];
 
-        if (i == ref_idx) continue;
-
-        float comp_iso = meta.iso_exposure_time;
-        if (ref_iso > 0.0f && comp_iso > 0.0f)
-        {
-            float scale = (ref_iso / comp_iso) *
-                          std::pow(2.0f,
-                                   raw_images[ref_idx].metadata.exposure_bias - meta.exposure_bias);
-            if (std::abs(scale - 1.0f) > 0.001f)
+            float bl = MeanBlackLevel(meta);
+            if (bl > 1.0f)
             {
-                for (float& v : img.data) v *= scale;
+                ParallelFor(img.data.size(), 1u << 16, [&](size_t p0, size_t p1)
+                {
+                    for (size_t p = p0; p < p1; ++p) img.data[p] -= bl;
+                });
+            }
+
+            if (i == ref_idx) continue;
+
+            float comp_iso = meta.iso_exposure_time;
+            if (ref_iso > 0.0f && comp_iso > 0.0f)
+            {
+                float scale = (ref_iso / comp_iso) *
+                              std::pow(2.0f,
+                                       raw_images[ref_idx].metadata.exposure_bias - meta.exposure_bias);
+                if (std::abs(scale - 1.0f) > 0.001f)
+                {
+                    ParallelFor(img.data.size(), 1u << 16, [&](size_t p0, size_t p1)
+                    {
+                        for (size_t p = p0; p < p1; ++p) img.data[p] *= scale;
+                    });
+                }
             }
         }
-    }
+    });
 }
 
 std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images)
 {
+    ProfileScope scope("time.pipeline.build_float_images");
     std::vector<FloatImage> out;
     out.reserve(images.size());
     for (const auto& img : images)

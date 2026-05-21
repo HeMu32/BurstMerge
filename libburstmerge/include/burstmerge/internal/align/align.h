@@ -49,10 +49,6 @@ struct AlignConstants
     // local_radius = clamp(search_distance / kRefineLocalRadiusDiv, 1, ...)
     static constexpr int32_t kRefineLocalRadiusDiv = 16;
 
-    // --- Legacy RefineTileFieldDense (Legacy path only, unused) ----------
-    static constexpr int32_t kRefineDenseLocalRadiusDiv = 12;
-    static constexpr int32_t kRefineDenseMaxRadius = 6;
-
     // --- Legacy global default -------------------------------------------
     static constexpr int32_t kDefaultSearchDistance = 64;
 

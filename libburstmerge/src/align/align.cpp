@@ -4,6 +4,8 @@
 #include "burstmerge/internal/align/align_dense.h"
 #include "burstmerge/internal/align/align_legacy.h"
 #include "burstmerge/internal/align/align_pyramid.h"
+#include "burstmerge/internal/core/profiler.h"
+#include "burstmerge/internal/core/task_executor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,10 +14,16 @@
 namespace burstmerge
 {
 
+namespace
+{
+
+} // namespace
+
 AlignmentResult EstimateTranslation(const FloatImage& reference,
                                     const FloatImage& comparison,
                                     const AlignParams& params)
 {
+    ProfileScope scope("time.align.estimate_translation_total");
     // Thin front door for alignment: build the common pyramid once, then
     // dispatch to the requested estimator.
     std::vector<FloatImage> ref_pyr;
@@ -58,17 +66,38 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
         float level_best = std::numeric_limits<float>::max();
         int level_x = best_x;
         int level_y = best_y;
-        for (int dy = best_y - radius; dy <= best_y + radius; ++dy)
+        const int dy_begin = best_y - radius;
+        const int dy_end = best_y + radius + 1;
+        const size_t rows = static_cast<size_t>(dy_end - dy_begin);
+        std::vector<SearchBest> partial(rows);
+        ParallelFor(rows, 1, [&](size_t i0, size_t i1)
         {
-            for (int dx = best_x - radius; dx <= best_x + radius; ++dx)
+            for (size_t i = i0; i < i1; ++i)
             {
-                float score = SparseSad(ref, cmp, dx, dy, step);
-                if (score < level_best)
+                const int dy = dy_begin + static_cast<int>(i);
+                SearchBest best;
+                best.dx = best_x;
+                best.dy = dy;
+                for (int dx = best_x - radius; dx <= best_x + radius; ++dx)
                 {
-                    level_best = score;
-                    level_x = dx;
-                    level_y = dy;
+                    float score = SparseSad(ref, cmp, dx, dy, step);
+                    if (score < best.score)
+                    {
+                        best.score = score;
+                        best.dx = dx;
+                        best.dy = dy;
+                    }
                 }
+                partial[i] = best;
+            }
+        });
+        for (const auto& best : partial)
+        {
+            if (best.score < level_best)
+            {
+                level_best = best.score;
+                level_x = best.dx;
+                level_y = best.dy;
             }
         }
         best_x = level_x;
