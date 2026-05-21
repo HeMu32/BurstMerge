@@ -29,6 +29,17 @@ void Report(const ProgressFn& progress, float percent, const std::string& stage)
 {
     if (progress) progress(percent, stage);
 }
+
+uint32_t ResolveTargetWhiteLevel(int dng_bit_depth, uint32_t sensor_white)
+{
+    switch (dng_bit_depth)
+    {
+        case 12: return 4095;
+        case 14: return 16383;
+        case 16: return 65535;
+        default: return sensor_white;
+    }
+}
 } // namespace
 
 PipelineOrchestrator::PipelineOrchestrator(BackendType backend, Settings settings)
@@ -186,14 +197,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 // Compute bit-depth rescaling factor (must happen in black-subtracted space)
         float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
         uint32_t sensor_white = images[ref_idx].metadata.white_level;
-        uint32_t target_white = sensor_white;
-        switch (settings_.dng_bit_depth)
-        {
-            case 12: target_white = 4095;  break;
-            case 14: target_white = sensor_white; break;
-            case 16: target_white = 65535; break;
-            default: target_white = sensor_white; break;
-        }
+        uint32_t target_white = ResolveTargetWhiteLevel(settings_.dng_bit_depth,
+                                                        sensor_white);
         float bit_scale = (target_white != sensor_white && sensor_white > 0)
             ? static_cast<float>(target_white) / static_cast<float>(sensor_white)
             : 1.0f;

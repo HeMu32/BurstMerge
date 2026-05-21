@@ -81,9 +81,9 @@ HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_le
         throw std::runtime_error("FloatImageToUint16HostBuffer expects single-channel image");
     }
 
-    // DNG uses 16-bit containers for all bit depths (12/14/16). The effective
-    // precision is defined by the white_level metadata tag, not the container.
-    // For 12-bit output data is scaled to [0, 4095] and stored in a uint16_t.
+    // DNG uses a 16-bit integer container for 12/14/16-bit outputs. The actual
+    // target precision is expressed by white_level, and the float pipeline is
+    // expected to have already rescaled samples into that target range.
     HostBuffer out;
     out.width = src.width;
     out.height = src.height;

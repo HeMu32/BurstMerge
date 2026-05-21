@@ -38,7 +38,7 @@ struct Settings
     float          noise_reduction  = 13.0f;
     ExposureMode   exposure_mode    = ExposureMode::Off;
     float          exposure_stops   = 0.0f;
-    int            dng_bit_depth    = 14;   // 12, 14, or 16
+    int            dng_bit_depth    = 14;   // 12/14/16 rescale to full target range; others keep sensor range
 };
 
 struct Result

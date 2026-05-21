@@ -214,13 +214,8 @@ int main()
         { (samples / "X1M5_Wide.dng").string() },
         (out_dir / "single_dng_output.dng").string());
 
-    // Read native white level of the source DNG to compute expected output levels
-    burstmerge::DngReader native_reader((samples / "X1M5_Wide.dng").string().c_str());
-    uint32_t native_wl = native_reader.Read().metadata.white_level;
-
     TestBitDepthOutput("single_12bit", (samples / "X1M5_Wide.dng").string(), 12, 4095, (out_dir / "single_12bit_output.dng").string());
-    // For 14-bit, the output white_level = sensor_white (no rescaling)
-    TestBitDepthOutput("single_14bit", (samples / "X1M5_Wide.dng").string(), 14, native_wl, (out_dir / "single_14bit_output.dng").string());
+    TestBitDepthOutput("single_14bit", (samples / "X1M5_Wide.dng").string(), 14, 16383, (out_dir / "single_14bit_output.dng").string());
     TestBitDepthOutput("single_16bit", (samples / "X1M5_Wide.dng").string(), 16, 65535, (out_dir / "single_16bit_output.dng").string());
     // Test robustness: invalid/unsupported bit depth requests should gracefully fall back to the sensor's native white level.
     TestBitDepthOutput("single_invalid_bit", (samples / "X1M5_Wide.dng").string(), 99, 0, (out_dir / "single_invalid_bit_output.dng").string());
