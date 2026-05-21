@@ -11,7 +11,7 @@ namespace burstmerge
 struct SpatialConstants
 {
     static constexpr int32_t kBinomialKernelSize = 16;
-    static constexpr int32_t kBinomialRadius = 8;
+    static constexpr int32_t kBinomialRadius = 5;
     static constexpr float kNoiseFloorMin = 1.0f;
     static constexpr float kNoiseFloorFallback = 8.0f;
     static constexpr float kLegacyMinComparisonWeight = 0.08f;
