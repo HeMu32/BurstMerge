@@ -17,6 +17,8 @@ namespace burstmerge
 namespace
 {
 
+constexpr bool kEnableAlignmentGrayDump = false;
+
 inline void ApplyGammaGray(FloatImage& img, float white_level, float gamma)
 {
     if (img.channels != 1 || white_level <= 0.0f) return;
@@ -208,7 +210,7 @@ void WriteGrayBmpRgba(const char* path,
             }
 
             float v = sample_value;
-            v = std::max(0.0f, std::min(1.0f, v / 1023.0f));
+            v = std::max(0.0f, std::min(1.0f, v / std::max(1.0f, white_level)));
             const uint8_t g = static_cast<uint8_t>(std::lround(v * 255.0f));
             row[base + 0] = g;
             row[base + 1] = g;
@@ -225,8 +227,14 @@ void DumpWarpedGrayBmp(const FloatImage& gray_src,
                       size_t burst_size,
                       size_t frame_idx,
                       const char* mode_tag,
-                      bool is_reference)
+                      bool is_reference,
+                      float white_level)
 {
+    if (!kEnableAlignmentGrayDump)
+    {
+        return;
+    }
+
     if (gray_src.channels != 1 || gray_src.width == 0 || gray_src.height == 0)
     {
         return;
@@ -235,7 +243,7 @@ void DumpWarpedGrayBmp(const FloatImage& gray_src,
     char fname[128];
     std::snprintf(fname, sizeof(fname), "R:\\aligned_gray_%s_%zuburst_frame%02zu%s.bmp",
                   mode_tag, burst_size, frame_idx, is_reference ? "_ref" : "");
-    WriteGrayBmpRgba(fname, gray_src, 1023.0f, !is_reference, is_reference ? nullptr : &alignment);
+    WriteGrayBmpRgba(fname, gray_src, white_level, !is_reference, is_reference ? nullptr : &alignment);
     std::fprintf(stderr, "[DIAG] Saved warped gray BMP: %s (%ux%u)\n", fname, gray_src.width, gray_src.height);
 }
 
@@ -272,7 +280,7 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     const float wl = static_cast<float>(raw_images[ref_idx].metadata.white_level);
     FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
     ApplyGammaGray(gray_ref_full, wl, settings.align_gamma);
-    DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), ref_idx, AlignmentModeTag(params.mode), true);
+    DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), ref_idx, AlignmentModeTag(params.mode), true, wl);
     std::vector<FloatImage> gray_inputs;
     gray_inputs.reserve(float_images.size());
     for (const auto& img : float_images)
@@ -294,7 +302,7 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
         AlignmentResult ar = EstimateTranslation(gray_ref, gray_src, params);
 
-        DumpWarpedGrayBmp(gray_src, ar, float_images.size(), source_idx, AlignmentModeTag(params.mode), false);
+        DumpWarpedGrayBmp(gray_src, ar, float_images.size(), source_idx, AlignmentModeTag(params.mode), false, wl);
 
         Report(progress,
                PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange *
