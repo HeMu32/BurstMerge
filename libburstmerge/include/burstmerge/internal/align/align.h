@@ -63,6 +63,8 @@ struct AlignParams
     int32_t search_distance = AlignConstants::kDefaultSearchDistance;
     uint32_t cfa_period     = 1;
     AlignmentMode mode      = AlignmentMode::Legacy;
+    float    align_gamma    = 1.0f;
+    bool     smooth_tile_field = false;
 };
 
 struct AlignmentResult

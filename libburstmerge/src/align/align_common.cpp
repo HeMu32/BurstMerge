@@ -163,8 +163,9 @@ float TileCost(const FloatImage& a,
     return count ? static_cast<float>(cost) : std::numeric_limits<float>::max();
 }
 
-void SmoothTileField(AlignmentResult& result)
+void SmoothTileField(AlignmentResult& result, bool enabled)
 {
+    if (!enabled) return;
     if (result.tiles_x == 0 || result.tiles_y == 0) return;
 
     std::vector<int16_t> smoothed_x = result.tile_shift_x;

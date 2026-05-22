@@ -99,6 +99,8 @@ int main(int argc, char* argv[]) {
         ("exposure-mode", "Exposure mode: off, linear, curve", cxxopts::value<std::string>()->default_value("off"))
         ("exposure-stops", "Exposure correction stops", cxxopts::value<float>()->default_value("0"))
         ("exposure-curve", "Exposure curve mode: global, local", cxxopts::value<std::string>()->default_value("global"))
+        ("align-gamma", "Gamma correction for alignment grayscale (default 1.0=off). Value < 1.0 will boost darkness", cxxopts::value<float>()->default_value("1.0"))
+        ("smooth-tile-field", "Enable median smoothing of alignment tile fields", cxxopts::value<bool>()->default_value("false"))
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -170,6 +172,8 @@ int main(int argc, char* argv[]) {
     if (args.count("noise-reduction")) {
         settings.noise_reduction = args["noise-reduction"].as<float>();
     }
+    settings.align_gamma = args["align-gamma"].as<float>();
+    settings.smooth_tile_field = args["smooth-tile-field"].as<bool>();
     bm.Configure(settings);
 
     const std::string output_target = args["output"].as<std::string>();
@@ -179,6 +183,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Merge: " << MergeAlgoName(settings.merge_algo) << std::endl;
     std::cout << "Tile size: " << settings.tile_size << std::endl;
     std::cout << "Noise reduction: " << settings.noise_reduction << std::endl;
+    std::cout << "Align gamma: " << settings.align_gamma << std::endl;
+    std::cout << "Smooth tile field: " << (settings.smooth_tile_field ? "on" : "off") << std::endl;
     std::cout << "Bit depth: " << settings.dng_bit_depth << std::endl;
     std::cout << "Output target: " << output_target << std::endl;
     PrintInputSummary(inputs);

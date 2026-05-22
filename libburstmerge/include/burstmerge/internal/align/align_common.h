@@ -39,7 +39,7 @@ float TileCost(const FloatImage& a,
                int dy,
                int sample_step,
                bool ssd);
-void SmoothTileField(AlignmentResult& result);
+void SmoothTileField(AlignmentResult& result, bool enabled);
 float InterpolateTileShift(const std::vector<int16_t>& field,
                            uint32_t tiles_x,
                            uint32_t tiles_y,

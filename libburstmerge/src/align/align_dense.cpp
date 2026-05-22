@@ -280,7 +280,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
                          corrected_x, corrected_y, sample_step, weight_ssd,
                          cur.cfa_period, next.tile_shift_x, next.tile_shift_y);
 
-        SmoothTileField(next);
+        SmoothTileField(next, params.smooth_tile_field);
         cur = std::move(next);
     }
 

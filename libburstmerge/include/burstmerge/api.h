@@ -39,6 +39,8 @@ struct Settings
     ExposureMode   exposure_mode    = ExposureMode::Off;
     float          exposure_stops   = 0.0f;
     int            dng_bit_depth    = 14;   // 12, 14, or 16
+    float          align_gamma      = 1.0f;
+    bool           smooth_tile_field = false;
 };
 
 struct Result

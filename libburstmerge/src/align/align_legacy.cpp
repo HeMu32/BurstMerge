@@ -74,7 +74,7 @@ void RefineTileField(const FloatImage& reference,
         }
     }
 
-    SmoothTileField(result);
+    SmoothTileField(result, params.smooth_tile_field);
 }
 
 } // namespace burstmerge

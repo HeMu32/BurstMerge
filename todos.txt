@@ -5,7 +5,3 @@ CLI应用: 指定参考图
 CLI应用: 拷贝元数据包括畸变数据
 
 CLI应用: 指定搜索位移限制
-
-整体: 指定对AlignmentGrey的Gamma矫正和Gamma数值
-
-整体: 开关SmoothField
