@@ -13,7 +13,7 @@ add_library(burstmerge STATIC
     src/align/align.cpp
     src/align/align_common.cpp
     src/align/align_pyramid.cpp
-    src/align/align_legacy.cpp
+    src/align/align_standard.cpp
     src/align/align_dense.cpp
     src/align/align_warp.cpp
     src/align/freq_align.cpp

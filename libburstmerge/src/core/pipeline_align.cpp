@@ -82,8 +82,8 @@ const char* AlignmentModeTag(AlignmentMode mode)
     {
         case AlignmentMode::DenseTile: return "dense";
         case AlignmentMode::Frequency: return "freq";
-        case AlignmentMode::Legacy:
-        default: return "legacy";
+        case AlignmentMode::Standard:
+        default: return "standard";
     }
 }
 

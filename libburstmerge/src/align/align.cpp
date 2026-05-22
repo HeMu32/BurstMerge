@@ -2,7 +2,7 @@
 
 #include "burstmerge/internal/align/align_common.h"
 #include "burstmerge/internal/align/align_dense.h"
-#include "burstmerge/internal/align/align_legacy.h"
+#include "burstmerge/internal/align/align_standard.h"
 #include "burstmerge/internal/align/align_pyramid.h"
 #include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"

@@ -1,4 +1,4 @@
-#include "burstmerge/internal/align/align_legacy.h"
+#include "burstmerge/internal/align/align_standard.h"
 
 #include "burstmerge/internal/align/align_common.h"
 
@@ -7,7 +7,7 @@
 namespace burstmerge
 {
 
-// Legacy refinement starts from a single global translation estimate and then
+// Standard refinement starts from a single global translation estimate and then
 // locally refines each tile around propagated seeds.
 
 void RefineTileField(const FloatImage& reference,

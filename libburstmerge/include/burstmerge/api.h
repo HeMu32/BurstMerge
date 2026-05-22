@@ -11,18 +11,18 @@ enum class BackendType
 { CPU, Vulkan };
 enum class MergeAlgorithm
 {
-    Spatial,         // Pixel-domain weighted blending (Legacy or Linear sub-mode)
+    Spatial,         // Pixel-domain weighted blending (Standard or Linear sub-mode)
     Frequency,       // Frequency-domain merge (Laplacian or WienerFft sub-mode)
     TemporalAverage  // Simple exposure-weighted frame average; ignores noise_reduction
 };
 enum class ExposureMode
 { Off, Linear, Curve };
 enum class AlignmentMode
-{ Legacy, DenseTile, Frequency };
+{ Standard, DenseTile, Frequency };
 enum class SpatialMergeMode
-{ Legacy, Linear };
+{ Standard, Linear };
 enum class FrequencyMode
-{ Laplacian, WienerFftLegacy, WienerFftRobust };
+{ Laplacian, WienerFft, WienerFftRobust };
 enum class ExposureCurveMode
 { Global, LocalReinhard };
 
@@ -31,8 +31,8 @@ struct Settings
     int            tile_size        = 32;
     int            search_distance  = 64;
     MergeAlgorithm merge_algo       = MergeAlgorithm::Spatial;
-    AlignmentMode   alignment_mode  = AlignmentMode::Legacy;
-    SpatialMergeMode spatial_mode   = SpatialMergeMode::Legacy;
+    AlignmentMode   alignment_mode  = AlignmentMode::Standard;
+    SpatialMergeMode spatial_mode   = SpatialMergeMode::Standard;
     FrequencyMode   frequency_mode  = FrequencyMode::Laplacian;
     ExposureCurveMode exposure_curve_mode = ExposureCurveMode::Global;
     float          noise_reduction  = 13.0f;
