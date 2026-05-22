@@ -142,6 +142,81 @@ FloatImage Downsample2x(const FloatImage& src)
     return out;
 }
 
+void Downsample2x(const FloatImage& src, FloatImage& dst)
+{
+    dst.width = std::max<uint32_t>(1, src.width / 2);
+    dst.height = std::max<uint32_t>(1, src.height / 2);
+    dst.channels = src.channels;
+    dst.data.resize(static_cast<size_t>(dst.width) * dst.height * dst.channels, 0.0f);
+
+    ParallelForRows(dst.height, RecommendedImageRowGrain(dst.width, dst.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
+    {
+        for (uint32_t y = y_begin; y < y_end; ++y)
+        {
+            for (uint32_t x = 0; x < dst.width; ++x)
+            {
+                for (uint32_t c = 0; c < dst.channels; ++c)
+                {
+                    uint32_t sx = x * 2;
+                    uint32_t sy = y * 2;
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (uint32_t dy = 0; dy < 2 && sy + dy < src.height; ++dy)
+                    {
+                        for (uint32_t dx = 0; dx < 2 && sx + dx < src.width; ++dx)
+                        {
+                            sum += src.At(sx + dx, sy + dy, c);
+                            ++n;
+                        }
+                    }
+                    dst.At(x, y, c) = n > 0 ? sum / static_cast<float>(n) : 0.0f;
+                }
+            }
+        }
+    });
+}
+
+FloatImage Downsample4x(const FloatImage& src)
+{
+    FloatImage dst;
+    Downsample4x(src, dst);
+    return dst;
+}
+
+void Downsample4x(const FloatImage& src, FloatImage& dst)
+{
+    dst.width = std::max<uint32_t>(1, src.width / 4);
+    dst.height = std::max<uint32_t>(1, src.height / 4);
+    dst.channels = src.channels;
+    dst.data.resize(static_cast<size_t>(dst.width) * dst.height * dst.channels, 0.0f);
+
+    ParallelForRows(dst.height, RecommendedImageRowGrain(dst.width, dst.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
+    {
+        for (uint32_t y = y_begin; y < y_end; ++y)
+        {
+            for (uint32_t x = 0; x < dst.width; ++x)
+            {
+                for (uint32_t c = 0; c < dst.channels; ++c)
+                {
+                    uint32_t sx = x * 4;
+                    uint32_t sy = y * 4;
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (uint32_t dy = 0; dy < 4 && sy + dy < src.height; ++dy)
+                    {
+                        for (uint32_t dx = 0; dx < 4 && sx + dx < src.width; ++dx)
+                        {
+                            sum += src.At(sx + dx, sy + dy, c);
+                            ++n;
+                        }
+                    }
+                    dst.At(x, y, c) = n > 0 ? sum / static_cast<float>(n) : 0.0f;
+                }
+            }
+        }
+    });
+}
+
 FloatImage BoxBlur(const FloatImage& src, int radius)
 {
     if (radius <= 0) return src;

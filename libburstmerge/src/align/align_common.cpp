@@ -1,8 +1,11 @@
 #include "burstmerge/internal/align/align_common.h"
 
+#include "burstmerge/internal/core/task_executor.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 
 namespace burstmerge
@@ -98,16 +101,29 @@ float TileCost(const FloatImage& a,
     const uint32_t ch = a.channels;
     const uint32_t aw = a.width;
     const uint32_t bw = b.width;
+
+    // Out-of-bounds penalty per pixel, matching the reference convention of
+    // applying a large fixed cost instead of skipping boundary pixels.
+    // This ensures that displacements which push most of the tile out of frame
+    // incur a high cost and are not incorrectly selected as the best match.
+    static const double kOBPenalty = 65504.0;
+    static const double kOBPenaltySq = kOBPenalty * kOBPenalty;
+
     if (ch == 1)
     {
         for (int y = ay0; y < ay1; y += sample_step)
         {
             int by = y - dy;
-            if (by < 0 || by >= static_cast<int>(b.height)) continue;
             for (int x = ax0; x < ax1; x += sample_step)
             {
                 int bx = x - dx;
-                if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
+                if (by < 0 || by >= static_cast<int>(b.height) ||
+                    bx < 0 || bx >= static_cast<int>(b.width))
+                {
+                    cost += ssd ? kOBPenaltySq : kOBPenalty;
+                    ++count;
+                    continue;
+                }
                 const size_t a_idx = static_cast<size_t>(y) * aw + static_cast<uint32_t>(x);
                 const size_t b_idx = static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
                     static_cast<uint32_t>(bx);
@@ -116,17 +132,23 @@ float TileCost(const FloatImage& a,
                 ++count;
             }
         }
-        return count ? static_cast<float>(cost / static_cast<double>(count))
-                     : std::numeric_limits<float>::max();
+        // Return raw sum (not mean) so that tiles with many out-of-bounds
+        // pixels receive correctly high costs.
+        return count ? static_cast<float>(cost) : std::numeric_limits<float>::max();
     }
     for (int y = ay0; y < ay1; y += sample_step)
     {
         int by = y - dy;
-        if (by < 0 || by >= static_cast<int>(b.height)) continue;
         for (int x = ax0; x < ax1; x += sample_step)
         {
             int bx = x - dx;
-            if (bx < 0 || bx >= static_cast<int>(b.width)) continue;
+            if (by < 0 || by >= static_cast<int>(b.height) ||
+                bx < 0 || bx >= static_cast<int>(b.width))
+            {
+                cost += ssd ? kOBPenaltySq * ch : kOBPenalty * ch;
+                count += ch;
+                continue;
+            }
             const size_t a_base = (static_cast<size_t>(y) * aw + static_cast<uint32_t>(x)) * ch;
             const size_t b_base = (static_cast<size_t>(static_cast<uint32_t>(by)) * bw +
                                    static_cast<uint32_t>(bx)) * ch;
@@ -138,11 +160,12 @@ float TileCost(const FloatImage& a,
             }
         }
     }
-    return count ? static_cast<float>(cost / static_cast<double>(count)) : std::numeric_limits<float>::max();
+    return count ? static_cast<float>(cost) : std::numeric_limits<float>::max();
 }
 
-void SmoothTileField(AlignmentResult& result)
+void SmoothTileField(AlignmentResult& result, bool enabled)
 {
+    if (!enabled) return;
     if (result.tiles_x == 0 || result.tiles_y == 0) return;
 
     std::vector<int16_t> smoothed_x = result.tile_shift_x;
@@ -153,27 +176,32 @@ void SmoothTileField(AlignmentResult& result)
     {
         for (uint32_t tx = 0; tx < result.tiles_x; ++tx)
         {
-            int sx = 0;
-            int sy = 0;
+            int vals_x[9], vals_y[9];
             int n = 0;
             for (int oy = -rad; oy <= rad; ++oy)
             {
                 int ny = static_cast<int>(ty) + oy;
                 if (ny < 0 || ny >= static_cast<int>(result.tiles_y)) continue;
                 const uint32_t row_base = static_cast<uint32_t>(ny) * result.tiles_x;
-                for (int ox = -1; ox <= 1; ++ox)
+                for (int ox = -rad; ox <= rad; ++ox)
                 {
                     int nx = static_cast<int>(tx) + ox;
                     if (nx < 0 || nx >= static_cast<int>(result.tiles_x)) continue;
                     size_t idx = row_base + static_cast<uint32_t>(nx);
-                    sx += result.tile_shift_x[idx];
-                    sy += result.tile_shift_y[idx];
+                    vals_x[n] = result.tile_shift_x[idx];
+                    vals_y[n] = result.tile_shift_y[idx];
                     ++n;
                 }
             }
+            auto cmp_int = [](const void* a, const void* b) -> int
+            {
+                return (*static_cast<const int*>(a) - *static_cast<const int*>(b));
+            };
+            std::qsort(vals_x, static_cast<size_t>(n), sizeof(int), cmp_int);
+            std::qsort(vals_y, static_cast<size_t>(n), sizeof(int), cmp_int);
             size_t idx = static_cast<size_t>(ty) * result.tiles_x + tx;
-            smoothed_x[idx] = static_cast<int16_t>(std::lround(static_cast<double>(sx) / std::max(1, n)));
-            smoothed_y[idx] = static_cast<int16_t>(std::lround(static_cast<double>(sy) / std::max(1, n)));
+            smoothed_x[idx] = static_cast<int16_t>(vals_x[n / 2]);
+            smoothed_y[idx] = static_cast<int16_t>(vals_y[n / 2]);
         }
     }
 
@@ -220,6 +248,86 @@ float InterpolateTileShift(const std::vector<int16_t>& field,
 int ClampInt(int v, int lo, int hi)
 {
     return std::max(lo, std::min(v, hi));
+}
+
+void BinomialBlur5Tap(const FloatImage& src, FloatImage& dst, FloatImage& tmp)
+{
+    const uint32_t sw = src.width;
+    const uint32_t sh = src.height;
+    const uint32_t ch = src.channels;
+
+    dst.width = sw;
+    dst.height = sh;
+    dst.channels = ch;
+    dst.data.resize(src.data.size());
+
+    tmp.width = sw;
+    tmp.height = sh;
+    tmp.channels = ch;
+    tmp.data.assign(src.data.size(), 0.0f);
+
+    // Horizontal pass: src → tmp
+    ParallelForRows(sh, 1, [&](uint32_t y_begin, uint32_t y_end)
+    {
+        for (uint32_t y = y_begin; y < y_end; ++y)
+        {
+            for (uint32_t x = 0; x < sw; ++x)
+            {
+                for (uint32_t c = 0; c < ch; ++c)
+                {
+                    double sum = 0.0;
+                    for (int d = -2; d <= 2; ++d)
+                    {
+                        uint32_t sx = ClampInt(static_cast<int>(x) + d, 0, static_cast<int>(sw) - 1);
+                        double k;
+                        switch (std::abs(d))
+                        {
+                            case 0:  k = 6.0; break;
+                            case 1:  k = 4.0; break;
+                            default: k = 1.0; break;
+                        }
+                        sum += k * static_cast<double>(src.At(sx, y, c));
+                    }
+                    tmp.At(x, y, c) = static_cast<float>(sum / 16.0);
+                }
+            }
+        }
+    });
+
+    // Vertical pass: tmp → dst
+    ParallelForRows(sh, 1, [&](uint32_t y_begin, uint32_t y_end)
+    {
+        for (uint32_t y = y_begin; y < y_end; ++y)
+        {
+            for (uint32_t x = 0; x < sw; ++x)
+            {
+                for (uint32_t c = 0; c < ch; ++c)
+                {
+                    double sum = 0.0;
+                    for (int d = -2; d <= 2; ++d)
+                    {
+                        uint32_t sy = ClampInt(static_cast<int>(y) + d, 0, static_cast<int>(sh) - 1);
+                        double k;
+                        switch (std::abs(d))
+                        {
+                            case 0:  k = 6.0; break;
+                            case 1:  k = 4.0; break;
+                            default: k = 1.0; break;
+                        }
+                        sum += k * static_cast<double>(tmp.At(x, sy, c));
+                    }
+                    dst.At(x, y, c) = static_cast<float>(sum / 16.0);
+                }
+            }
+        }
+    });
+}
+
+FloatImage BinomialBlur5Tap(const FloatImage& src)
+{
+    FloatImage dst, tmp;
+    BinomialBlur5Tap(src, dst, tmp);
+    return dst;
 }
 
 } // namespace burstmerge

@@ -14,7 +14,7 @@ struct SpatialConstants
     static constexpr int32_t kBinomialRadius = 5;
     static constexpr float kNoiseFloorMin = 1.0f;
     static constexpr float kNoiseFloorFallback = 8.0f;
-    static constexpr float kLegacyMinComparisonWeight = 0.08f;
+    static constexpr float kStandardMinComparisonWeight = 0.08f;
     static constexpr float kLinearMinComparisonWeight = 0.04f;
     static constexpr float kHighlightThresholdFactor = 0.92f;
     static constexpr float kClipThresholdFactor = 0.98f;
@@ -31,7 +31,7 @@ extern const float kBinomialWeights[9];
 
 struct SpatialMergeParams
 {
-    SpatialMergeMode mode = SpatialMergeMode::Legacy;
+    SpatialMergeMode mode = SpatialMergeMode::Standard;
     float noise_reduction = 13.0f;
     float robustness = 1.0f;
     float noise_floor = 0.0f;

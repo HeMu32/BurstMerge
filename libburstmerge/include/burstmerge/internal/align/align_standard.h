@@ -5,7 +5,7 @@
 namespace burstmerge
 {
 
-// Legacy alignment refinement entry points.
+// Standard alignment refinement entry points.
 
 void RefineTileField(const FloatImage& reference,
                      const FloatImage& comparison,

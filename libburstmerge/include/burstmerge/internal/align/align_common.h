@@ -39,7 +39,7 @@ float TileCost(const FloatImage& a,
                int dy,
                int sample_step,
                bool ssd);
-void SmoothTileField(AlignmentResult& result);
+void SmoothTileField(AlignmentResult& result, bool enabled);
 float InterpolateTileShift(const std::vector<int16_t>& field,
                            uint32_t tiles_x,
                            uint32_t tiles_y,
@@ -48,5 +48,17 @@ float InterpolateTileShift(const std::vector<int16_t>& field,
                            uint32_t x,
                            uint32_t y);
 int ClampInt(int v, int lo, int hi);
+
+// 5-tap separable binomial blur [1,4,6,4,1]/16 applied before
+// downsampling to serve as an anti-aliasing prefilter.
+// This mirrors the reference implementation's blur(kernel_size=2)
+// applied before each avg_pool step in pyramid construction.
+//
+// Two interfaces:
+//   BinomialBlur5Tap(src)          — value-returning convenience wrapper.
+//   BinomialBlur5Tap(src, dst, tmp) — zero-copy: dst and tmp must be
+//                                     pre-allocated to src dimensions.
+FloatImage BinomialBlur5Tap(const FloatImage& src);
+void BinomialBlur5Tap(const FloatImage& src, FloatImage& dst, FloatImage& tmp);
 
 } // namespace burstmerge

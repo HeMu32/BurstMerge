@@ -125,7 +125,7 @@ struct TileMergeResult
     std::vector<float> pixels;
 };
 
-struct LegacyTileContext
+struct StandardTileContext
 {
     const FloatImage& reference;
     const std::vector<FloatImage>& aligned_comparisons;
@@ -305,7 +305,7 @@ TileStats ComputeTileStats(const FloatImage& reference,
     return stats;
 }
 
-TileMergeResult ComputeLegacyTileResult(const LegacyTileContext& ctx,
+TileMergeResult ComputeStandardTileResult(const StandardTileContext& ctx,
                                         uint32_t x0,
                                         uint32_t y0)
 {
@@ -796,9 +796,9 @@ void ReduceTileBorderArtifacts(FloatImage& image,
     }
 }
 
-FloatImage WienerFftMerge(const FloatImage& reference,
-                          const std::vector<FloatImage>& aligned_comparisons,
-                          const FrequencyMergeParams& params)
+FloatImage WienerFftMergeRobust(const FloatImage& reference,
+                                const std::vector<FloatImage>& aligned_comparisons,
+                                const FrequencyMergeParams& params)
 {
     ProfileScope scope("time.merge.wiener_robust_total");
     if (aligned_comparisons.empty()) return reference;
@@ -906,11 +906,11 @@ FloatImage WienerFftMerge(const FloatImage& reference,
     return out;
 }
 
-FloatImage WienerFftMergeLegacy(const FloatImage& reference,
+FloatImage WienerFftMerge(const FloatImage& reference,
                                 const std::vector<FloatImage>& aligned_comparisons,
                                 const FrequencyMergeParams& params)
 {
-    ProfileScope scope("time.merge.wiener_legacy_total");
+    ProfileScope scope("time.merge.wiener_standard_total");
     if (aligned_comparisons.empty()) return reference;
 
     FloatImage out;
@@ -931,7 +931,7 @@ FloatImage WienerFftMergeLegacy(const FloatImage& reference,
         (FrequencyConstants::kRobustnessRevOffset - static_cast<double>(static_cast<int>(params.noise_reduction + 0.5f)));
     const double robustness_norm = std::pow(2.0, -robustness_rev + FrequencyConstants::kRobustnessNormBase);
     const double read_noise = std::pow(std::pow(2.0, -robustness_rev + FrequencyConstants::kReadNoiseBase), FrequencyConstants::kReadNoiseExp);
-    const LegacyTileContext ctx{reference, aligned_comparisons, params,
+    const StandardTileContext ctx{reference, aligned_comparisons, params,
                                 robustness_norm, read_noise,
                                 aligned_comparisons.size() + 1};
 
@@ -963,7 +963,7 @@ FloatImage WienerFftMergeLegacy(const FloatImage& reference,
                 const uint32_t y0 = y_coords[row];
                 for (uint32_t x0 = 0; x0 < reference.width; x0 += stride)
                 {
-                    TileMergeResult tile_result = ComputeLegacyTileResult(ctx, x0, y0);
+                    TileMergeResult tile_result = ComputeStandardTileResult(ctx, x0, y0);
                     AccumulateTileResultToBand(tile_result, band);
                 }
             }
@@ -998,9 +998,9 @@ FloatImage FrequencyMerge(const FloatImage& reference,
                           const FrequencyMergeParams& params)
 {
     ProfileScope scope("time.merge.frequency_total");
-    if (params.mode == FrequencyMode::WienerFftLegacy)
+    if (params.mode == FrequencyMode::WienerFft)
     {
-        return WienerFftMergeLegacy(reference, aligned_comparisons, params);
+        return WienerFftMerge(reference, aligned_comparisons, params);
     }
 
     if (params.mode == FrequencyMode::WienerFftRobust)
@@ -1011,7 +1011,7 @@ FloatImage FrequencyMerge(const FloatImage& reference,
                 "FrequencyMerge(WienerFftRobust) requires valid white_level and black_level; "
                 "the caller must populate FrequencyMergeParams from RAW metadata.");
         }
-        return WienerFftMerge(reference, aligned_comparisons, params);
+        return WienerFftMergeRobust(reference, aligned_comparisons, params);
     }
 
     const int blur_radius = std::max(1, params.tile_size / FrequencyConstants::kLaplacianBlurDiv);

@@ -362,7 +362,7 @@ AlignmentResult EstimateFrequencyTileField(
             }
         });
 
-        SmoothTileField(next);
+        SmoothTileField(next, params.smooth_tile_field);
         cur = std::move(next);
     }
 

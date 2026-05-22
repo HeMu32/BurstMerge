@@ -36,7 +36,7 @@ const char* MergeAlgoName(burstmerge::MergeAlgorithm algo) {
 
 bool ParseAlignmentMode(const std::string& value, burstmerge::AlignmentMode& out) {
     std::string v = Lower(value);
-    if (v == "legacy") { out = burstmerge::AlignmentMode::Legacy; return true; }
+    if (v == "standard" || v == "legacy") { out = burstmerge::AlignmentMode::Standard; return true; }
     if (v == "dense" || v == "dense-tile") { out = burstmerge::AlignmentMode::DenseTile; return true; }
     if (v == "freq" || v == "frequency") { out = burstmerge::AlignmentMode::Frequency; return true; }
     return false;
@@ -44,7 +44,7 @@ bool ParseAlignmentMode(const std::string& value, burstmerge::AlignmentMode& out
 
 bool ParseSpatialMode(const std::string& value, burstmerge::SpatialMergeMode& out) {
     std::string v = Lower(value);
-    if (v == "legacy") { out = burstmerge::SpatialMergeMode::Legacy; return true; }
+    if (v == "standard" || v == "legacy") { out = burstmerge::SpatialMergeMode::Standard; return true; }
     if (v == "linear") { out = burstmerge::SpatialMergeMode::Linear; return true; }
     return false;
 }
@@ -52,9 +52,9 @@ bool ParseSpatialMode(const std::string& value, burstmerge::SpatialMergeMode& ou
 bool ParseFrequencyMode(const std::string& value, burstmerge::FrequencyMode& out) {
     std::string v = Lower(value);
     if (v == "laplacian" || v == "legacy") { out = burstmerge::FrequencyMode::Laplacian; return true; }
-    if (v == "wiener-legacy" || v == "wiener-v1" || v == "fft-legacy") {
-        out = burstmerge::FrequencyMode::WienerFftLegacy; return true; }
-    if (v == "wiener" || v == "wiener-fft" || v == "wiener-robust" || v == "wiener-v2" || v == "fft") {
+    if (v == "wiener" || v == "wiener-standard" || v == "wiener-v1" || v == "fft-standard" || v == "wiener-legacy" || v == "fft-legacy") {
+        out = burstmerge::FrequencyMode::WienerFft; return true; }
+    if (v == "wiener-robust" || v == "wiener-v2" || v == "fft" || v == "wiener-fft") {
         out = burstmerge::FrequencyMode::WienerFftRobust; return true; }
     return false;
 }
@@ -69,7 +69,7 @@ bool ParseExposureMode(const std::string& value, burstmerge::ExposureMode& out) 
 
 bool ParseExposureCurveMode(const std::string& value, burstmerge::ExposureCurveMode& out) {
     std::string v = Lower(value);
-    if (v == "global" || v == "legacy") { out = burstmerge::ExposureCurveMode::Global; return true; }
+    if (v == "global" || v == "standard" || v == "legacy") { out = burstmerge::ExposureCurveMode::Global; return true; }
     if (v == "local" || v == "local-reinhard") { out = burstmerge::ExposureCurveMode::LocalReinhard; return true; }
     return false;
 }
@@ -93,12 +93,14 @@ int main(int argc, char* argv[]) {
         ("f,frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
         ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal)", cxxopts::value<float>())
         ("merge-algo", "Merge algorithm: spatial, frequency, temporal", cxxopts::value<std::string>())
-        ("alignment", "Alignment mode: legacy, dense, freq", cxxopts::value<std::string>()->default_value("legacy"))
-        ("spatial-mode", "Spatial merge mode: legacy, linear", cxxopts::value<std::string>()->default_value("legacy"))
-        ("frequency-mode", "Frequency mode: laplacian, wiener, wiener-legacy", cxxopts::value<std::string>()->default_value("laplacian"))
+        ("alignment", "Alignment mode: standard, dense, freq", cxxopts::value<std::string>()->default_value("standard"))
+        ("spatial-mode", "Spatial merge mode: standard, linear", cxxopts::value<std::string>()->default_value("standard"))
+        ("frequency-mode", "Frequency mode: laplacian, wiener, wiener-robust", cxxopts::value<std::string>()->default_value("laplacian"))
         ("exposure-mode", "Exposure mode: off, linear, curve", cxxopts::value<std::string>()->default_value("off"))
         ("exposure-stops", "Exposure correction stops", cxxopts::value<float>()->default_value("0"))
         ("exposure-curve", "Exposure curve mode: global, local", cxxopts::value<std::string>()->default_value("global"))
+        ("align-gamma", "Gamma correction for alignment grayscale (default 1.0=off). Value < 1.0 will boost darkness", cxxopts::value<float>()->default_value("1.0"))
+        ("smooth-tile-field", "Enable median smoothing of alignment tile fields", cxxopts::value<bool>()->default_value("false"))
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -147,15 +149,15 @@ int main(int argc, char* argv[]) {
         settings.merge_algo = burstmerge::MergeAlgorithm::Frequency;
     }
     if (!ParseAlignmentMode(args["alignment"].as<std::string>(), settings.alignment_mode)) {
-        std::cerr << "Invalid alignment mode (use legacy, dense, or freq)" << std::endl;
+        std::cerr << "Invalid alignment mode (use standard, dense, or freq)" << std::endl;
         return 2;
     }
     if (!ParseSpatialMode(args["spatial-mode"].as<std::string>(), settings.spatial_mode)) {
-        std::cerr << "Invalid spatial mode (use legacy or linear)" << std::endl;
+        std::cerr << "Invalid spatial mode (use standard or linear)" << std::endl;
         return 2;
     }
     if (!ParseFrequencyMode(args["frequency-mode"].as<std::string>(), settings.frequency_mode)) {
-        std::cerr << "Invalid frequency mode (use laplacian, wiener, or wiener-legacy)" << std::endl;
+        std::cerr << "Invalid frequency mode (use laplacian, wiener, or wiener-robust)" << std::endl;
         return 2;
     }
     if (!ParseExposureMode(args["exposure-mode"].as<std::string>(), settings.exposure_mode)) {
@@ -170,6 +172,8 @@ int main(int argc, char* argv[]) {
     if (args.count("noise-reduction")) {
         settings.noise_reduction = args["noise-reduction"].as<float>();
     }
+    settings.align_gamma = args["align-gamma"].as<float>();
+    settings.smooth_tile_field = args["smooth-tile-field"].as<bool>();
     bm.Configure(settings);
 
     const std::string output_target = args["output"].as<std::string>();
@@ -179,6 +183,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Merge: " << MergeAlgoName(settings.merge_algo) << std::endl;
     std::cout << "Tile size: " << settings.tile_size << std::endl;
     std::cout << "Noise reduction: " << settings.noise_reduction << std::endl;
+    std::cout << "Align gamma: " << settings.align_gamma << std::endl;
+    std::cout << "Smooth tile field: " << (settings.smooth_tile_field ? "on" : "off") << std::endl;
     std::cout << "Bit depth: " << settings.dng_bit_depth << std::endl;
     std::cout << "Output target: " << output_target << std::endl;
     PrintInputSummary(inputs);
