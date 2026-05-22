@@ -17,6 +17,48 @@ namespace burstmerge
 namespace
 {
 
+// Gamma applied to grayscale images before alignment to enhance low-contrast
+// texture information.  gamma=0.5 (sqrt) stretches dark details so that
+// directional features become more discriminable in the cost function.
+static constexpr float kAlignGamma = 0.5f;
+
+inline void ApplyGammaGray(FloatImage& img, float white_level)
+{
+    if (img.channels != 1 || white_level <= 0.0f) return;
+
+    // Avoid a division per pixel. We want to compute:
+    //   v_out = white_level * clamp(v_in/white_level,0,1)^gamma
+    // which equals:
+    //   v_out = pow(v_in, gamma) * white_level^(1 - gamma)  for v_in in [0, white_level]
+    // So precompute scale = white_level^(1 - gamma) and apply pow to v_in.
+    // For the common gamma=0.5 case, use sqrt which is faster than powf.
+
+    const float gamma = kAlignGamma;
+    const float scale = std::pow(white_level, 1.0f - gamma);
+
+    if (gamma == 0.5f)
+    {
+        for (auto& v : img.data)
+        {
+            // clamp to [0, white_level]
+            float vin = v;
+            if (vin <= 0.0f) { v = 0.0f; continue; }
+            if (vin >= white_level) { v = white_level; continue; }
+            v = scale * std::sqrt(vin);
+        }
+    }
+    else
+    {
+        for (auto& v : img.data)
+        {
+            float vin = v;
+            if (vin <= 0.0f) { v = 0.0f; continue; }
+            if (vin >= white_level) { v = white_level; continue; }
+            v = scale * std::pow(vin, gamma);
+        }
+    }
+}
+
 // Progress callback shim kept local to the pipeline alignment partition.
 
 void Report(const PipelineOrchestrator::ProgressFn& progress,
@@ -237,13 +279,16 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
             "[WARN] Advanced dense alignment is experimental and not fully implemented yet. Results may be unstable.\n");
     }
 
-    const FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
+    const float wl = static_cast<float>(raw_images[ref_idx].metadata.white_level);
+    FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
+    ApplyGammaGray(gray_ref_full, wl);
     DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), ref_idx, AlignmentModeTag(params.mode), true);
     std::vector<FloatImage> gray_inputs;
     gray_inputs.reserve(float_images.size());
     for (const auto& img : float_images)
     {
         gray_inputs.push_back(ConvertPlanesToGrayscale(img));
+        ApplyGammaGray(gray_inputs.back(), wl);
     }
 
     auto align_and_warp_pregrays = [&](const FloatImage& gray_ref,
@@ -274,13 +319,11 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                               size_t progress_idx,
                               size_t total_count) -> FloatImage
     {
-        return align_and_warp_pregrays(
-            ConvertPlanesToGrayscale(guide_ref),
-            ConvertPlanesToGrayscale(source),
-            source,
-            source_idx,
-            progress_idx,
-            total_count);
+        FloatImage gr = ConvertPlanesToGrayscale(guide_ref);
+        FloatImage gs = ConvertPlanesToGrayscale(source);
+        ApplyGammaGray(gr, wl);
+        ApplyGammaGray(gs, wl);
+        return align_and_warp_pregrays(gr, gs, source, source_idx, progress_idx, total_count);
     };
 
     bool has_exposure = false;

@@ -24,7 +24,7 @@ void RefineTileField(const FloatImage& reference,
     result.tile_shift_y.assign(static_cast<size_t>(result.tiles_x) * result.tiles_y, static_cast<int16_t>(result.shift_y));
 
     const int local_radius = std::max<int>(1, std::min<int>(AlignConstants::kDenseLocalRadius, params.search_distance / AlignConstants::kRefineLocalRadiusDiv));
-    const int sample_step = std::max<int>(1, params.cfa_period);
+    const int sample_step = 1;
 
     for (uint32_t ty = 0; ty < result.tiles_y; ++ty)
     {

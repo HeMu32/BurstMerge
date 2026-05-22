@@ -251,7 +251,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
         }
 
         const int weight_ssd = (level > 0) ? 1 : 0;
-        const int sample_step = std::max<int>(1, cur.cfa_period);
+        const int sample_step = 1;
 
         std::vector<int16_t> corrected_x(static_cast<size_t>(tiles_x) * tiles_y);
         std::vector<int16_t> corrected_y(static_cast<size_t>(tiles_x) * tiles_y);
