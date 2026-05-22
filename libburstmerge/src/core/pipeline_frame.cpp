@@ -183,4 +183,25 @@ size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
     return images.size() / 2;
 }
 
+FloatImage DecodedImageToFloatImage(const io::DecodedImage& img)
+{
+    FloatImage fi;
+    fi.width = img.info.width;
+    fi.height = img.info.height;
+    fi.channels = img.info.pix_fmt & 0xFF;
+    fi.data = img.pixels;
+    return fi;
+}
+
+std::vector<FloatImage> BuildRgbImages(const std::vector<io::DecodedImage>& images)
+{
+    std::vector<FloatImage> out;
+    out.reserve(images.size());
+    for (const auto& img : images)
+    {
+        out.push_back(DecodedImageToFloatImage(img));
+    }
+    return out;
+}
+
 } // namespace burstmerge

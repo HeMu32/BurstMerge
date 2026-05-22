@@ -7,6 +7,16 @@
 namespace burstmerge
 {
 
+enum class OutputFormat
+{
+    Auto,  // automatic inference (DNG for RAW, PNG for non-RAW)
+    PNG,
+    JPEG,
+    BMP,
+    TIFF,
+    DNG
+};
+
 enum class BackendType
 { CPU, Vulkan };
 enum class MergeAlgorithm
@@ -41,6 +51,9 @@ struct Settings
     int            dng_bit_depth    = 14;   // 12/14/16 rescale to full target range; others keep sensor range
     float          align_gamma      = 1.0f;
     bool           smooth_tile_field = false;
+    // output_format: Auto = auto-infer (DNG for RAW, PNG for non-RAW)
+    OutputFormat   output_format    = OutputFormat::Auto;
+    int            bit_depth        = 14;   // 8/10/12/14/16, format constraints apply
 };
 
 struct Result

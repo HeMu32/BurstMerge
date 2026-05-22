@@ -1,0 +1,139 @@
+#include "burstmerge/internal/io/image_decoder.h"
+
+#include <algorithm>
+#include <csetjmp>
+#include <cstdio>
+#include <stdexcept>
+#include <vector>
+
+#ifdef BURSTMERGE_HAVE_JPEG
+#include <jpeglib.h>
+#endif
+
+namespace burstmerge
+{
+namespace io
+{
+
+#ifdef BURSTMERGE_HAVE_JPEG
+
+struct JpegErrorMgr
+{
+    jpeg_error_mgr pub;
+    jmp_buf setjmp_buffer;
+};
+
+static void JpegErrorExit(j_common_ptr cinfo)
+{
+    JpegErrorMgr* myerr = reinterpret_cast<JpegErrorMgr*>(cinfo->err);
+    (*cinfo->err->output_message)(cinfo);
+    longjmp(myerr->setjmp_buffer, 1);
+}
+
+class JpegDecoder : public ImageDecoder
+{
+public:
+    bool CanDecode(const std::string& path) override
+    {
+        std::string ext = path;
+        size_t dot = ext.rfind('.');
+        if (dot == std::string::npos) return false;
+        std::string e = ext.substr(dot);
+        for (auto& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return e == ".jpg" || e == ".jpeg";
+    }
+
+    DecodedImage Decode(const std::string& path) override
+    {
+        FILE* fp = std::fopen(path.c_str(), "rb");
+        if (!fp)
+        {
+            throw std::runtime_error("JpegDecoder: cannot open " + path);
+        }
+
+        jpeg_decompress_struct cinfo;
+        JpegErrorMgr jerr;
+        cinfo.err = jpeg_std_error(&jerr.pub);
+        jerr.pub.error_exit = JpegErrorExit;
+
+        if (setjmp(jerr.setjmp_buffer))
+        {
+            jpeg_destroy_decompress(&cinfo);
+            std::fclose(fp);
+            throw std::runtime_error("JpegDecoder: decode error in " + path);
+        }
+
+        jpeg_create_decompress(&cinfo);
+        jpeg_stdio_src(&cinfo, fp);
+        jpeg_read_header(&cinfo, TRUE);
+        jpeg_start_decompress(&cinfo);
+
+        uint32_t w = cinfo.output_width;
+        uint32_t h = cinfo.output_height;
+        uint32_t channels = cinfo.output_components;
+
+        DecodedImage result;
+        result.info.width     = w;
+        result.info.height    = h;
+        result.info.pix_fmt   = (channels == 1) ? kPixelGray
+                              : (channels == 3) ? kPixelRGB
+                              : kPixelRGBA;
+        result.info.bit_depth = 8;
+        result.info.is_raw    = false;
+        result.info.white_level = 255.0f;
+
+        result.pixels.resize(static_cast<size_t>(w) * h * channels);
+
+        std::vector<uint8_t> row(static_cast<size_t>(w) * channels);
+        for (uint32_t y = 0; y < h; ++y)
+        {
+            uint8_t* row_ptr = row.data();
+            jpeg_read_scanlines(&cinfo, &row_ptr, 1);
+            for (uint32_t x = 0; x < w; ++x)
+            {
+                size_t dst = (static_cast<size_t>(y) * w + x) * channels;
+                for (uint32_t c = 0; c < channels; ++c)
+                {
+                    result.pixels[dst + c] = static_cast<float>(row[x * channels + c]);
+                }
+            }
+        }
+
+        jpeg_finish_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        std::fclose(fp);
+
+        return result;
+    }
+};
+
+#else // !BURSTMERGE_HAVE_JPEG
+
+class JpegDecoder : public ImageDecoder
+{
+public:
+    bool CanDecode(const std::string& path) override
+    {
+        std::string ext = path;
+        size_t dot = ext.rfind('.');
+        if (dot == std::string::npos) return false;
+        std::string e = ext.substr(dot);
+        for (auto& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return e == ".jpg" || e == ".jpeg";
+    }
+
+    DecodedImage Decode(const std::string& path) override
+    {
+        throw std::runtime_error("JPEG decoding not available (libjpeg-turbo not linked)");
+    }
+};
+
+#endif // BURSTMERGE_HAVE_JPEG
+
+std::unique_ptr<ImageDecoder> CreateJpegDecoder()
+{
+    return std::make_unique<JpegDecoder>();
+}
+
+} // namespace io
+} // namespace burstmerge

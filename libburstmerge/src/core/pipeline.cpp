@@ -9,11 +9,15 @@
 #include "burstmerge/internal/exposure/exposure.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/io/dng_io.h"
+#include "burstmerge/internal/io/image_decoder.h"
+#include "burstmerge/internal/io/image_writer.h"
 #include "burstmerge/internal/merge/frequency.h"
 #include "burstmerge/internal/merge/spatial.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <vector>
@@ -40,6 +44,55 @@ uint32_t ResolveTargetWhiteLevel(int dng_bit_depth, uint32_t sensor_white)
         default: return sensor_white;
     }
 }
+// RAW extensions known to the Adobe DNG Converter
+bool IsRawExtension(const std::string& ext)
+{
+    static const char* raw_exts[] =
+    {
+        ".dng", ".arw", ".cr2", ".cr3", ".nef", ".nrw",
+        ".orf", ".raf", ".rw2", ".pef", ".srw", ".x3f",
+        ".sr2", ".srf", ".kdc", ".dcr", ".k25", ".mdc",
+        ".mef", ".mrw", ".iiq", ".eip", ".bay", ".3fr",
+        ".fff", ".mos", ".tif", ".tiff"  // TIFF may be camera RAW
+    };
+    for (const char* re : raw_exts)
+    {
+        if (ext == re) return true;
+    }
+    return false;
+}
+
+bool IsImageExtension(const std::string& ext)
+{
+    return ext == ".jpg" || ext == ".jpeg" ||
+           ext == ".png" ||
+           ext == ".bmp" ||
+           ext == ".tif" || ext == ".tiff";
+}
+
+enum class InputClass { RAW, Rgb, Mixed };
+
+static InputClass ClassifyInputs(const std::vector<std::string>& paths)
+{
+    bool has_raw = false;
+    bool has_rgb = false;
+    for (const auto& p : paths)
+    {
+        std::filesystem::path fp(p);
+        std::string ext = fp.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (IsRawExtension(ext)) has_raw = true;
+        else if (IsImageExtension(ext)) has_rgb = true;
+        // Unknown extension: treat as RAW (will error later if unsupported)
+        else has_raw = true;
+    }
+    if (has_raw && has_rgb) return InputClass::Mixed;
+    if (has_rgb) return InputClass::Rgb;
+    return InputClass::RAW;
+}
+
 } // namespace
 
 PipelineOrchestrator::PipelineOrchestrator(BackendType backend, Settings settings)
@@ -67,6 +120,153 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             {false, "", "No input images"};
         }
 
+        InputClass input_class = ClassifyInputs(input_paths);
+
+        if (input_class == InputClass::Mixed)
+        {
+            Report(progress, 0.02f, "Mixed input: filtering non-RAW files");
+            std::vector<std::string> filtered;
+            for (const auto& p : input_paths)
+            {
+                std::filesystem::path fp(p);
+                std::string ext = fp.extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (ext == ".dng" || IsRawExtension(ext))
+                {
+                    filtered.push_back(p);
+                } else
+                {
+                    Report(progress, 0.02f, "Skipping non-RAW file: " + p);
+                }
+            }
+            if (filtered.empty())
+            {
+                throw std::runtime_error("No RAW files remaining after filtering mixed input");
+            }
+            input_class = InputClass::RAW;
+            return Process(filtered, output_path_or_dir, progress);
+        }
+
+        if (input_class == InputClass::Rgb)
+        {
+            Report(progress, 0.02f, "RGB input pipeline");
+            std::vector<io::DecodedImage> decoded;
+            decoded.reserve(input_paths.size());
+            for (size_t i = 0; i < input_paths.size(); ++i)
+            {
+                Report(progress, PipelineConstants::kProgressDecodeStart + PipelineConstants::kProgressDecodeRange * static_cast<float>(i) / static_cast<float>(input_paths.size()),
+                    "Decoding " + std::to_string(i + 1) + "/" + std::to_string(input_paths.size()));
+                decoded.push_back(io::ReadImage(input_paths[i]));
+            }
+
+            size_t ref_idx = decoded.size() / 2;
+            std::vector<FloatImage> float_images = BuildRgbImages(decoded);
+
+            float white_level = decoded[ref_idx].info.white_level;
+            uint32_t cfa_period = 1;
+
+            // Build minimal RawImage vector just for metadata access in alignment
+            std::vector<RawImage> raw_wrappers;
+            raw_wrappers.reserve(decoded.size());
+            for (const auto& d : decoded)
+            {
+                RawImage ri;
+                ri.metadata.white_level = static_cast<uint32_t>(d.info.white_level);
+                ri.metadata.iso_exposure_time = d.info.iso_exposure_time;
+                ri.metadata.exposure_bias = d.info.exposure_bias;
+                std::memcpy(ri.metadata.black_level, d.info.black_level, sizeof(float) * 4);
+                ri.metadata.mosaic_pattern_width = 0;
+                raw_wrappers.push_back(std::move(ri));
+            }
+
+            Report(progress, PipelineConstants::kProgressAlignStart, "Aligning frames (RGB)");
+            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
+                settings_, cfa_period, progress);
+
+            FloatImage merged;
+            if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
+            {
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (temporal average)");
+                TemporalDenoiseParams params;
+                params.strength = settings_.noise_reduction;
+                params.white_level = white_level;
+                params.black_level = 0.0f;
+                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.exposure_scales = nullptr;
+                merged = TemporalAverage(float_images[ref_idx], aligned, params);
+            } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
+            {
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
+                FrequencyMergeParams params;
+                params.mode = settings_.frequency_mode;
+                params.noise_reduction = settings_.noise_reduction;
+                params.tile_size = settings_.tile_size;
+                params.white_level = white_level;
+                params.black_level = 0.0f;
+                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.exposure_scales = nullptr;
+                merged = FrequencyMerge(float_images[ref_idx], aligned, params);
+            } else
+            {
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (spatial)");
+                SpatialMergeParams params;
+                params.mode = settings_.spatial_mode;
+                params.noise_reduction = settings_.noise_reduction;
+                params.robustness = ComputeRobustness(settings_.noise_reduction);
+                float estimated_noise = EstimateNoiseFloor(float_images[ref_idx], 1);
+                float formula_noise = std::max(PipelineConstants::kNoiseFloorMin,
+                    settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
+                params.noise_floor = std::min(estimated_noise, formula_noise);
+                params.highlight_threshold = white_level * PipelineConstants::kHighlightFactor;
+                params.clip_threshold = white_level * PipelineConstants::kClipFactor;
+                params.guide_block_size = 2;
+                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.exposure_scales = nullptr;
+                merged = SpatialMerge(float_images[ref_idx], aligned, params);
+            }
+
+            std::string output_path = output_path_or_dir;
+            if (output_path.empty())
+            {
+                output_path = "burstmerge_output.png";
+            }
+            else
+            {
+                // Determine if path looks like a file (has extension) or directory
+                std::string ext = std::filesystem::path(output_path).extension().string();
+                bool has_ext = !ext.empty();
+                if (!has_ext)
+                {
+                    // Treat as directory: create and append default filename
+                    std::error_code ec;
+                    std::filesystem::create_directories(output_path, ec);
+                    output_path = (std::filesystem::path(output_path) / "burstmerge_output.png").string();
+                }
+                else
+                {
+                    // Treat as file path: ensure parent dir exists
+                    std::error_code ec;
+                    auto parent = std::filesystem::path(output_path).parent_path();
+                    if (!parent.empty())
+                    {
+                        std::filesystem::create_directories(parent, ec);
+                    }
+                }
+            }
+
+            io::WriteImage(output_path, merged, decoded, settings_);
+
+            Report(progress, PipelineConstants::kProgressDone, "Done");
+            if (ProfileEnabled())
+            {
+                std::fprintf(stderr, "%s", BuildProfileReport().c_str());
+                std::fflush(stderr);
+            }
+            return {true, output_path, ""};
+        }
+
+        // ---- RAW pipeline ----
         std::string output_path = ResolveOutputPath(output_path_or_dir);
         Report(progress, 0.02f, "Preparing inputs");
         convert_dir_.clear();

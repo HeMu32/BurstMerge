@@ -3,6 +3,7 @@
 #include "burstmerge/internal/core/float_image.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/io/dng_io.h"
+#include "burstmerge/internal/io/image_decoder.h"
 #include "burstmerge/internal/core/pipeline.h"
 
 #include <vector>
@@ -23,5 +24,9 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                      size_t ref_idx);
 std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images);
 size_t SelectExposureRefIndex(const std::vector<RawImage>& images);
+
+// --- Non-RAW helpers ---
+FloatImage DecodedImageToFloatImage(const io::DecodedImage& img);
+std::vector<FloatImage> BuildRgbImages(const std::vector<io::DecodedImage>& images);
 
 } // namespace burstmerge
