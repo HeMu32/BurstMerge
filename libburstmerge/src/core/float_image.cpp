@@ -81,9 +81,9 @@ HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_le
         throw std::runtime_error("FloatImageToUint16HostBuffer expects single-channel image");
     }
 
-    // DNG uses 16-bit containers for all bit depths (12/14/16). The effective
-    // precision is defined by the white_level metadata tag, not the container.
-    // For 12-bit output data is scaled to [0, 4095] and stored in a uint16_t.
+    // DNG uses a 16-bit integer container for 12/14/16-bit outputs. The actual
+    // target precision is expressed by white_level, and the float pipeline is
+    // expected to have already rescaled samples into that target range.
     HostBuffer out;
     out.width = src.width;
     out.height = src.height;
@@ -140,6 +140,81 @@ FloatImage Downsample2x(const FloatImage& src)
         }
     });
     return out;
+}
+
+void Downsample2x(const FloatImage& src, FloatImage& dst)
+{
+    dst.width = std::max<uint32_t>(1, src.width / 2);
+    dst.height = std::max<uint32_t>(1, src.height / 2);
+    dst.channels = src.channels;
+    dst.data.resize(static_cast<size_t>(dst.width) * dst.height * dst.channels, 0.0f);
+
+    ParallelForRows(dst.height, RecommendedImageRowGrain(dst.width, dst.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
+    {
+        for (uint32_t y = y_begin; y < y_end; ++y)
+        {
+            for (uint32_t x = 0; x < dst.width; ++x)
+            {
+                for (uint32_t c = 0; c < dst.channels; ++c)
+                {
+                    uint32_t sx = x * 2;
+                    uint32_t sy = y * 2;
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (uint32_t dy = 0; dy < 2 && sy + dy < src.height; ++dy)
+                    {
+                        for (uint32_t dx = 0; dx < 2 && sx + dx < src.width; ++dx)
+                        {
+                            sum += src.At(sx + dx, sy + dy, c);
+                            ++n;
+                        }
+                    }
+                    dst.At(x, y, c) = n > 0 ? sum / static_cast<float>(n) : 0.0f;
+                }
+            }
+        }
+    });
+}
+
+FloatImage Downsample4x(const FloatImage& src)
+{
+    FloatImage dst;
+    Downsample4x(src, dst);
+    return dst;
+}
+
+void Downsample4x(const FloatImage& src, FloatImage& dst)
+{
+    dst.width = std::max<uint32_t>(1, src.width / 4);
+    dst.height = std::max<uint32_t>(1, src.height / 4);
+    dst.channels = src.channels;
+    dst.data.resize(static_cast<size_t>(dst.width) * dst.height * dst.channels, 0.0f);
+
+    ParallelForRows(dst.height, RecommendedImageRowGrain(dst.width, dst.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
+    {
+        for (uint32_t y = y_begin; y < y_end; ++y)
+        {
+            for (uint32_t x = 0; x < dst.width; ++x)
+            {
+                for (uint32_t c = 0; c < dst.channels; ++c)
+                {
+                    uint32_t sx = x * 4;
+                    uint32_t sy = y * 4;
+                    float sum = 0.0f;
+                    int n = 0;
+                    for (uint32_t dy = 0; dy < 4 && sy + dy < src.height; ++dy)
+                    {
+                        for (uint32_t dx = 0; dx < 4 && sx + dx < src.width; ++dx)
+                        {
+                            sum += src.At(sx + dx, sy + dy, c);
+                            ++n;
+                        }
+                    }
+                    dst.At(x, y, c) = n > 0 ? sum / static_cast<float>(n) : 0.0f;
+                }
+            }
+        }
+    });
 }
 
 FloatImage BoxBlur(const FloatImage& src, int radius)

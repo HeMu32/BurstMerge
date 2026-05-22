@@ -16,7 +16,7 @@ struct AlignConstants
     // Tiles are arranged with 50 % overlap (stride = tile_size / 2 = 8).
     static constexpr int32_t kDefaultTileSize = 16;
 
-    // Minimum tile size (also used as step in the Legacy SparseSad loop).
+    // Minimum tile size (also used as step in the Standard SparseSad loop).
     static constexpr int32_t kMinTileSize = 16;
 
     // Per-tile search: number of integer-position candidates in each direction.
@@ -39,20 +39,20 @@ struct AlignConstants
     static constexpr int32_t kMinCoarseTiles = 4;
     static constexpr int32_t kMaxCoarseTiles = 8;
 
-    // --- Legacy global-search radius (Legacy path only) ------------------
+    // --- Standard global-search radius (Standard path only) --------------
     // Coarsest level searches 1/8 of the longest image side.
     // radius = max(kMinSearchRadius, longest >> (kSearchFractionShiftBase + ...))
     static constexpr int32_t kMinSearchRadius = 3;
     static constexpr int32_t kSearchFractionShiftBase = 3;  // 2^3 = 1/8
 
-    // --- Legacy RefineTileField (Legacy path only) -----------------------
+    // --- Standard RefineTileField (Standard path only) --------------------
     // local_radius = clamp(search_distance / kRefineLocalRadiusDiv, 1, ...)
     static constexpr int32_t kRefineLocalRadiusDiv = 16;
 
-    // --- Legacy global default -------------------------------------------
+    // --- Standard global default -----------------------------------------
     static constexpr int32_t kDefaultSearchDistance = 64;
 
-    // --- Legacy DenseLocal / Smooth (Legacy RefineTileField) -------------
+    // --- Standard DenseLocal / Smooth (Standard RefineTileField) ----------
     static constexpr int32_t kDenseLocalRadius = 3;
     static constexpr int32_t kSmoothNeighborRadius = 1;
 };
@@ -62,7 +62,9 @@ struct AlignParams
     int32_t tile_size       = AlignConstants::kDefaultTileSize;
     int32_t search_distance = AlignConstants::kDefaultSearchDistance;
     uint32_t cfa_period     = 1;
-    AlignmentMode mode      = AlignmentMode::Legacy;
+    AlignmentMode mode      = AlignmentMode::Standard;
+    float    align_gamma    = 1.0f;
+    bool     smooth_tile_field = false;
 };
 
 struct AlignmentResult

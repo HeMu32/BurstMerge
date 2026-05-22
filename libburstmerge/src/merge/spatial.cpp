@@ -32,7 +32,43 @@ float ClampMin(float v, float lo)
     return v < lo ? lo : v;
 }
 
-burstmerge::FloatImage BinomialBlur(const burstmerge::FloatImage& src, int radius = 8)
+float ComputeHighlightWeight(bool linear_mode,
+                             float diff,
+                             float noise_floor,
+                             float robustness,
+                             float min_comparison_weight)
+{
+    // Highlight regions are prone to color casts when slightly misregistered.
+    // We still accept comparison frames there, but with a looser consistency
+    // gate instead of the old unconditional w=1 fast path.
+    const float relaxed_mul = 2.5f;
+    if (linear_mode)
+    {
+        const float base = std::max(1.0f, noise_floor / std::max(0.001f, robustness));
+        const float threshold = relaxed_mul * base;
+        return diff >= threshold ? 0.0f : Clamp01(1.0f - diff / threshold);
+    }
+
+    const float ratio = diff / std::max(1.0f, noise_floor * relaxed_mul);
+    float w = 1.0f / (1.0f + ratio * ratio * robustness);
+    return ClampMin(w, min_comparison_weight);
+}
+
+float ComputePlaneBiasVeto(float chroma_shift,
+                           float noise_floor,
+                           float min_comparison_weight)
+{
+    // If a comparison frame already shows a local RB-vs-G imbalance relative
+    // to the reference, blending it tends to produce magenta blocks/halos
+    // after demosaic. In that case, reduce its contribution conservatively.
+    const float threshold = std::max(2.0f, noise_floor * 0.35f);
+    if (chroma_shift <= threshold) return 1.0f;
+    const float t = Clamp01((chroma_shift - threshold) / std::max(1.0f, threshold));
+    return std::max(min_comparison_weight, 1.0f - t);
+}
+
+burstmerge::FloatImage BinomialBlur(const burstmerge::FloatImage& src,
+                                    int radius = burstmerge::SpatialConstants::kBinomialRadius)
 {
     if (src.data.empty()) return src;
     const float* bw = burstmerge::kBinomialWeights;
@@ -99,10 +135,11 @@ float ColorDifferenceAt(const burstmerge::FloatImage& a, const burstmerge::Float
     return diff;
 }
 
-float EstimateLinearNoise(const burstmerge::FloatImage& image, uint32_t sample_step)
+float EstimateLinearNoise(const burstmerge::FloatImage& image,
+                          const burstmerge::FloatImage& blurred,
+                          uint32_t sample_step)
 {
-    if (image.data.empty()) return burstmerge::SpatialConstants::kNoiseFloorFallback;
-    const burstmerge::FloatImage blurred = BinomialBlur(image);
+    if (image.data.empty() || blurred.data.empty()) return burstmerge::SpatialConstants::kNoiseFloorFallback;
     const uint32_t step = std::max<uint32_t>(1, sample_step);
     double sum = 0.0;
     uint64_t count = 0;
@@ -195,10 +232,10 @@ FloatImage SpatialMerge(const FloatImage& reference,
     out.data.resize(reference.data.size(), 0.0f);
 
     const float noise_floor = linear_mode
-        ? EstimateLinearNoise(reference, params.guide_block_size)
+        ? EstimateLinearNoise(reference, ref_blur, params.guide_block_size)
         : (params.noise_floor > 0.0f ? params.noise_floor : std::max(burstmerge::SpatialConstants::kNoiseFloorFallback, params.noise_reduction * 4.0f));
     const float robustness = std::max(0.0f, params.robustness);
-    const float min_comparison_weight = linear_mode ? burstmerge::SpatialConstants::kLinearMinComparisonWeight : burstmerge::SpatialConstants::kLegacyMinComparisonWeight;
+    const float min_comparison_weight = linear_mode ? burstmerge::SpatialConstants::kLinearMinComparisonWeight : burstmerge::SpatialConstants::kStandardMinComparisonWeight;
     const float highlight_threshold = params.highlight_threshold > 0.0f
         ? params.highlight_threshold
         : MaxValue(reference) * burstmerge::SpatialConstants::kHighlightThresholdFactor;
@@ -225,7 +262,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
                 {
                     const size_t i = (static_cast<size_t>(y) * out.width + x);
 
-                        float ref_guide = linear_mode ? ref_blur.data[i] : ref_guide_map.data[i];
+                    float ref_guide = linear_mode ? ref_blur.data[i] : ref_guide_map.data[i];
                     float weighted_sum = reference.data[i];
                     float weight_sum = 1.0f;
 
@@ -252,7 +289,11 @@ FloatImage SpatialMerge(const FloatImage& reference,
                         w = 0.0f;
                     } else if (ref_guide >= highlight_threshold || cmp_guide >= highlight_threshold)
                     {
-                        w = 1.0f;
+                        // Bright structures remain vulnerable to false color when
+                        // slightly misregistered, so we still measure guide-space
+                        // agreement here instead of blindly accepting the frame.
+                        float diff = std::abs(cmp_guide - ref_guide);
+                        w = ComputeHighlightWeight(linear_mode, diff, noise_floor, robustness, min_comparison_weight);
                     } else
                     {
                         float diff = std::abs(cmp_guide - ref_guide);
@@ -285,25 +326,44 @@ FloatImage SpatialMerge(const FloatImage& reference,
         ParallelForRows(out.height, RecommendedImageRowGrain(out.width, out.channels, kRowGrainMinPixels, kRowGrainMinRows), [&](uint32_t y_begin, uint32_t y_end)
         {
             std::vector<float> shared_w(aligned_comparisons.size(), 1.0f);
+            std::vector<float> cmp_raw_max(aligned_comparisons.size(), 0.0f);
+            std::vector<float> cmp_max_diff(aligned_comparisons.size(), 0.0f);
             for (uint32_t y = y_begin; y < y_end; ++y)
             {
                 for (uint32_t x = 0; x < out.width; ++x)
                 {
+                    const size_t pixel_base = (static_cast<size_t>(y) * out.width + x) * out.channels;
                     float ref_raw_guide = 0.0f;
-                    float cmp_raw_max[32] = {};
+                    float ref_vals[4] = {};
+                    float ref_blur_vals[4] = {};
+                    for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+                    {
+                        cmp_raw_max[idx] = 0.0f;
+                        cmp_max_diff[idx] = 0.0f;
+                    }
                     for (uint32_t c = 0; c < out.channels; ++c)
                     {
-                        const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
-                        ref_raw_guide = std::max(ref_raw_guide, reference.data[ci]);
+                        const size_t ci = pixel_base + c;
+                        const float ref_v = reference.data[ci];
+                        const float ref_b = ref_blur.data[ci];
+                        ref_vals[c] = ref_v;
+                        ref_blur_vals[c] = ref_b;
+                        ref_raw_guide = std::max(ref_raw_guide, ref_v);
                         for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
                         {
-                            cmp_raw_max[idx] = std::max(cmp_raw_max[idx], aligned_comparisons[idx].data[ci]);
+                            const float cmp_v = aligned_comparisons[idx].data[ci];
+                            cmp_raw_max[idx] = std::max(cmp_raw_max[idx], cmp_v);
+                            const float d = std::abs(cmp_blurs[idx].data[ci] - ref_b);
+                            cmp_max_diff[idx] = std::max(cmp_max_diff[idx], d);
                         }
                     }
 
                     std::fill(shared_w.begin(), shared_w.end(), 1.0f);
                     for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
                     {
+                        // First reject obviously unsafe comparison samples:
+                        // clipped pixels cannot be trusted, and highlight pixels
+                        // must still pass a relaxed consistency check before use.
                         bool cmp_clipped = false;
                         if (params.clip_threshold > 0.0f && params.exposure_scales &&
                             idx < params.num_scales && params.exposure_scales[idx] > 0.0f)
@@ -316,34 +376,39 @@ FloatImage SpatialMerge(const FloatImage& reference,
                             shared_w[idx] = 0.0f;
                         } else if (ref_raw_guide >= highlight_threshold || cmp_raw_max[idx] >= highlight_threshold)
                         {
-                            shared_w[idx] = 1.0f;
+                            shared_w[idx] = ComputeHighlightWeight(linear_mode, cmp_max_diff[idx], noise_floor, robustness, min_comparison_weight);
                         } else
                         {
-                            float max_diff = 0.0f;
-                            for (uint32_t c = 0; c < out.channels; ++c)
-                            {
-                                const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
-                                float d = std::abs(cmp_blurs[idx].data[ci] - ref_blur.data[ci]);
-                                max_diff = std::max(max_diff, d);
-                            }
                             if (linear_mode)
                             {
                                 float threshold = std::max(1.0f, noise_floor / std::max(0.001f, robustness));
-                                shared_w[idx] = max_diff >= threshold ? 0.0f : Clamp01(1.0f - max_diff / threshold);
+                                shared_w[idx] = cmp_max_diff[idx] >= threshold ? 0.0f : Clamp01(1.0f - cmp_max_diff[idx] / threshold);
                             } else
                             {
-                                float ratio = max_diff / noise_floor;
+                                float ratio = cmp_max_diff[idx] / noise_floor;
                                 shared_w[idx] = 1.0f / (1.0f + ratio * ratio * robustness);
                                 shared_w[idx] = ClampMin(shared_w[idx], min_comparison_weight);
                             }
+                        }
+
+                        if (out.channels >= 4 && shared_w[idx] > 0.0f)
+                        {
+                            // Compare local chroma balance in blur space so we reject
+                            // frames that would shift white/high-contrast interiors toward
+                            // RB-heavy (magenta/purple) mixes even when luminance matches.
+                            const float ref_rb = 0.5f * (ref_blur_vals[0] + ref_blur_vals[3]);
+                            const float ref_g  = 0.5f * (ref_blur_vals[1] + ref_blur_vals[2]);
+                            const float cmp_rb = 0.5f * (cmp_blurs[idx].data[pixel_base + 0] + cmp_blurs[idx].data[pixel_base + 3]);
+                            const float cmp_g  = 0.5f * (cmp_blurs[idx].data[pixel_base + 1] + cmp_blurs[idx].data[pixel_base + 2]);
+                            const float chroma_shift = std::abs((cmp_rb - cmp_g) - (ref_rb - ref_g));
+                            shared_w[idx] *= ComputePlaneBiasVeto(chroma_shift, noise_floor, min_comparison_weight);
                         }
                     }
 
                     for (uint32_t c = 0; c < out.channels; ++c)
                     {
-                        const size_t ci = (static_cast<size_t>(y) * out.width + x) * out.channels + c;
-
-                        float weighted_sum = reference.data[ci];
+                        const size_t ci = pixel_base + c;
+                        float weighted_sum = ref_vals[c];
                         float weight_sum = 1.0f;
 
                         for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
