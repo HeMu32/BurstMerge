@@ -8,6 +8,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,7 @@ namespace fs = std::filesystem;
 
 static int g_checks = 0;
 static int g_failed = 0;
+static uint32_t g_single_frame_white_level = 0;
 
 #define CHECK(cond, msg) do { \
     ++g_checks; \
@@ -121,7 +123,11 @@ void ProcessAndVerify(const std::string& name,
     }
 }
 
-void TestBitDepthOutput(const std::string& name, const std::string& input, int bit_depth, uint32_t expected_white_level, const std::string& output_path)
+void TestComprehensiveBitDepth(const std::string& name,
+                                const std::string& input,
+                                int bit_depth,
+                                uint32_t expected_white_level,
+                                const std::string& output_path)
 {
     std::cout << "[test] process " << name << " (bit depth " << bit_depth << ")..." << std::endl;
 
@@ -146,23 +152,169 @@ void TestBitDepthOutput(const std::string& name, const std::string& input, int b
         uint32_t target_white = expected_white_level;
         if (target_white == 0)
         {
-            // Read original to find its native white level
             burstmerge::DngReader orig_reader(input.c_str());
             target_white = orig_reader.Read().metadata.white_level;
         }
 
         CHECK(image.metadata.white_level == target_white,
               name + " white level matches expected (" + std::to_string(target_white) + ", got " + std::to_string(image.metadata.white_level) + ")");
+        CHECK(image.metadata.dng_pixel_type == burstmerge::DngPixelType::Uint16,
+              name + " dng_pixel_type is Uint16");
+        CHECK(image.pixels.format == burstmerge::PixelFormat::R16_Uint,
+              name + " pixels.format is R16_Uint");
 
-        // We can also sample the image data to ensure it's bounded by the new white level
         burstmerge::FloatImage fi = burstmerge::HostBufferToFloatImage(image.pixels);
         float max_val = 0.0f;
+        float min_val = fi.data.empty() ? 0.0f : fi.data[0];
         for (float v : fi.data)
         {
             if (v > max_val) max_val = v;
+            if (v < min_val) min_val = v;
         }
+        CHECK(min_val >= 0.0f, name + " pixel min >= 0");
         CHECK(max_val <= static_cast<float>(target_white) * 1.001f,
-              name + " pixel max value within white level bounds");
+              name + " pixel max within white level bounds (" + std::to_string(static_cast<int>(max_val)) + " <= " + std::to_string(target_white) + ")");
+        if (expected_white_level > 0 && !fi.data.empty())
+        {
+            CHECK(max_val > 0.99f * static_cast<float>(target_white),
+                  name + " max pixel reaches near white (" + std::to_string(static_cast<int>(max_val)) + " > " + std::to_string(static_cast<int>(0.99f * target_white)) + ")");
+            size_t n = std::max<size_t>(100, fi.data.size() / 100);
+            std::vector<float> bright(fi.data);
+            std::partial_sort(bright.begin(),
+                              bright.begin() + n,
+                              bright.end(),
+                              std::greater<float>());
+            double top_mean = 0.0;
+            for (size_t i = 0; i < n; ++i) top_mean += bright[i];
+            top_mean /= static_cast<double>(n);
+            CHECK(top_mean > 0.5 * static_cast<double>(target_white),
+                  name + " top ~1% average > 50% white (" + std::to_string(static_cast<int>(top_mean)) + " vs " + std::to_string(static_cast<int>(0.5 * target_white)) + ")");
+        }
+    }
+}
+
+void TestSingleFrameProcessing(const std::string& name,
+                                const std::string& input,
+                                const std::string& output_path)
+{
+    std::cout << "[test] " << name << "..." << std::endl;
+
+    fs::create_directories(fs::path(output_path).parent_path());
+    std::remove(output_path.c_str());
+
+    burstmerge::DngReader orig_reader(input.c_str());
+    auto orig = orig_reader.Read();
+    uint32_t orig_w = orig.metadata.width;
+    uint32_t orig_h = orig.metadata.height;
+
+    burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+    burstmerge::Settings settings;
+    settings.dng_bit_depth = 14;
+    bm.Configure(settings);
+
+    int progress_calls = 0;
+    float last_progress = -1.0f;
+    bm.SetProgressCallback([&](float p, const std::string&) {
+        ++progress_calls;
+        last_progress = p;
+    });
+
+    bm.AddImage(input);
+    auto result = bm.Process(output_path);
+
+    CHECK(result.success, name + " process succeeds");
+    CHECK(result.output_path == output_path, name + " output path exact");
+    CHECK(FileExists(output_path), name + " output exists");
+    CHECK(FileSize(output_path) > 1024, name + " output size > 1KB");
+    CHECK(progress_calls >= 2, name + " progress callbacks");
+    CHECK(last_progress == 1.0f, name + " progress reaches 1");
+
+    if (FileExists(output_path))
+    {
+        burstmerge::DngReader reader(output_path.c_str());
+        auto image = reader.Read();
+
+        CHECK(image.metadata.width == orig_w, name + " width preserved");
+        CHECK(image.metadata.height == orig_h, name + " height preserved");
+        g_single_frame_white_level = image.metadata.white_level;
+        CHECK(image.metadata.white_level == 16383, name + " default 14-bit white level");
+        CHECK(image.metadata.dng_pixel_type == burstmerge::DngPixelType::Uint16,
+              name + " dng_pixel_type Uint16");
+        CHECK(image.pixels.format == burstmerge::PixelFormat::R16_Uint,
+              name + " pixels.format R16_Uint");
+        CHECK(image.pixels.data != nullptr, name + " pixels not null");
+        CHECK(image.pixels.size > 0, name + " pixels size > 0");
+
+        bool has_non_zero = false;
+        for (size_t i = 0; i < image.pixels.size && i < 4096; ++i)
+        {
+            if (image.pixels.data[i] != std::byte{0}) {
+                has_non_zero = true;
+                break;
+            }
+        }
+        CHECK(has_non_zero, name + " pixel data non-zero");
+    }
+}
+
+void TestMultiFrameProcessing(const std::string& name,
+                               const std::vector<std::string>& inputs,
+                               const std::string& output_path)
+{
+    std::cout << "[test] multi " << name << "..." << std::endl;
+
+    fs::create_directories(fs::path(output_path).parent_path());
+    std::remove(output_path.c_str());
+
+    burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+    burstmerge::Settings settings;
+    settings.dng_bit_depth = 14;
+    bm.Configure(settings);
+
+    int progress_calls = 0;
+    float last_progress = -1.0f;
+    bm.SetProgressCallback([&](float p, const std::string&) {
+        ++progress_calls;
+        last_progress = p;
+    });
+
+    for (const auto& input : inputs) bm.AddImage(input);
+    auto result = bm.Process(output_path);
+
+    CHECK(result.success, name + " process succeeds");
+    CHECK(result.output_path == output_path, name + " output path exact");
+    CHECK(FileExists(output_path), name + " output exists");
+    CHECK(FileSize(output_path) > 1024, name + " output size > 1KB");
+    CHECK(progress_calls >= 2, name + " progress callbacks");
+    CHECK(last_progress == 1.0f, name + " progress reaches 1");
+
+    if (FileExists(output_path))
+    {
+        burstmerge::DngReader reader(output_path.c_str());
+        auto image = reader.Read();
+        CHECK(image.metadata.width > 0, name + " width > 0");
+        CHECK(image.metadata.height > 0, name + " height > 0");
+        CHECK(image.metadata.white_level == 16383,
+              name + " white_level == 16383 (got " + std::to_string(image.metadata.white_level) + ")");
+        CHECK(image.metadata.dng_pixel_type == burstmerge::DngPixelType::Uint16,
+              name + " dng_pixel_type Uint16");
+        CHECK(image.pixels.format == burstmerge::PixelFormat::R16_Uint,
+              name + " pixels.format R16_Uint");
+        CHECK(g_single_frame_white_level == 0 ||
+              image.metadata.white_level == g_single_frame_white_level,
+              name + " white_level consistent with single-frame ("
+              + std::to_string(g_single_frame_white_level) + " vs "
+              + std::to_string(image.metadata.white_level) + ")");
+
+        bool has_non_zero = false;
+        for (size_t i = 0; i < image.pixels.size && i < 4096; ++i)
+        {
+            if (image.pixels.data[i] != std::byte{0}) {
+                has_non_zero = true;
+                break;
+            }
+        }
+        CHECK(has_non_zero, name + " pixel data non-zero");
     }
 }
 
@@ -209,21 +361,28 @@ int main()
     fs::path build(TEST_BINARY_DIR);
     fs::path samples = root / "libburstmerge" / "test" / "samples";
     fs::path out_dir = build / "stage1_outputs";
+    std::string dng_path = (samples / "X1M5_Wide.dng").string();
 
     ProcessAndVerify("single_dng",
-        { (samples / "X1M5_Wide.dng").string() },
+        { dng_path },
         (out_dir / "single_dng_output.dng").string());
 
-    TestBitDepthOutput("single_12bit", (samples / "X1M5_Wide.dng").string(), 12, 4095, (out_dir / "single_12bit_output.dng").string());
-    TestBitDepthOutput("single_14bit", (samples / "X1M5_Wide.dng").string(), 14, 16383, (out_dir / "single_14bit_output.dng").string());
-    TestBitDepthOutput("single_16bit", (samples / "X1M5_Wide.dng").string(), 16, 65535, (out_dir / "single_16bit_output.dng").string());
-    // Test robustness: invalid/unsupported bit depth requests should gracefully fall back to the sensor's native white level.
-    TestBitDepthOutput("single_invalid_bit", (samples / "X1M5_Wide.dng").string(), 99, 0, (out_dir / "single_invalid_bit_output.dng").string());
+    TestComprehensiveBitDepth("single_12bit", dng_path, 12, 4095, (out_dir / "single_12bit_output.dng").string());
+    TestComprehensiveBitDepth("single_14bit", dng_path, 14, 16383, (out_dir / "single_14bit_output.dng").string());
+    TestComprehensiveBitDepth("single_16bit", dng_path, 16, 65535, (out_dir / "single_16bit_output.dng").string());
+    TestComprehensiveBitDepth("single_invalid_bit", dng_path, 99, 0, (out_dir / "single_invalid_bit_output.dng").string());
+
+    TestSingleFrameProcessing("single_frame", dng_path, (out_dir / "single_frame_output.dng").string());
+    TestMultiFrameProcessing("two_identical_frames",
+        { dng_path, dng_path },
+        (out_dir / "two_frames_output.dng").string());
+    TestMultiFrameProcessing("three_identical_frames",
+        { dng_path, dng_path, dng_path },
+        (out_dir / "three_frames_output.dng").string());
 
     if (ConverterAvailable())
     {
         auto seq = FilesWithExt(samples / "Seq1", ".arw");
-        // auto bkt = FilesWithExt(samples / "Bkt", ".arw");
         std::vector<std::string> bkt2;
         if (fs::exists(samples / "Bkt2"))
         {
