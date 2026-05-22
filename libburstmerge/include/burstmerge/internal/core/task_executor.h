@@ -10,7 +10,7 @@ namespace burstmerge
 // ---- Grain-size defaults for row-based parallel loops ----
 // Each chunk targets at least kRowGrainMinPixels float-pixel operations,
 // which empirically keeps scheduling overhead below ~1 % on modern CPUs.
-constexpr uint32_t kRowGrainMinPixels    = 1u << 18;    // 262144 floats, a magic number
+constexpr uint32_t kRowGrainMinPixels    = 1u << 18;    // 262144 floats, a magic number for CPU processing
 constexpr uint32_t kRowGrainMinRows      = 16;          // fallback min rows
 constexpr uint32_t kRowGrainCoarseRows   = 32;          // coarser grain for plane images
 
