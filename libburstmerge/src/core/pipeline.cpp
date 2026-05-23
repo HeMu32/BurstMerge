@@ -345,7 +345,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 std::fprintf(stderr, "%s", BuildProfileReport().c_str());
                 std::fflush(stderr);
             }
-            return {true, output_path, ""};
+            return {true, output_path, ""}; //////////////////////////////////////////////
         }
 
         // ---- RAW pipeline ----

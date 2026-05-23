@@ -9,3 +9,5 @@ CLI应用: 指定搜索位移限制
 Hotpixel Spuression: 目前的算法好像是坏的
 
 NormalizeFrames: 好像只考虑ISO速度和快门速度 不考虑其他任何因素也不考虑曝光EXIF不准确的问题
+
+ImageMetadata::tags: 从未被写入
