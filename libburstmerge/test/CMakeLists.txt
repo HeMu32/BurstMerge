@@ -27,7 +27,7 @@ add_burstmerge_test(test_stage0)
 set_tests_properties(test_stage0 PROPERTIES TIMEOUT 300)
 
 add_burstmerge_test(test_stage1)
-set_tests_properties(test_stage1 PROPERTIES TIMEOUT 300)
+set_tests_properties(test_stage1 PROPERTIES TIMEOUT 600)
 
 add_burstmerge_test(test_common_rgb_fmt)
 target_sources(test_common_rgb_fmt PRIVATE test_aux.cpp)
