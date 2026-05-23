@@ -92,6 +92,23 @@ static std::vector<std::string> MakeInputs(const std::vector<std::string>& rels)
     return out;
 }
 
+static std::vector<std::string> FilesInDir(const fs::path& dir)
+{
+    std::vector<std::string> files;
+    for (const auto& entry : fs::directory_iterator(dir))
+    {
+        if (!entry.is_regular_file()) continue;
+        files.push_back(entry.path().string());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+static std::vector<std::string> FolderInputs(const std::string& folder)
+{
+    return FilesInDir(SamplesDir() / folder);
+}
+
 static std::vector<std::string> SmallRgbPngInputs()
 {
     return MakeInputs({"rgb_small/rgb8.png", "rgb_small/rgb8.png"});
@@ -314,7 +331,7 @@ static void TestGroupFormatsBitDepthAndRegression()
     }
 }
 
-// Group 3: (6,7)
+// Group 3: (6,7) and folder-input parity
 static void TestGroupMixedRawAndExport()
 {
     std::cout << "[test] group3 mixed/raw export..." << std::endl;
@@ -396,6 +413,50 @@ static void TestGroupMixedRawAndExport()
         auto result = RunBurstMerge({raw}, settings, out);
         CHECK(result.success, "raw to tiff succeeds");
         CHECK(IsTiff(result.output_path), "raw to tiff signature");
+    }
+
+    // Folder-based versions of the same mixed-format combinations.
+    // These mirror the -i cases above, but use -f-style directory inputs.
+    {
+        auto folder_inputs = FolderInputs("folder_raw_png");
+        fs::path out = OutDir() / "folder_raw_png.png";
+        auto settings = MakeSettings();
+        settings.output_format = burstmerge::OutputFormat::PNG;
+        auto result = RunBurstMerge(folder_inputs, settings, out);
+        CHECK(result.success, "folder_raw_png succeeds");
+        CHECK(Lower(fs::path(result.output_path).extension().string()) == ".png", "folder_raw_png png extension");
+        CHECK(IsPng(result.output_path), "folder_raw_png png signature");
+    }
+
+    {
+        auto folder_inputs = FolderInputs("folder_raw_jpg");
+        fs::path out = OutDir() / "folder_raw_jpg.jpg";
+        auto settings = MakeSettings();
+        settings.output_format = burstmerge::OutputFormat::JPEG;
+        auto result = RunBurstMerge(folder_inputs, settings, out);
+        CHECK(result.success, "folder_raw_jpg succeeds");
+        CHECK(Lower(fs::path(result.output_path).extension().string()) == ".jpg", "folder_raw_jpg jpg extension");
+        CHECK(IsJpeg(result.output_path), "folder_raw_jpg jpeg signature");
+    }
+
+    {
+        auto folder_inputs = FolderInputs("folder_raw_tif");
+        fs::path out = OutDir() / "folder_raw_tif.tif";
+        auto settings = MakeSettings();
+        settings.output_format = burstmerge::OutputFormat::TIFF;
+        auto result = RunBurstMerge(folder_inputs, settings, out);
+        CHECK(result.success, "folder_raw_tif succeeds");
+        CHECK(Lower(fs::path(result.output_path).extension().string()) == ".tif", "folder_raw_tif tif extension");
+        CHECK(IsTiff(result.output_path), "folder_raw_tif tiff signature");
+    }
+
+    {
+        auto folder_inputs = FolderInputs("folder_raw_unknown_should_fail");
+        fs::path out = OutDir() / "folder_raw_unknown_should_fail.png";
+        auto settings = MakeSettings();
+        settings.output_format = burstmerge::OutputFormat::PNG;
+        auto result = RunBurstMerge(folder_inputs, settings, out);
+        CHECK(!result.success, "folder_raw_unknown_should_fail fails");
     }
 }
 
@@ -513,7 +574,7 @@ static void TestGroupCrossFormat()
 // ---------------------------------------------------------------------------
 static void TestGroupRejection()
 {
-    std::cout << "[test] group6 rejection..." << std::endl;
+    std::cout << "[test] group4 rejection..." << std::endl;
 
     // 6.1: CMYK TIFF rejection
     {
@@ -561,7 +622,7 @@ static void TestGroupRejection()
 // ---------------------------------------------------------------------------
 static void TestGroupBitDepthVerify()
 {
-    std::cout << "[test] group7 bit-depth verification..." << std::endl;
+    std::cout << "[test] group5 bit-depth verification..." << std::endl;
 
     if (!ToolExists("exiftool"))
     {
