@@ -47,11 +47,6 @@ bool IsDngPath(const std::string& path)
     return LowerExt(std::filesystem::path(path)) == ".dng";
 }
 
-bool LooksLikeDngOutputPath(const std::string& path)
-{
-    return IsDngPath(path);
-}
-
 std::string GenerateRunId()
 {
 #ifdef _WIN32
@@ -106,22 +101,6 @@ std::string MakeTempConvertDir(const std::string& output_path)
 }
 
 } // namespace
-
-std::string ResolveOutputPath(const std::string& output_path_or_dir)
-{
-    std::filesystem::path out(output_path_or_dir.empty() ? "." : output_path_or_dir);
-    if (LooksLikeDngOutputPath(out.string()))
-    {
-        if (out.has_parent_path())
-        {
-            std::filesystem::create_directories(out.parent_path());
-        }
-        return out.string();
-    }
-
-    std::filesystem::create_directories(out);
-    return (out / "burstmerge_output.dng").string();
-}
 
 std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_paths,
                                           const std::string& output_path,

@@ -16,6 +16,7 @@ struct WriteParams
 {
     OutputFormat format;
     uint32_t     bit_depth;
+    float        white_level = 255.0f; // input max value; writer scales to output bit depth
 };
 
 class ImageWriter
@@ -29,6 +30,19 @@ public:
 };
 
 std::unique_ptr<ImageWriter> SelectWriter(OutputFormat fmt);
+
+// String name for a concrete output format (never Auto).
+const char* OutputFormatToString(OutputFormat fmt);
+
+// Infer the effective output format from settings + input type.
+// Returns settings.output_format directly if not Auto;
+// otherwise auto-selects DNG (all RAW) or PNG (non-RAW / mixed).
+OutputFormat InferOutputFormat(const Settings& settings, bool all_raw);
+
+// Infer a concrete output format from a file path extension.
+// Returns fallback if the extension is unknown or missing.
+OutputFormat InferFormatFromExtension(const std::string& path,
+                                      OutputFormat fallback);
 
 // Helper: write DecodedImage (which may have is_raw metadata) to output.
 // For RAW -> non-DNG: writes Bayer mosaic grayscale without demosaic.

@@ -95,12 +95,12 @@ void PrintInputSummary(const std::vector<std::string>& inputs) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    cxxopts::Options opts("burstmerge", "Burst merge for RAW photos");
+    cxxopts::Options opts("burstmerge", "Burst merge for RAW / RGB photo bursts");
     opts.add_options()
-        ("i,input", "Input RAW/DNG files", cxxopts::value<std::vector<std::string>>())
-        ("o,output", "Output DNG path or output directory", cxxopts::value<std::string>()->default_value("./out"))
+        ("i,input", "Input RAW/DNG or image files (PNG/JPEG/BMP/TIFF)", cxxopts::value<std::vector<std::string>>())
+        ("o,output", "Output file path or output directory", cxxopts::value<std::string>()->default_value("./out"))
         ("t,tile", "Tile size", cxxopts::value<int>()->default_value("32"))
-        ("b,bit-depth", "Output bit depth (12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
+        ("b,bit-depth", "Output bit depth (8, 10, 12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
         ("f,frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
         ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal)", cxxopts::value<float>())
         ("merge-algo", "Merge algorithm: spatial, frequency, temporal", cxxopts::value<std::string>())
@@ -145,7 +145,6 @@ int main(int argc, char* argv[]) {
         std::cerr << "Invalid bit depth: " << bit_depth << " (use 8, 10, 12, 14, or 16)" << std::endl;
         return 2;
     }
-    settings.dng_bit_depth = bit_depth;
     settings.bit_depth = bit_depth;
     settings.merge_algo = burstmerge::MergeAlgorithm::Spatial;
     if (args.count("merge-algo") &&
@@ -202,7 +201,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Noise reduction: " << settings.noise_reduction << std::endl;
     std::cout << "Align gamma: " << settings.align_gamma << std::endl;
     std::cout << "Smooth tile field: " << (settings.smooth_tile_field ? "on" : "off") << std::endl;
-    std::cout << "Bit depth: " << settings.dng_bit_depth << std::endl;
+    std::cout << "Bit depth: " << settings.bit_depth << std::endl;
     std::cout << "Output format: ";
     switch (settings.output_format) {
         case burstmerge::OutputFormat::Auto: std::cout << "Auto"; break;

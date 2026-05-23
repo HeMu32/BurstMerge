@@ -279,30 +279,53 @@ elif all(!is_raw) → RGB 管线
 else → warn 非RAW跳过 → 过滤 → RAW 管线
 ```
 
-### `output_format` 优先级规则
+### `output_format` 推断优先级
 
 ```
-Settings.output_format 默认值 = OutputFormat::Auto (自动推断)
+Settings.output_format 默认值 = OutputFormat::Auto
 
-优先级:
-  1. 若 output_format != Auto → 使用该值
-  2. 若 output_format == Auto → 自动推断:
-     全 RAW        → DNG
-     全非 RAW      → PNG
-     空/混合(过滤后) → 按剩余输入类型
+推断链 (PipelineOrchestrator::Process):
+  1. 若 output_format != Auto → 直接使用该值 (不警告)
+  2. 若 output_format == Auto:
+     a. InferFormatFromExtension(output_path_or_dir, fallback)
+        - 匹配输出文件名扩展名:
+          .png            → PNG
+          .jpg / .jpeg    → JPEG
+          .bmp            → BMP
+          .tif / .tiff    → TIFF
+          .dng            → DNG
+        - 匹配成功 → 警告 "inferred {format} from filename extension"
+        - 无匹配 → 走 fallback:
+          - 全 RAW   → DNG  (警告 "defaulting to DNG")
+          - 非 RAW   → PNG  (警告 "defaulting to PNG")
+          - 混合输入 → 先过滤非RAW（警告 "Skipping non-RAW file"），
+                       剩余 RAW 走 RAW 管线
+
+WriteImage 内部格式决议也使用相同逻辑:
+  InferFormatFromExtension(path, InferOutputFormat(settings, all_raw))
+  确保实际写出的格式与输出文件扩展名一致。
+
+约束:
+  - DNG + 非 RAW 输入 → 报错 "Cannot output DNG for non-RAW inputs"
+  - JPEG / BMP 的 AdjustBitDepth → 强制降至 8-bit 并警告
+  - PNG / TIFF 的 AdjustBitDepth → 8-bit 或 16-bit (10/12/14 不可用, 降至 8bit 并警告)
 ```
 
 规则表：
 
-| 输入 | 用户指定 | 行为 |
-|---|---|---|
-| 全 RAW | `Auto` (未指定) | DNG |
-| 全 RAW | `PNG/JPEG/BMP/TIFF` | 警告后输出 Bayer mosaic |
-| 全 RAW | `DNG` | DNG (显式指定, 与非指定行为一致) |
-| 全非 RAW | `Auto` (未指定) | PNG |
-| 全非 RAW | `DNG` | 报错 |
-| 全非 RAW | PNG/JPEG/BMP/TIFF | 按指定 |
-| 混合 | 任意 | 过滤非RAW → 按RAW规则 |
+| 输入 | 用户指定 | 输出文件扩展名 | 实际输出 | 警告 |
+|---|---|---|---|---|
+| 全 RAW | `Auto` | `(无匹配/目录)` | DNG | "defaulting to DNG" |
+| 全 RAW | `Auto` | `.jpg` | JPEG | "inferred JPEG from filename extension" |
+| 全 RAW | `Auto` | `.png` | PNG | "inferred PNG from filename extension" (Bayer mosaic) |
+| 全 RAW | `PNG/JPEG/BMP/TIFF` | (任意) | 按指定 | 无 |
+| 全 RAW | `DNG` | (任意) | DNG | 无 |
+| 全非 RAW | `Auto` | `(无匹配/目录)` | PNG | "defaulting to PNG" |
+| 全非 RAW | `Auto` | `.jpg` | JPEG | "inferred JPEG from filename extension" |
+| 全非 RAW | `Auto` | `.dng` | 报错 | "Cannot output DNG for non-RAW" |
+| 全非 RAW | `PNG/JPEG/BMP/TIFF` | (任意) | 按指定 | 无 |
+| 全非 RAW | `DNG` | (任意) | 报错 | "Cannot output DNG for non-RAW" |
+| 混合 | 任意 | — | 过滤→RAW管线 | "Skipping non-RAW file" |
 
 ---
 

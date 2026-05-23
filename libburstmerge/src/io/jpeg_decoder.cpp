@@ -66,6 +66,28 @@ public:
         jpeg_create_decompress(&cinfo);
         jpeg_stdio_src(&cinfo, fp);
         jpeg_read_header(&cinfo, TRUE);
+
+        // Detect the actual color space for meaningful error reporting.
+        // num_components comes from the original encoding (set by read_header).
+        if (cinfo.num_components != 1 && cinfo.num_components != 3)
+        {
+            const char* cs_name = "unknown";
+            switch (cinfo.jpeg_color_space)
+            {
+                case JCS_CMYK:  cs_name = "CMYK";  break;
+                case JCS_YCCK:  cs_name = "YCCK";  break;
+                case JCS_YCbCr: cs_name = "YCbCr"; break;
+                default: break;
+            }
+            std::fclose(fp);
+            jpeg_destroy_decompress(&cinfo);
+            throw std::runtime_error(
+                std::string("JpegDecoder: unsupported color space ") + cs_name
+                + " (" + std::to_string(cinfo.num_components) + " components). "
+                "Only 1-channel (grayscale) and 3-channel (RGB) JPEG are supported. "
+                "Use an external tool to convert to sRGB first.");
+        }
+
         jpeg_start_decompress(&cinfo);
 
         uint32_t w = cinfo.output_width;
@@ -76,8 +98,7 @@ public:
         result.info.width     = w;
         result.info.height    = h;
         result.info.pix_fmt   = (channels == 1) ? kPixelGray
-                              : (channels == 3) ? kPixelRGB
-                              : kPixelRGBA;
+                              : kPixelRGB;
         result.info.bit_depth = 8;
         result.info.is_raw    = false;
         result.info.white_level = 255.0f;

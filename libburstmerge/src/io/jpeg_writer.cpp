@@ -59,6 +59,9 @@ public:
         jpeg_set_quality(&cinfo, 96, TRUE);
         jpeg_start_compress(&cinfo, TRUE);
 
+        float wl = (params.white_level > 1.0f) ? params.white_level : 255.0f;
+        float scale = (wl > 1.0f) ? (255.0f / wl) : 1.0f;
+
         std::vector<uint8_t> row(static_cast<size_t>(image.width) * channels);
         while (cinfo.next_scanline < cinfo.image_height)
         {
@@ -68,7 +71,7 @@ public:
                 size_t src = (static_cast<size_t>(y) * image.width + x) * channels;
                 for (uint32_t c = 0; c < channels; ++c)
                 {
-                    row[x * channels + c] = Quantize(image.data[src + c]);
+                    row[x * channels + c] = Quantize(image.data[src + c], scale);
                 }
             }
             uint8_t* row_ptr = row.data();
@@ -81,13 +84,14 @@ public:
     }
 
 private:
-    static uint8_t Quantize(float v)
+    static uint8_t Quantize(float v, float scale)
     {
-        int i = static_cast<int>(std::round(v));
+        int i = static_cast<int>(std::round(v * scale));
         if (i < 0) i = 0;
         if (i > 255) i = 255;
         return static_cast<uint8_t>(i);
     }
+
 };
 
 #else // !BURSTMERGE_HAVE_JPEG

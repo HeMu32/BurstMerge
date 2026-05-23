@@ -72,6 +72,11 @@ public:
         BmpInfoHeader ih;
         file.read(reinterpret_cast<char*>(&ih), sizeof(ih));
 
+        // biSize must be at least 40 (BITMAPINFOHEADER) to have biClrUsed.
+        if (ih.biSize < 40)
+        {
+            throw std::runtime_error("BmpDecoder: DIB header too small (need BITMAPINFOHEADER or later)");
+        }
         if (ih.biCompression != kBI_RGB)
         {
             throw std::runtime_error("BmpDecoder: only uncompressed BMP supported");
@@ -81,10 +86,67 @@ public:
             throw std::runtime_error("BmpDecoder: only 8-bit and 24-bit BMP supported");
         }
 
+        if (ih.biWidth <= 0)
+        {
+            throw std::runtime_error("BmpDecoder: invalid width (must be positive)");
+        }
+
+        if (ih.biPlanes != 1)
+        {
+            throw std::runtime_error("BmpDecoder: invalid biPlanes (must be 1)");
+        }
+
         bool top_down = ih.biHeight < 0;
         uint32_t h = static_cast<uint32_t>(std::abs(ih.biHeight));
         uint32_t w = static_cast<uint32_t>(ih.biWidth);
-        uint32_t channels = (ih.biBitCount == 24) ? 3 : 1;
+
+        if (w == 0 || h == 0)
+        {
+            throw std::runtime_error("BmpDecoder: zero dimensions");
+        }
+
+        // Validate bfOffBits is past the header (at minimum).
+        // Palette (if any) sits right after the DIB header.
+        uint32_t dib_end = sizeof(BmpFileHeader) + ih.biSize;
+        if (fh.bfOffBits < dib_end)
+        {
+            throw std::runtime_error("BmpDecoder: bfOffBits points inside DIB header");
+        }
+
+        // Read palette for 8-bit BMP.  biClrUsed tells us how many entries
+        // are actually present (clamped to 256 max).  If biClrUsed is 0,
+        // the full 256-entry palette is implied.
+        std::vector<uint8_t> palette;
+        uint32_t palette_byte_count = 0;
+        uint32_t pal_entries = 0;
+        uint32_t channels = 0;
+        if (ih.biBitCount == 8)
+        {
+            pal_entries = (ih.biClrUsed != 0) ? std::min(ih.biClrUsed, 256u) : 256u;
+            palette_byte_count = pal_entries * 4; // each entry is BGRA
+            palette.resize(palette_byte_count, 0);
+
+            // Seek to the palette which starts right after the DIB header.
+            file.seekg(dib_end);
+            file.read(reinterpret_cast<char*>(palette.data()), palette_byte_count);
+            if (file.gcount() != static_cast<std::streamsize>(palette_byte_count))
+            {
+                throw std::runtime_error("BmpDecoder: truncated palette");
+            }
+
+            channels = 3; // palette expand to RGB
+        }
+        else
+        {
+            channels = 3; // 24-bit BMP
+        }
+
+        // bfOffBits must be past palette end (if palette exists).
+        uint32_t min_data_offset = dib_end + palette_byte_count;
+        if (fh.bfOffBits < min_data_offset)
+        {
+            throw std::runtime_error("BmpDecoder: bfOffBits overlaps palette");
+        }
 
         uint32_t row_bytes = ((w * ih.biBitCount + 31) / 32) * 4;
 
@@ -95,7 +157,7 @@ public:
         DecodedImage result;
         result.info.width     = w;
         result.info.height    = h;
-        result.info.pix_fmt   = (channels == 3) ? kPixelRGB : kPixelGray;
+        result.info.pix_fmt   = kPixelRGB; // palette-expanded or native BGR→RGB
         result.info.bit_depth = 8;
         result.info.is_raw    = false;
         result.info.white_level = 255.0f;
@@ -105,12 +167,16 @@ public:
         for (uint32_t y = 0; y < h; ++y)
         {
             file.read(reinterpret_cast<char*>(raw_row.data()), row_bytes);
+            if (file.gcount() != static_cast<std::streamsize>(row_bytes))
+            {
+                throw std::runtime_error("BmpDecoder: truncated pixel data");
+            }
             uint32_t dst_y = top_down ? y : (h - 1 - y);
 
             for (uint32_t x = 0; x < w; ++x)
             {
                 size_t dst_idx = (static_cast<size_t>(dst_y) * w + x) * channels;
-                if (channels == 3)
+                if (ih.biBitCount == 24)
                 {
                     // BMP stores BGR
                     result.pixels[dst_idx + 0] = static_cast<float>(raw_row[x * 3 + 2]); // R
@@ -119,7 +185,19 @@ public:
                 }
                 else
                 {
-                    result.pixels[dst_idx] = static_cast<float>(raw_row[x]);
+                    // 8-bit: look up palette entry (BGRA layout)
+                    uint8_t idx = raw_row[x];
+                    if (idx >= pal_entries)
+                    {
+                        throw std::runtime_error("BmpDecoder: palette index out of range");
+                    }
+                    size_t pal_off = static_cast<size_t>(idx) * 4;
+                    float r = static_cast<float>(palette[pal_off + 2]);
+                    float g = static_cast<float>(palette[pal_off + 1]);
+                    float b = static_cast<float>(palette[pal_off + 0]);
+                    result.pixels[dst_idx + 0] = r;
+                    result.pixels[dst_idx + 1] = g;
+                    result.pixels[dst_idx + 2] = b;
                 }
             }
         }

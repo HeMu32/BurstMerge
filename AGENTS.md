@@ -21,3 +21,5 @@ DNG格式参考 DNG_Spec_1_7_1_0
 	- build/: CMake 生成的构建输出目录。
 
 你还有一些样本文件 (包括Sample sequences), 在 (工作区根目录)\libburstmerge\test\samples\ 下. 当任何时候你需要样本文件的时候, 都可以查看这个文件夹. 其中 Seq 开头的文件夹包含一个曝光值恒定 (或者接近恒定) 的连拍序列; Bkt 开头的文件夹包含一个曝光包围序列. 部分样本文件和序列还被测试用例所引用. 
+
+PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它们辅助排查. 

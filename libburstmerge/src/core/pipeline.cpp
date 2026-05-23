@@ -34,15 +34,22 @@ void Report(const ProgressFn& progress, float percent, const std::string& stage)
     if (progress) progress(percent, stage);
 }
 
-uint32_t ResolveTargetWhiteLevel(int dng_bit_depth, uint32_t sensor_white)
+uint32_t ResolveTargetWhiteLevel(int bit_depth, uint32_t sensor_white)
 {
-    switch (dng_bit_depth)
+    if (bit_depth <= 0)
     {
-        case 12: return 4095;
-        case 14: return 16383;
-        case 16: return 65535;
-        default: return sensor_white;
+        std::fprintf(stderr, "[WARN] ResolveTargetWhiteLevel: requested bit_depth=%d <= 0; falling back to sensor white level %u\n", bit_depth, sensor_white);
+        return sensor_white;
     }
+
+    if (bit_depth > 16)
+    {   // illegal for current DNG container — keep sensor white level unchanged
+        std::fprintf(stderr, "[WARN] ResolveTargetWhiteLevel: requested bit_depth=%d out of range [1..16]; falling back to sensor white level %u\n", bit_depth, sensor_white);
+        return sensor_white;
+    }
+
+    // Supported bit depths: compute target white level directly.
+    return (1u << bit_depth) - 1u;
 }
 // RAW extensions known to the Adobe DNG Converter
 bool IsRawExtension(const std::string& ext)
@@ -53,7 +60,7 @@ bool IsRawExtension(const std::string& ext)
         ".orf", ".raf", ".rw2", ".pef", ".srw", ".x3f",
         ".sr2", ".srf", ".kdc", ".dcr", ".k25", ".mdc",
         ".mef", ".mrw", ".iiq", ".eip", ".bay", ".3fr",
-        ".fff", ".mos", ".tif", ".tiff"  // TIFF may be camera RAW
+        ".fff", ".mos"
     };
     for (const char* re : raw_exts)
     {
@@ -91,6 +98,70 @@ static InputClass ClassifyInputs(const std::vector<std::string>& paths)
     if (has_raw && has_rgb) return InputClass::Mixed;
     if (has_rgb) return InputClass::Rgb;
     return InputClass::RAW;
+}
+
+// Format-aware output path resolution, shared by all three pipeline paths.
+//   - If path has an extension → treat as explicit file path.
+//     If the extension does not match the selected format, it is silently
+//     corrected to the canonical extension for that format.
+//   - If no extension → treat as directory, create it, and append
+//     "burstmerge_output.<fmt_ext>".
+static const char* CanonicalExt(OutputFormat fmt)
+{
+    switch (fmt)
+    {
+        case OutputFormat::PNG:  return ".png";
+        case OutputFormat::JPEG: return ".jpg";
+        case OutputFormat::BMP:  return ".bmp";
+        case OutputFormat::TIFF: return ".tif";
+        case OutputFormat::DNG:  return ".dng";
+        default:
+        case OutputFormat::Auto: return ".png";
+    }
+}
+
+static std::string ResolveImageOutputPath(const std::string& output_path_or_dir,
+                                           OutputFormat fmt)
+{
+    const char* def_ext = CanonicalExt(fmt);
+
+    std::filesystem::path out(output_path_or_dir.empty() ? "." : output_path_or_dir);
+
+    std::string ext = out.extension().string();
+    for (auto& c : ext)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    if (!ext.empty())
+    {
+        // Correct mismatched extension when format is explicitly known (not Auto).
+        if (fmt != OutputFormat::Auto)
+        {
+            bool match = false;
+            switch (fmt)
+            {
+                case OutputFormat::JPEG:
+                    match = (ext == ".jpg" || ext == ".jpeg");
+                    break;
+                case OutputFormat::TIFF:
+                    match = (ext == ".tif" || ext == ".tiff");
+                    break;
+                default:
+                    match = (ext == std::string(def_ext));
+                    break;
+            }
+            if (!match)
+                out.replace_extension(def_ext);
+        }
+
+        std::error_code ec;
+        if (out.has_parent_path())
+            std::filesystem::create_directories(out.parent_path(), ec);
+        return out.string();
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(out, ec);
+    return (out / ("burstmerge_output" + std::string(def_ext))).string();
 }
 
 } // namespace
@@ -132,7 +203,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 std::string ext = fp.extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(),
                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                if (ext == ".dng" || IsRawExtension(ext))
+                // Keep RAW files + unknown extension files (they will fail
+                // in PrepareDngInputs with a clear error, rather than being
+                // silently dropped — see audit A.3/C.4).
+                if (IsRawExtension(ext) || ext == ".dng" || !IsImageExtension(ext))
                 {
                     filtered.push_back(p);
                 } else
@@ -226,36 +300,44 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 merged = SpatialMerge(float_images[ref_idx], aligned, params);
             }
 
-            std::string output_path = output_path_or_dir;
-            if (output_path.empty())
+            // Resolve output format (never Auto at this point).
+            OutputFormat eff_fmt;
+            if (settings_.output_format != OutputFormat::Auto)
             {
-                output_path = "burstmerge_output.png";
-            }
-            else
+                eff_fmt = settings_.output_format;
+            } else
             {
-                // Determine if path looks like a file (has extension) or directory
-                std::string ext = std::filesystem::path(output_path).extension().string();
-                bool has_ext = !ext.empty();
-                if (!has_ext)
+                OutputFormat fallback = io::InferOutputFormat(settings_, false);
+                eff_fmt = io::InferFormatFromExtension(output_path_or_dir, fallback);
+                if (eff_fmt != fallback)
                 {
-                    // Treat as directory: create and append default filename
-                    std::error_code ec;
-                    std::filesystem::create_directories(output_path, ec);
-                    output_path = (std::filesystem::path(output_path) / "burstmerge_output.png").string();
+                    Report(progress, PipelineConstants::kProgressMerge,
+                        "Warning: output format not specified — inferred "
+                        + std::string(io::OutputFormatToString(eff_fmt))
+                        + " from filename extension");
+                } else
+                {
+                    Report(progress, PipelineConstants::kProgressMerge,
+                        "Warning: output format not specified — defaulting to "
+                        + std::string(io::OutputFormatToString(eff_fmt)));
                 }
-                else
+            }
+            std::string output_path = ResolveImageOutputPath(output_path_or_dir, eff_fmt);
+            io::WriteImage(output_path, merged, decoded, settings_);
+
+            {
+                std::fprintf(stderr, "\nOutput: %s\n", output_path.c_str());
+                std::fprintf(stderr, "  Format:   %s\n", io::OutputFormatToString(eff_fmt));
+                std::fprintf(stderr, "  Bit depth: %u\n", settings_.bit_depth);
+                if (!decoded.empty())
                 {
-                    // Treat as file path: ensure parent dir exists
-                    std::error_code ec;
-                    auto parent = std::filesystem::path(output_path).parent_path();
-                    if (!parent.empty())
+                    const auto& tags = decoded[0].info.tags;
+                    for (const auto& [key, val] : tags)
                     {
-                        std::filesystem::create_directories(parent, ec);
+                        std::fprintf(stderr, "  %s: %s\n", key.c_str(), val.c_str());
                     }
                 }
             }
-
-            io::WriteImage(output_path, merged, decoded, settings_);
 
             Report(progress, PipelineConstants::kProgressDone, "Done");
             if (ProfileEnabled())
@@ -267,10 +349,12 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
 
         // ---- RAW pipeline ----
-        std::string output_path = ResolveOutputPath(output_path_or_dir);
+        // Use output_path_or_dir as conversion context only;
+        // final output path is resolved after format decision below.
+        std::string convert_ctx = output_path_or_dir.empty() ? "." : output_path_or_dir;
         Report(progress, 0.02f, "Preparing inputs");
         convert_dir_.clear();
-        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, output_path, progress, convert_dir_);
+        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
         Report(progress, PipelineConstants::kProgressDecodeStart, "Reading and decoding DNG files");
@@ -397,7 +481,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 // Compute bit-depth rescaling factor (must happen in black-subtracted space)
         float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
         uint32_t sensor_white = images[ref_idx].metadata.white_level;
-        uint32_t target_white = ResolveTargetWhiteLevel(settings_.dng_bit_depth,
+        uint32_t target_white = ResolveTargetWhiteLevel(settings_.bit_depth,
                                                         sensor_white);
         float bit_scale = (target_white != sensor_white && sensor_white > 0)
             ? static_cast<float>(target_white) / static_cast<float>(sensor_white)
@@ -486,40 +570,96 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                                                images[ref_idx].metadata.mosaic_pattern_width);
         }
 
-        Report(progress, PipelineConstants::kProgressQuantize, "Quantizing float image to UInt16");
-        HostBuffer averaged = FloatImageToUint16HostBuffer(merged, target_white);
-
-        Report(progress, PipelineConstants::kProgressContainer, "Preparing output DNG container");
-        RawImage output;
-        output.metadata = std::move(images[ref_idx].metadata);
-        output.metadata.white_level = target_white;
-        if (bit_scale != 1.0f && ref_bl > 1.0f)
+        // Determine effective output format (never Auto at this point).
+        OutputFormat eff_fmt;
+        if (settings_.output_format != OutputFormat::Auto)
         {
-            for (int i = 0; i < 4; ++i)
+            eff_fmt = settings_.output_format;
+        } else
+        {
+            OutputFormat fallback = io::InferOutputFormat(settings_, true);
+            eff_fmt = io::InferFormatFromExtension(output_path_or_dir, fallback);
+            if (eff_fmt != fallback)
             {
-                if (output.metadata.black_level[i] > 0.0f)
+                Report(progress, PipelineConstants::kProgressMerge,
+                    "Warning: output format not specified — inferred "
+                    + std::string(io::OutputFormatToString(eff_fmt))
+                    + " from filename extension");
+            } else
+            {
+                Report(progress, PipelineConstants::kProgressMerge,
+                    "Warning: output format not specified — defaulting to "
+                    + std::string(io::OutputFormatToString(eff_fmt)));
+            }
+        }
+        bool want_dng = (eff_fmt == OutputFormat::DNG);
+
+        // Resolve output path after format decision (see audit A.1)
+        std::string output_path = ResolveImageOutputPath(output_path_or_dir, eff_fmt);
+
+        if (want_dng)
+        {
+            Report(progress, PipelineConstants::kProgressQuantize, "Quantizing float image to UInt16");
+            HostBuffer averaged = FloatImageToUint16HostBuffer(merged, target_white);
+
+            Report(progress, PipelineConstants::kProgressContainer, "Preparing output DNG container");
+            RawImage output;
+            output.metadata = std::move(images[ref_idx].metadata);
+            output.metadata.white_level = target_white;
+            if (bit_scale != 1.0f && ref_bl > 1.0f)
+            {
+                for (int i = 0; i < 4; ++i)
                 {
-                    output.metadata.black_level[i] *= bit_scale;
+                    if (output.metadata.black_level[i] > 0.0f)
+                    {
+                        output.metadata.black_level[i] *= bit_scale;
+                    }
                 }
             }
-        }
-        output.pixels = std::move(averaged);
+            output.pixels = std::move(averaged);
 
-        Report(progress, PipelineConstants::kProgressWrite, "Writing output DNG file");
-        io::SetDngWhiteLevel(output.metadata.dng_negative, target_white);
-        if (bit_scale != 1.0f && ref_bl > 1.0f)
-        {
-            float scaled_bl[4];
-            // Use the (already-moved) output metadata's black_level (which was scaled above)
-            // to avoid reading from the moved-from images[ref_idx].
-            for (int i = 0; i < 4; ++i)
+            Report(progress, PipelineConstants::kProgressWrite, "Writing output DNG file");
+            io::SetDngWhiteLevel(output.metadata.dng_negative, target_white);
+            if (bit_scale != 1.0f && ref_bl > 1.0f)
             {
-                scaled_bl[i] = output.metadata.black_level[i];
+                float scaled_bl[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                    scaled_bl[i] = output.metadata.black_level[i];
+                }
+                io::SetDngBlackLevel(output.metadata.dng_negative, scaled_bl);
             }
-            io::SetDngBlackLevel(output.metadata.dng_negative, scaled_bl);
+            DngWriter writer(output.metadata.dng_negative);
+            writer.Write(output_path.c_str(), output);
         }
-        DngWriter writer(output.metadata.dng_negative);
-        writer.Write(output_path.c_str(), output);
+        else
+        {
+            // RAW → non-DNG: write Bayer mosaic grayscale with white-point scaling
+            Report(progress, PipelineConstants::kProgressQuantize, "Writing RAW as non-DNG (Bayer mosaic)");
+
+            io::DecodedImage raw_decoded;
+            raw_decoded.info.width     = images[ref_idx].metadata.width;
+            raw_decoded.info.height    = images[ref_idx].metadata.height;
+            raw_decoded.info.pix_fmt   = io::kPixelGray;
+            raw_decoded.info.bit_depth = settings_.bit_depth;
+            raw_decoded.info.is_raw    = true;
+            raw_decoded.info.white_level = static_cast<float>(target_white);
+            raw_decoded.info.iso_exposure_time = images[ref_idx].metadata.iso_exposure_time;
+            raw_decoded.info.exposure_bias     = images[ref_idx].metadata.exposure_bias;
+            raw_decoded.pixels = merged.data;
+
+            // Build single-element input vector so WriteImage can infer format
+            std::vector<io::DecodedImage> raw_inputs;
+            raw_inputs.push_back(raw_decoded);
+
+            io::WriteImage(output_path, merged, raw_inputs, settings_);
+        }
+
+        {
+            std::fprintf(stderr, "\nOutput: %s\n", output_path.c_str());
+            std::fprintf(stderr, "  Format:   %s\n", io::OutputFormatToString(eff_fmt));
+            std::fprintf(stderr, "  Bit depth: %u\n", settings_.bit_depth);
+        }
 
         Report(progress, PipelineConstants::kProgressDone, "Done");
         result =

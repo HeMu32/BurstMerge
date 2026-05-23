@@ -130,7 +130,7 @@ void TestBitDepthOutput(const std::string& name, const std::string& input, int b
 
     burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
     burstmerge::Settings settings;
-    settings.dng_bit_depth = bit_depth;
+    settings.bit_depth = bit_depth;
     bm.Configure(settings);
 
     bm.AddImage(input);

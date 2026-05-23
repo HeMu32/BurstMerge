@@ -98,17 +98,17 @@ public:
             png_set_tRNS_to_alpha(png);
         }
 
+        // Handle 16-bit: swap byte order for host endianness
         if (bit_depth == 16)
-        {
-            png_set_scale_16(png);
-            bit_depth = 8;
-        }
+            png_set_swap(png);
 
-        if (color_type == PNG_COLOR_TYPE_GRAY ||
-            color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
-        {
-            png_set_gray_to_rgb(png);
-        }
+        // Ensure grayscale images end up with exactly 1 channel.
+        // This handles both direct GRAY_ALPHA and GRAY + tRNS (after the
+        // png_set_tRNS_to_alpha transform above both become GRAY_ALPHA
+        // internally, but color_type still says GRAY for the latter case).
+        // png_set_strip_alpha is a no-op on images without alpha.
+        if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA)
+            png_set_strip_alpha(png);
 
         png_read_update_info(png, info);
 
@@ -118,23 +118,48 @@ public:
         DecodedImage result;
         result.info.width     = w;
         result.info.height    = h;
-        result.info.pix_fmt   = (channels == 3) ? kPixelRGB : kPixelRGBA;
-        result.info.bit_depth = 8;
-        result.info.is_raw    = false;
-        result.info.white_level = 255.0f;
-
-        result.pixels.resize(static_cast<size_t>(w) * h * channels);
-
-        std::vector<uint8_t> row(row_bytes);
-        for (uint32_t y = 0; y < h; ++y)
+        // Use channels from png_get_channels; after the transforms above
+        // (strip_alpha for all GRAY cases, pallete→RGB, etc.) the count is
+        // reliable.  Defensively re-read color_type to validate.
         {
-            png_read_row(png, row.data(), nullptr);
-            for (uint32_t x = 0; x < w; ++x)
+            int final_ct = png_get_color_type(png, info);
+            (void)final_ct;
+        }
+        result.info.pix_fmt   = (channels == 1) ? kPixelGray
+                              : (channels == 3) ? kPixelRGB
+                              : kPixelRGBA;
+        result.info.bit_depth = (bit_depth == 16) ? 16 : 8;
+        result.info.is_raw    = false;
+        result.info.white_level = (bit_depth == 16) ? 65535.0f : 255.0f;
+
+        size_t num_pixels = static_cast<size_t>(w) * h;
+        result.pixels.resize(num_pixels * channels);
+
+        if (bit_depth == 16)
+        {
+            std::vector<uint16_t> row(w * channels);
+            for (uint32_t y = 0; y < h; ++y)
             {
-                size_t dst = (static_cast<size_t>(y) * w + x) * channels;
-                for (uint32_t c = 0; c < channels; ++c)
+                png_read_row(png, reinterpret_cast<png_bytep>(row.data()), nullptr);
+                for (uint32_t x = 0; x < w; ++x)
                 {
-                    result.pixels[dst + c] = static_cast<float>(row[x * channels + c]);
+                    size_t dst = (static_cast<size_t>(y) * w + x) * channels;
+                    for (uint32_t c = 0; c < channels; ++c)
+                        result.pixels[dst + c] = static_cast<float>(row[x * channels + c]);
+                }
+            }
+        }
+        else
+        {
+            std::vector<uint8_t> row(row_bytes);
+            for (uint32_t y = 0; y < h; ++y)
+            {
+                png_read_row(png, row.data(), nullptr);
+                for (uint32_t x = 0; x < w; ++x)
+                {
+                    size_t dst = (static_cast<size_t>(y) * w + x) * channels;
+                    for (uint32_t c = 0; c < channels; ++c)
+                        result.pixels[dst + c] = static_cast<float>(row[x * channels + c]);
                 }
             }
         }

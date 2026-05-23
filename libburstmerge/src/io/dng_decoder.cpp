@@ -38,7 +38,11 @@ public:
                                 : raw.metadata.white_level <= 16383 ? 14
                                 : 16;
         result.info.is_float    = (raw.metadata.dng_pixel_type == DngPixelType::Float32);
-        result.info.pix_fmt     = kPixelGray;
+        // pix_fmt must match the actual channel count from the HostBuffer format.
+        // R16_Uint / R8_Uint / R32_Float → 1 channel → kPixelGray.
+        // RGBA32_Float                → 4 channels → kPixelRGBA.
+        result.info.pix_fmt     = (raw.pixels.format == PixelFormat::RGBA32_Float)
+                                ? kPixelRGBA : kPixelGray;
         result.info.is_raw      = true;
 
         result.info.iso_exposure_time = raw.metadata.iso_exposure_time;

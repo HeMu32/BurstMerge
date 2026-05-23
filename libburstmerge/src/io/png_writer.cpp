@@ -95,8 +95,9 @@ public:
 
         png_write_info(png, info);
 
-        double max_val = (bit_depth == 16) ? 65535.0 : 255.0;
-        double white = static_cast<double>(params.bit_depth <= 8 ? 255 : 65535);
+        double wl = (params.white_level > 1.0) ? static_cast<double>(params.white_level) : 255.0;
+        double output_max = (bit_depth == 16) ? 65535.0 : 255.0;
+        double scale = (wl > 1.0) ? (output_max / wl) : 1.0;
 
         std::vector<uint8_t> row8;
         std::vector<uint16_t> row16;
@@ -111,7 +112,7 @@ public:
                     size_t src = (static_cast<size_t>(y) * image.width + x) * channels;
                     for (uint32_t c = 0; c < channels; ++c)
                     {
-                        double v = std::min(std::max(static_cast<double>(image.data[src + c]), 0.0), white);
+                        double v = std::min(std::max(static_cast<double>(image.data[src + c]) * scale, 0.0), output_max);
                         row16[x * channels + c] = static_cast<uint16_t>(std::round(v));
                     }
                 }
@@ -125,7 +126,7 @@ public:
                     size_t src = (static_cast<size_t>(y) * image.width + x) * channels;
                     for (uint32_t c = 0; c < channels; ++c)
                     {
-                        double v = std::min(std::max(static_cast<double>(image.data[src + c]), 0.0), 255.0);
+                        double v = std::min(std::max(static_cast<double>(image.data[src + c]) * scale, 0.0), output_max);
                         row8[x * channels + c] = static_cast<uint8_t>(std::round(v));
                     }
                 }

@@ -63,7 +63,9 @@ public:
         TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
         TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
 
-        double max_val = (bps == 16) ? 65535.0 : 255.0;
+        double wl = (params.white_level > 1.0f) ? static_cast<double>(params.white_level) : 255.0;
+        double output_max = (bps == 16) ? 65535.0 : 255.0;
+        double scale = (wl > 1.0) ? (output_max / wl) : 1.0;
 
         if (bps == 16)
         {
@@ -75,7 +77,7 @@ public:
                     size_t src = (static_cast<size_t>(y) * image.width + x) * channels;
                     for (uint32_t c = 0; c < channels; ++c)
                     {
-                        double v = std::min(std::max(static_cast<double>(image.data[src + c]), 0.0), max_val);
+                        double v = std::min(std::max(static_cast<double>(image.data[src + c]) * scale, 0.0), output_max);
                         scanline[x * channels + c] = static_cast<uint16_t>(std::round(v));
                     }
                 }
@@ -96,7 +98,7 @@ public:
                     size_t src = (static_cast<size_t>(y) * image.width + x) * channels;
                     for (uint32_t c = 0; c < channels; ++c)
                     {
-                        double v = std::min(std::max(static_cast<double>(image.data[src + c]), 0.0), 255.0);
+                        double v = std::min(std::max(static_cast<double>(image.data[src + c]) * scale, 0.0), output_max);
                         scanline[x * channels + c] = static_cast<uint8_t>(std::round(v));
                     }
                 }
