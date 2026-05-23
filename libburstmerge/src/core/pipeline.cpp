@@ -247,7 +247,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             {
                 RawImage ri;
                 ri.metadata.white_level = static_cast<uint32_t>(d.info.white_level);
-                ri.metadata.iso_exposure_time = d.info.iso_exposure_time;
+                ri.metadata.ev_value = d.info.ev_value;
                 ri.metadata.exposure_bias = d.info.exposure_bias;
                 std::memcpy(ri.metadata.black_level, d.info.black_level, sizeof(float) * 4);
                 ri.metadata.mosaic_pattern_width = 0;
@@ -406,17 +406,17 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
         uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
         std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, progress);
-        float ref_iso = images[ref_idx].metadata.iso_exposure_time;
+        float ref_ev = images[ref_idx].metadata.ev_value;
         float ref_bias = images[ref_idx].metadata.exposure_bias;
         std::vector<float> exp_scales;
         exp_scales.reserve(images.size());
         for (size_t i = 0; i < images.size(); ++i)
         {
             if (i == ref_idx) continue;
-            float comp_iso = images[i].metadata.iso_exposure_time;
-            if (ref_iso > 0.0f && comp_iso > 0.0f)
+            float comp_ev = images[i].metadata.ev_value;
+            if (ref_ev > 0.0f && comp_ev > 0.0f)
             {
-                exp_scales.push_back((ref_iso / comp_iso) *
+                exp_scales.push_back((ref_ev / comp_ev) *
                     std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
             } else
             {
@@ -644,7 +644,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             raw_decoded.info.bit_depth = settings_.bit_depth;
             raw_decoded.info.is_raw    = true;
             raw_decoded.info.white_level = static_cast<float>(target_white);
-            raw_decoded.info.iso_exposure_time = images[ref_idx].metadata.iso_exposure_time;
+            raw_decoded.info.ev_value = images[ref_idx].metadata.ev_value;
             raw_decoded.info.exposure_bias     = images[ref_idx].metadata.exposure_bias;
             raw_decoded.pixels = merged.data;
 

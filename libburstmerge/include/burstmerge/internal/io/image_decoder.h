@@ -28,7 +28,7 @@ struct ImageMetadata
     uint32_t  bit_depth   = 8;
     bool      is_float    = false;
 
-    float     iso_exposure_time   = 0.0f;
+    float     ev_value            = 0.0f;
     float     exposure_bias       = 0.0f;
     float     white_level         = 255.0f;
     float     black_level[4]      = {};

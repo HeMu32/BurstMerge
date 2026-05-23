@@ -331,7 +331,7 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     exposure_order.reserve(raw_images.size());
     for (size_t i = 0; i < raw_images.size(); ++i)
     {
-        float v = raw_images[i].metadata.iso_exposure_time;
+        float v = raw_images[i].metadata.ev_value;
         if (v > 0.0f)
         {
             has_exposure = true;
@@ -341,12 +341,13 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         }
     }
 
-    const bool use_transmission = settings.alignment_mode == AlignmentMode::DenseTile &&
-                                  has_exposure && !exposure_order.empty() &&
+    const bool use_transmission = has_exposure && !exposure_order.empty() &&
                                   max_exp > min_exp * std::pow(2.0f, PipelineConstants::kBracketTransmissionFallbackEv);
+                                  // Enable chained alignment for dense mode + bracketed stacks
 
     if (!use_transmission)
     {
+        std::fprintf(stderr, "[DEBUG] BuildAlignedComparisons: fixed-reference alignment (ref=#%zu)\n", ref_idx);
         const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
         aligned.clear();
         aligned.reserve(total);
@@ -364,6 +365,9 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         }
         return aligned;
     }
+
+    std::fprintf(stderr, "[DEBUG] BuildAlignedComparisons: chained alignment (ref=#%zu, %zu frames)\n",
+        ref_idx, exposure_order.size());
 
     std::sort(exposure_order.begin(), exposure_order.end(),
               [](const auto& a, const auto& b)
@@ -391,6 +395,9 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     {
         size_t parent_idx = exposure_order[pos].second;
         size_t child_idx = exposure_order[pos - 1].second;
+        std::fprintf(stderr, "[DEBUG] Chained align: frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
+            child_idx, exposure_order[pos - 1].first,
+            parent_idx, exposure_order[pos].first);
         const FloatImage& parent_ref = has_aligned[parent_idx]
             ? aligned_to_root[parent_idx] : float_images[parent_idx];
         FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);
@@ -403,6 +410,9 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     {
         size_t parent_idx = exposure_order[pos - 1].second;
         size_t child_idx = exposure_order[pos].second;
+        std::fprintf(stderr, "[DEBUG] Chained align: frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
+            child_idx, exposure_order[pos].first,
+            parent_idx, exposure_order[pos - 1].first);
         const FloatImage& parent_ref = has_aligned[parent_idx]
             ? aligned_to_root[parent_idx] : float_images[parent_idx];
         FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);

@@ -75,7 +75,7 @@ RawImage DngReader::Read()
         result.metadata.mosaic_pattern_width = pat_w;
         io::ExtractExposureMetadata(holder,
             result.metadata.exposure_bias,
-            result.metadata.iso_exposure_time);
+            result.metadata.ev_value);
 
         // Determine the actual DNG pixel type for the output buffer
         const dng_image* raw = negative.Stage1Image();

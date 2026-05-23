@@ -209,7 +209,7 @@ void TestSingleFrameProcessing(const std::string& name,
 
     burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
     burstmerge::Settings settings;
-    settings.dng_bit_depth = 14;
+    settings.bit_depth = 14;
     bm.Configure(settings);
 
     int progress_calls = 0;
@@ -268,7 +268,7 @@ void TestMultiFrameProcessing(const std::string& name,
 
     burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
     burstmerge::Settings settings;
-    settings.dng_bit_depth = 14;
+    settings.bit_depth = 14;
     bm.Configure(settings);
 
     int progress_calls = 0;

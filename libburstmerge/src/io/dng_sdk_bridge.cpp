@@ -233,10 +233,10 @@ void ExtractRawMetadata(DngNegativeHolder* holder,
 
 void ExtractExposureMetadata(DngNegativeHolder* holder,
                              float& exposure_bias,
-                             float& iso_exposure_time)
+                             float& ev_value)
 {
     exposure_bias = 0.0f;
-    iso_exposure_time = 0.0f;
+    ev_value = 0.0f;
 
     if (!holder || !holder->negative) return;
 
@@ -257,9 +257,21 @@ void ExtractExposureMetadata(DngNegativeHolder* holder,
         iso = exif->fStandardOutputSensitivity;
     }
 
-    if (exposure_time > 0.0 && iso > 0)
+    real64 fnumber = 0.0;
+    if (exif->fFNumber.IsValid())
     {
-        iso_exposure_time = static_cast<float>(exposure_time * static_cast<real64>(iso));
+        fnumber = exif->fFNumber.As_real64();
+    }
+
+    if (exposure_time > 0.0 && iso > 0 && fnumber > 0.0)
+    {
+        // Ev = exposure_time * ISO / fnumber^2
+        ev_value = static_cast<float>(exposure_time * static_cast<real64>(iso) / (fnumber * fnumber));
+    }
+    else if (exposure_time > 0.0 && iso > 0)
+    {
+        // Fallback: no aperture data
+        ev_value = static_cast<float>(exposure_time * static_cast<real64>(iso));
     }
 }
 
@@ -300,7 +312,7 @@ RawMetadata::RawMetadata(RawMetadata&& other) noexcept
       mosaic_pattern(std::move(other.mosaic_pattern)),
       white_level(other.white_level),
       exposure_bias(other.exposure_bias),
-      iso_exposure_time(other.iso_exposure_time),
+      ev_value(other.ev_value),
       dng_pixel_type(other.dng_pixel_type),
       dng_negative(other.dng_negative)
 {
@@ -326,7 +338,7 @@ RawMetadata& RawMetadata::operator=(RawMetadata&& other) noexcept
         mosaic_pattern = std::move(other.mosaic_pattern);
         white_level = other.white_level;
         exposure_bias = other.exposure_bias;
-        iso_exposure_time = other.iso_exposure_time;
+        ev_value = other.ev_value;
         dng_pixel_type = other.dng_pixel_type;
         dng_negative = other.dng_negative; other.dng_negative = nullptr;
         for (int i = 0; i < 4; i++)

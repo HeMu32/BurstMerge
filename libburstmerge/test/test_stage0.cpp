@@ -187,8 +187,8 @@ static void test_dng_reader()
              "DNG dng_negative not null");
     CHECK(image.metadata.exposure_bias >= -16.0f && image.metadata.exposure_bias <= 16.0f,
           "DNG exposure_bias in sane range");
-    CHECK(image.metadata.iso_exposure_time > 0.0f,
-          "DNG iso_exposure_time > 0");
+    CHECK(image.metadata.ev_value > 0.0f,
+          "DNG ev_value > 0");
 
     std::cout << "  DNG: " << image.metadata.width << "x"
               << image.metadata.height

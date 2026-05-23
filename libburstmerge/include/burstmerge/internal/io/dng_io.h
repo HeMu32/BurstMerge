@@ -66,7 +66,7 @@ struct RawMetadata
     float     color_factors[4]    =
     {1.0f, 1.0f, 1.0f, 1.0f};
     float     exposure_bias       = 0.0f;
-    float     iso_exposure_time   = 0.0f;
+    float     ev_value            = 0.0f;
     DngPixelType dng_pixel_type   = DngPixelType::Uint16;
 
     // Opaque handle to DNG SDK internal negative (lifecycle managed internally)

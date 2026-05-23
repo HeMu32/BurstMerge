@@ -45,7 +45,7 @@ public:
                                 ? kPixelRGBA : kPixelGray;
         result.info.is_raw      = true;
 
-        result.info.iso_exposure_time = raw.metadata.iso_exposure_time;
+        result.info.ev_value = raw.metadata.ev_value;
         result.info.exposure_bias     = raw.metadata.exposure_bias;
         result.info.white_level       = static_cast<float>(raw.metadata.white_level);
         std::memcpy(result.info.black_level, raw.metadata.black_level, sizeof(float) * 4);
