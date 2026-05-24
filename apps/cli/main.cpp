@@ -74,6 +74,17 @@ bool ParseExposureCurveMode(const std::string& value, burstmerge::ExposureCurveM
     return false;
 }
 
+bool ParseOutputFormat(const std::string& value, burstmerge::OutputFormat& out) {
+    std::string v = Lower(value);
+    if (v == "auto") { out = burstmerge::OutputFormat::Auto; return true; }
+    if (v == "png")  { out = burstmerge::OutputFormat::PNG; return true; }
+    if (v == "jpg" || v == "jpeg") { out = burstmerge::OutputFormat::JPEG; return true; }
+    if (v == "bmp")  { out = burstmerge::OutputFormat::BMP; return true; }
+    if (v == "tif" || v == "tiff") { out = burstmerge::OutputFormat::TIFF; return true; }
+    if (v == "dng")  { out = burstmerge::OutputFormat::DNG; return true; }
+    return false;
+}
+
 void PrintInputSummary(const std::vector<std::string>& inputs) {
     std::cout << "Inputs (" << inputs.size() << "):" << std::endl;
     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -84,12 +95,12 @@ void PrintInputSummary(const std::vector<std::string>& inputs) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    cxxopts::Options opts("burstmerge", "Burst merge for RAW photos");
+    cxxopts::Options opts("burstmerge", "Burst merge for RAW / RGB photo bursts");
     opts.add_options()
-        ("i,input", "Input RAW/DNG files", cxxopts::value<std::vector<std::string>>())
-        ("o,output", "Output DNG path or output directory", cxxopts::value<std::string>()->default_value("./out"))
+        ("i,input", "Input RAW/DNG or image files (PNG/JPEG/BMP/TIFF)", cxxopts::value<std::vector<std::string>>())
+        ("o,output", "Output file path or output directory", cxxopts::value<std::string>()->default_value("./out"))
         ("t,tile", "Tile size", cxxopts::value<int>()->default_value("32"))
-        ("b,bit-depth", "Output bit depth (12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
+        ("b,bit-depth", "Output bit depth (8, 10, 12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
         ("f,frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
         ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal)", cxxopts::value<float>())
         ("merge-algo", "Merge algorithm: spatial, frequency, temporal", cxxopts::value<std::string>())
@@ -101,6 +112,7 @@ int main(int argc, char* argv[]) {
         ("exposure-curve", "Exposure curve mode: global, local", cxxopts::value<std::string>()->default_value("global"))
         ("align-gamma", "Gamma correction for alignment grayscale (default 1.0=off). Value < 1.0 will boost darkness", cxxopts::value<float>()->default_value("1.0"))
         ("smooth-tile-field", "Enable median smoothing of alignment tile fields", cxxopts::value<bool>()->default_value("false"))
+        ("output-format", "Output format: auto, png, jpg, bmp, tiff, dng", cxxopts::value<std::string>()->default_value("auto"))
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -129,11 +141,11 @@ int main(int argc, char* argv[]) {
     burstmerge::Settings settings;
     settings.tile_size = args["tile"].as<int>();
     int bit_depth = args["bit-depth"].as<int>();
-    if (bit_depth != 12 && bit_depth != 14 && bit_depth != 16) {
-        std::cerr << "Invalid bit depth: " << bit_depth << " (use 12, 14, or 16)" << std::endl;
+    if (bit_depth != 8 && bit_depth != 10 && bit_depth != 12 && bit_depth != 14 && bit_depth != 16) {
+        std::cerr << "Invalid bit depth: " << bit_depth << " (use 8, 10, 12, 14, or 16)" << std::endl;
         return 2;
     }
-    settings.dng_bit_depth = bit_depth;
+    settings.bit_depth = bit_depth;
     settings.merge_algo = burstmerge::MergeAlgorithm::Spatial;
     if (args.count("merge-algo") &&
         !ParseMergeAlgorithm(args["merge-algo"].as<std::string>(), settings.merge_algo)) {
@@ -174,6 +186,10 @@ int main(int argc, char* argv[]) {
     }
     settings.align_gamma = args["align-gamma"].as<float>();
     settings.smooth_tile_field = args["smooth-tile-field"].as<bool>();
+    if (!ParseOutputFormat(args["output-format"].as<std::string>(), settings.output_format)) {
+        std::cerr << "Invalid output format (use auto, png, jpg, bmp, tiff, or dng)" << std::endl;
+        return 2;
+    }
     bm.Configure(settings);
 
     const std::string output_target = args["output"].as<std::string>();
@@ -185,7 +201,17 @@ int main(int argc, char* argv[]) {
     std::cout << "Noise reduction: " << settings.noise_reduction << std::endl;
     std::cout << "Align gamma: " << settings.align_gamma << std::endl;
     std::cout << "Smooth tile field: " << (settings.smooth_tile_field ? "on" : "off") << std::endl;
-    std::cout << "Bit depth: " << settings.dng_bit_depth << std::endl;
+    std::cout << "Bit depth: " << settings.bit_depth << std::endl;
+    std::cout << "Output format: ";
+    switch (settings.output_format) {
+        case burstmerge::OutputFormat::Auto: std::cout << "Auto"; break;
+        case burstmerge::OutputFormat::PNG:  std::cout << "PNG"; break;
+        case burstmerge::OutputFormat::JPEG: std::cout << "JPEG"; break;
+        case burstmerge::OutputFormat::BMP:  std::cout << "BMP"; break;
+        case burstmerge::OutputFormat::TIFF: std::cout << "TIFF"; break;
+        case burstmerge::OutputFormat::DNG:  std::cout << "DNG"; break;
+    }
+    std::cout << std::endl;
     std::cout << "Output target: " << output_target << std::endl;
     PrintInputSummary(inputs);
 

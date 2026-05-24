@@ -9,11 +9,15 @@
 #include "burstmerge/internal/exposure/exposure.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/io/dng_io.h"
+#include "burstmerge/internal/io/image_decoder.h"
+#include "burstmerge/internal/io/image_writer.h"
 #include "burstmerge/internal/merge/frequency.h"
 #include "burstmerge/internal/merge/spatial.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <vector>
@@ -30,16 +34,136 @@ void Report(const ProgressFn& progress, float percent, const std::string& stage)
     if (progress) progress(percent, stage);
 }
 
-uint32_t ResolveTargetWhiteLevel(int dng_bit_depth, uint32_t sensor_white)
+uint32_t ResolveTargetWhiteLevel(int bit_depth, uint32_t sensor_white)
 {
-    switch (dng_bit_depth)
+    if (bit_depth <= 0)
     {
-        case 12: return 4095;
-        case 14: return 16383;
-        case 16: return 65535;
-        default: return sensor_white;
+        std::fprintf(stderr, "[WARN] ResolveTargetWhiteLevel: requested bit_depth=%d <= 0; falling back to sensor white level %u\n", bit_depth, sensor_white);
+        return sensor_white;
+    }
+
+    if (bit_depth > 16)
+    {   // illegal for current DNG container — keep sensor white level unchanged
+        std::fprintf(stderr, "[WARN] ResolveTargetWhiteLevel: requested bit_depth=%d out of range [1..16]; falling back to sensor white level %u\n", bit_depth, sensor_white);
+        return sensor_white;
+    }
+
+    // Supported bit depths: compute target white level directly.
+    return (1u << bit_depth) - 1u;
+}
+// RAW extensions known to the Adobe DNG Converter
+bool IsRawExtension(const std::string& ext)
+{
+    static const char* raw_exts[] =
+    {
+        ".dng", ".arw", ".cr2", ".cr3", ".nef", ".nrw",
+        ".orf", ".raf", ".rw2", ".pef", ".srw", ".x3f",
+        ".sr2", ".srf", ".kdc", ".dcr", ".k25", ".mdc",
+        ".mef", ".mrw", ".iiq", ".eip", ".bay", ".3fr",
+        ".fff", ".mos"
+    };
+    for (const char* re : raw_exts)
+    {
+        if (ext == re) return true;
+    }
+    return false;
+}
+
+bool IsImageExtension(const std::string& ext)
+{
+    return ext == ".jpg" || ext == ".jpeg" ||
+           ext == ".png" ||
+           ext == ".bmp" ||
+           ext == ".tif" || ext == ".tiff";
+}
+
+enum class InputClass { RAW, Rgb, Mixed };
+
+static InputClass ClassifyInputs(const std::vector<std::string>& paths)
+{
+    bool has_raw = false;
+    bool has_rgb = false;
+    for (const auto& p : paths)
+    {
+        std::filesystem::path fp(p);
+        std::string ext = fp.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        if (IsRawExtension(ext)) has_raw = true;
+        else if (IsImageExtension(ext)) has_rgb = true;
+        // Unknown extension: treat as RAW (will error later if unsupported)
+        else has_raw = true;
+    }
+    if (has_raw && has_rgb) return InputClass::Mixed;
+    if (has_rgb) return InputClass::Rgb;
+    return InputClass::RAW;
+}
+
+// Format-aware output path resolution, shared by all three pipeline paths.
+//   - If path has an extension → treat as explicit file path.
+//     If the extension does not match the selected format, it is silently
+//     corrected to the canonical extension for that format.
+//   - If no extension → treat as directory, create it, and append
+//     "burstmerge_output.<fmt_ext>".
+static const char* CanonicalExt(OutputFormat fmt)
+{
+    switch (fmt)
+    {
+        case OutputFormat::PNG:  return ".png";
+        case OutputFormat::JPEG: return ".jpg";
+        case OutputFormat::BMP:  return ".bmp";
+        case OutputFormat::TIFF: return ".tif";
+        case OutputFormat::DNG:  return ".dng";
+        default:
+        case OutputFormat::Auto: return ".png";
     }
 }
+
+static std::string ResolveImageOutputPath(const std::string& output_path_or_dir,
+                                           OutputFormat fmt)
+{
+    const char* def_ext = CanonicalExt(fmt);
+
+    std::filesystem::path out(output_path_or_dir.empty() ? "." : output_path_or_dir);
+
+    std::string ext = out.extension().string();
+    for (auto& c : ext)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    if (!ext.empty())
+    {
+        // Correct mismatched extension when format is explicitly known (not Auto).
+        if (fmt != OutputFormat::Auto)
+        {
+            bool match = false;
+            switch (fmt)
+            {
+                case OutputFormat::JPEG:
+                    match = (ext == ".jpg" || ext == ".jpeg");
+                    break;
+                case OutputFormat::TIFF:
+                    match = (ext == ".tif" || ext == ".tiff");
+                    break;
+                default:
+                    match = (ext == std::string(def_ext));
+                    break;
+            }
+            if (!match)
+                out.replace_extension(def_ext);
+        }
+
+        std::error_code ec;
+        if (out.has_parent_path())
+            std::filesystem::create_directories(out.parent_path(), ec);
+        return out.string();
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(out, ec);
+    return (out / ("burstmerge_output" + std::string(def_ext))).string();
+}
+
 } // namespace
 
 PipelineOrchestrator::PipelineOrchestrator(BackendType backend, Settings settings)
@@ -67,10 +191,170 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             {false, "", "No input images"};
         }
 
-        std::string output_path = ResolveOutputPath(output_path_or_dir);
+        InputClass input_class = ClassifyInputs(input_paths);
+
+        if (input_class == InputClass::Mixed)
+        {
+            Report(progress, 0.02f, "Mixed input: filtering non-RAW files");
+            std::vector<std::string> filtered;
+            for (const auto& p : input_paths)
+            {
+                std::filesystem::path fp(p);
+                std::string ext = fp.extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                // Keep RAW files + unknown extension files (they will fail
+                // in PrepareDngInputs with a clear error, rather than being
+                // silently dropped — see audit A.3/C.4).
+                if (IsRawExtension(ext) || ext == ".dng" || !IsImageExtension(ext))
+                {
+                    filtered.push_back(p);
+                } else
+                {
+                    Report(progress, 0.02f, "Skipping non-RAW file: " + p);
+                }
+            }
+            if (filtered.empty())
+            {
+                throw std::runtime_error("No RAW files remaining after filtering mixed input");
+            }
+            input_class = InputClass::RAW;
+            return Process(filtered, output_path_or_dir, progress);
+        }
+
+        if (input_class == InputClass::Rgb)
+        {
+            Report(progress, 0.02f, "RGB input pipeline");
+            std::vector<io::DecodedImage> decoded;
+            decoded.reserve(input_paths.size());
+            for (size_t i = 0; i < input_paths.size(); ++i)
+            {
+                Report(progress, PipelineConstants::kProgressDecodeStart + PipelineConstants::kProgressDecodeRange * static_cast<float>(i) / static_cast<float>(input_paths.size()),
+                    "Decoding " + std::to_string(i + 1) + "/" + std::to_string(input_paths.size()));
+                decoded.push_back(io::ReadImage(input_paths[i]));
+            }
+
+            size_t ref_idx = decoded.size() / 2;
+            std::vector<FloatImage> float_images = BuildRgbImages(decoded);
+
+            float white_level = decoded[ref_idx].info.white_level;
+            uint32_t cfa_period = 1;
+
+            // Build minimal RawImage vector just for metadata access in alignment
+            std::vector<RawImage> raw_wrappers;
+            raw_wrappers.reserve(decoded.size());
+            for (const auto& d : decoded)
+            {
+                RawImage ri;
+                ri.metadata.white_level = static_cast<uint32_t>(d.info.white_level);
+                ri.metadata.iso_exposure_time = d.info.iso_exposure_time;
+                ri.metadata.exposure_bias = d.info.exposure_bias;
+                std::memcpy(ri.metadata.black_level, d.info.black_level, sizeof(float) * 4);
+                ri.metadata.mosaic_pattern_width = 0;
+                raw_wrappers.push_back(std::move(ri));
+            }
+
+            Report(progress, PipelineConstants::kProgressAlignStart, "Aligning frames (RGB)");
+            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
+                settings_, cfa_period, progress);
+
+            FloatImage merged;
+            if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
+            {
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (temporal average)");
+                TemporalDenoiseParams params;
+                params.strength = settings_.noise_reduction;
+                params.white_level = white_level;
+                params.black_level = 0.0f;
+                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.exposure_scales = nullptr;
+                merged = TemporalAverage(float_images[ref_idx], aligned, params);
+            } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
+            {
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
+                FrequencyMergeParams params;
+                params.mode = settings_.frequency_mode;
+                params.noise_reduction = settings_.noise_reduction;
+                params.tile_size = settings_.tile_size;
+                params.white_level = white_level;
+                params.black_level = 0.0f;
+                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.exposure_scales = nullptr;
+                merged = FrequencyMerge(float_images[ref_idx], aligned, params);
+            } else
+            {
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (spatial)");
+                SpatialMergeParams params;
+                params.mode = settings_.spatial_mode;
+                params.noise_reduction = settings_.noise_reduction;
+                params.robustness = ComputeRobustness(settings_.noise_reduction);
+                float estimated_noise = EstimateNoiseFloor(float_images[ref_idx], 1);
+                float formula_noise = std::max(PipelineConstants::kNoiseFloorMin,
+                    settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
+                params.noise_floor = std::min(estimated_noise, formula_noise);
+                params.highlight_threshold = white_level * PipelineConstants::kHighlightFactor;
+                params.clip_threshold = white_level * PipelineConstants::kClipFactor;
+                params.guide_block_size = 2;
+                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.exposure_scales = nullptr;
+                merged = SpatialMerge(float_images[ref_idx], aligned, params);
+            }
+
+            // Resolve output format (never Auto at this point).
+            OutputFormat eff_fmt;
+            if (settings_.output_format != OutputFormat::Auto)
+            {
+                eff_fmt = settings_.output_format;
+            } else
+            {
+                OutputFormat fallback = io::InferOutputFormat(settings_, false);
+                eff_fmt = io::InferFormatFromExtension(output_path_or_dir, fallback);
+                if (eff_fmt != fallback)
+                {
+                    Report(progress, PipelineConstants::kProgressMerge,
+                        "Warning: output format not specified — inferred "
+                        + std::string(io::OutputFormatToString(eff_fmt))
+                        + " from filename extension");
+                } else
+                {
+                    Report(progress, PipelineConstants::kProgressMerge,
+                        "Warning: output format not specified — defaulting to "
+                        + std::string(io::OutputFormatToString(eff_fmt)));
+                }
+            }
+            std::string output_path = ResolveImageOutputPath(output_path_or_dir, eff_fmt);
+            io::WriteImage(output_path, merged, decoded, settings_);
+
+            {
+                std::fprintf(stderr, "\nOutput: %s\n", output_path.c_str());
+                std::fprintf(stderr, "  Format:   %s\n", io::OutputFormatToString(eff_fmt));
+                std::fprintf(stderr, "  Bit depth: %u\n", settings_.bit_depth);
+                if (!decoded.empty())
+                {
+                    const auto& tags = decoded[0].info.tags;
+                    for (const auto& [key, val] : tags)
+                    {
+                        std::fprintf(stderr, "  %s: %s\n", key.c_str(), val.c_str());
+                    }
+                }
+            }
+
+            Report(progress, PipelineConstants::kProgressDone, "Done");
+            if (ProfileEnabled())
+            {
+                std::fprintf(stderr, "%s", BuildProfileReport().c_str());
+                std::fflush(stderr);
+            }
+            return {true, output_path, ""}; //////////////////////////////////////////////
+        }
+
+        // ---- RAW pipeline ----
+        // Use output_path_or_dir as conversion context only;
+        // final output path is resolved after format decision below.
+        std::string convert_ctx = output_path_or_dir.empty() ? "." : output_path_or_dir;
         Report(progress, 0.02f, "Preparing inputs");
         convert_dir_.clear();
-        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, output_path, progress, convert_dir_);
+        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
         Report(progress, PipelineConstants::kProgressDecodeStart, "Reading and decoding DNG files");
@@ -197,7 +481,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 // Compute bit-depth rescaling factor (must happen in black-subtracted space)
         float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
         uint32_t sensor_white = images[ref_idx].metadata.white_level;
-        uint32_t target_white = ResolveTargetWhiteLevel(settings_.dng_bit_depth,
+        uint32_t target_white = ResolveTargetWhiteLevel(settings_.bit_depth,
                                                         sensor_white);
         float bit_scale = (target_white != sensor_white && sensor_white > 0)
             ? static_cast<float>(target_white) / static_cast<float>(sensor_white)
@@ -286,40 +570,96 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                                                images[ref_idx].metadata.mosaic_pattern_width);
         }
 
-        Report(progress, PipelineConstants::kProgressQuantize, "Quantizing float image to UInt16");
-        HostBuffer averaged = FloatImageToUint16HostBuffer(merged, target_white);
-
-        Report(progress, PipelineConstants::kProgressContainer, "Preparing output DNG container");
-        RawImage output;
-        output.metadata = std::move(images[ref_idx].metadata);
-        output.metadata.white_level = target_white;
-        if (bit_scale != 1.0f && ref_bl > 1.0f)
+        // Determine effective output format (never Auto at this point).
+        OutputFormat eff_fmt;
+        if (settings_.output_format != OutputFormat::Auto)
         {
-            for (int i = 0; i < 4; ++i)
+            eff_fmt = settings_.output_format;
+        } else
+        {
+            OutputFormat fallback = io::InferOutputFormat(settings_, true);
+            eff_fmt = io::InferFormatFromExtension(output_path_or_dir, fallback);
+            if (eff_fmt != fallback)
             {
-                if (output.metadata.black_level[i] > 0.0f)
+                Report(progress, PipelineConstants::kProgressMerge,
+                    "Warning: output format not specified — inferred "
+                    + std::string(io::OutputFormatToString(eff_fmt))
+                    + " from filename extension");
+            } else
+            {
+                Report(progress, PipelineConstants::kProgressMerge,
+                    "Warning: output format not specified — defaulting to "
+                    + std::string(io::OutputFormatToString(eff_fmt)));
+            }
+        }
+        bool want_dng = (eff_fmt == OutputFormat::DNG);
+
+        // Resolve output path after format decision (see audit A.1)
+        std::string output_path = ResolveImageOutputPath(output_path_or_dir, eff_fmt);
+
+        if (want_dng)
+        {
+            Report(progress, PipelineConstants::kProgressQuantize, "Quantizing float image to UInt16");
+            HostBuffer averaged = FloatImageToUint16HostBuffer(merged, target_white);
+
+            Report(progress, PipelineConstants::kProgressContainer, "Preparing output DNG container");
+            RawImage output;
+            output.metadata = std::move(images[ref_idx].metadata);
+            output.metadata.white_level = target_white;
+            if (bit_scale != 1.0f && ref_bl > 1.0f)
+            {
+                for (int i = 0; i < 4; ++i)
                 {
-                    output.metadata.black_level[i] *= bit_scale;
+                    if (output.metadata.black_level[i] > 0.0f)
+                    {
+                        output.metadata.black_level[i] *= bit_scale;
+                    }
                 }
             }
-        }
-        output.pixels = std::move(averaged);
+            output.pixels = std::move(averaged);
 
-        Report(progress, PipelineConstants::kProgressWrite, "Writing output DNG file");
-        io::SetDngWhiteLevel(output.metadata.dng_negative, target_white);
-        if (bit_scale != 1.0f && ref_bl > 1.0f)
-        {
-            float scaled_bl[4];
-            // Use the (already-moved) output metadata's black_level (which was scaled above)
-            // to avoid reading from the moved-from images[ref_idx].
-            for (int i = 0; i < 4; ++i)
+            Report(progress, PipelineConstants::kProgressWrite, "Writing output DNG file");
+            io::SetDngWhiteLevel(output.metadata.dng_negative, target_white);
+            if (bit_scale != 1.0f && ref_bl > 1.0f)
             {
-                scaled_bl[i] = output.metadata.black_level[i];
+                float scaled_bl[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                    scaled_bl[i] = output.metadata.black_level[i];
+                }
+                io::SetDngBlackLevel(output.metadata.dng_negative, scaled_bl);
             }
-            io::SetDngBlackLevel(output.metadata.dng_negative, scaled_bl);
+            DngWriter writer(output.metadata.dng_negative);
+            writer.Write(output_path.c_str(), output);
         }
-        DngWriter writer(output.metadata.dng_negative);
-        writer.Write(output_path.c_str(), output);
+        else
+        {
+            // RAW → non-DNG: write Bayer mosaic grayscale with white-point scaling
+            Report(progress, PipelineConstants::kProgressQuantize, "Writing RAW as non-DNG (Bayer mosaic)");
+
+            io::DecodedImage raw_decoded;
+            raw_decoded.info.width     = images[ref_idx].metadata.width;
+            raw_decoded.info.height    = images[ref_idx].metadata.height;
+            raw_decoded.info.pix_fmt   = io::kPixelGray;
+            raw_decoded.info.bit_depth = settings_.bit_depth;
+            raw_decoded.info.is_raw    = true;
+            raw_decoded.info.white_level = static_cast<float>(target_white);
+            raw_decoded.info.iso_exposure_time = images[ref_idx].metadata.iso_exposure_time;
+            raw_decoded.info.exposure_bias     = images[ref_idx].metadata.exposure_bias;
+            raw_decoded.pixels = merged.data;
+
+            // Build single-element input vector so WriteImage can infer format
+            std::vector<io::DecodedImage> raw_inputs;
+            raw_inputs.push_back(raw_decoded);
+
+            io::WriteImage(output_path, merged, raw_inputs, settings_);
+        }
+
+        {
+            std::fprintf(stderr, "\nOutput: %s\n", output_path.c_str());
+            std::fprintf(stderr, "  Format:   %s\n", io::OutputFormatToString(eff_fmt));
+            std::fprintf(stderr, "  Bit depth: %u\n", settings_.bit_depth);
+        }
 
         Report(progress, PipelineConstants::kProgressDone, "Done");
         result =
