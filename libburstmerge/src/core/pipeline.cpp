@@ -5,6 +5,7 @@
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/pipeline_io.h"
 #include "burstmerge/internal/core/profiler.h"
+#include "burstmerge/internal/core/task_executor.h"
 #include "burstmerge/internal/denoise/temporal.h"
 #include "burstmerge/internal/exposure/exposure.h"
 #include "burstmerge/internal/core/image_buffer.h"
@@ -15,11 +16,14 @@
 #include "burstmerge/internal/merge/spatial.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <vector>
 
 namespace burstmerge
@@ -162,6 +166,18 @@ static std::string ResolveImageOutputPath(const std::string& output_path_or_dir,
     std::error_code ec;
     std::filesystem::create_directories(out, ec);
     return (out / ("burstmerge_output" + std::string(def_ext))).string();
+}
+
+static std::vector<uint8_t> ReadFileToMemory(const std::string& path)
+{
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) throw std::runtime_error("Failed to open file: " + path);
+    auto size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buf(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(buf.data()), buf.size()))
+        throw std::runtime_error("Failed to read file: " + path);
+    return buf;
 }
 
 } // namespace
@@ -357,15 +373,46 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
-        Report(progress, PipelineConstants::kProgressDecodeStart, "Reading and decoding DNG files");
-        std::vector<RawImage> images;
-        images.reserve(dng_paths.size());
+// DNG read Phase 1: read all DNG files into memory (sequential I/O)
+        constexpr float kReadFraction = 0.3f;
+        const float kReadEnd = PipelineConstants::kProgressDecodeStart +
+                               PipelineConstants::kProgressDecodeRange * kReadFraction;
+        Report(progress, PipelineConstants::kProgressDecodeStart, "Reading DNG files");
+        std::vector<std::vector<uint8_t>> file_buffers(dng_paths.size());
         for (size_t i = 0; i < dng_paths.size(); ++i)
         {
-            DngReader reader(dng_paths[i].c_str());
-            images.push_back(reader.Read());
-            float p = PipelineConstants::kProgressDecodeStart + PipelineConstants::kProgressDecodeRange * static_cast<float>(i + 1) / static_cast<float>(dng_paths.size());
-            Report(progress, p, "Decoded image " + std::to_string(i + 1) + "/" + std::to_string(dng_paths.size()));
+            file_buffers[i] = ReadFileToMemory(dng_paths[i]);
+            float p = PipelineConstants::kProgressDecodeStart +
+                      (kReadEnd - PipelineConstants::kProgressDecodeStart) *
+                          static_cast<float>(i + 1) / static_cast<float>(dng_paths.size());
+            Report(progress, p, "Read file " + std::to_string(i + 1) + "/" + std::to_string(dng_paths.size()));
+        }
+
+// DNG read Phase 2: decode all DNGs from memory in parallel (CPU-bound)
+        const float kDecodeStart = kReadEnd;
+        Report(progress, kDecodeStart, "Decoding DNG files");
+        std::vector<RawImage> images(dng_paths.size());
+        {
+            std::atomic<int> decoded_count{0};
+            std::mutex pm;
+            ParallelFor(dng_paths.size(), 1, [&](size_t begin, size_t end)
+            {
+                for (size_t i = begin; i < end; ++i)
+                {
+                    images[i] = ReadDngFromBuffer(file_buffers[i].data(),
+                                                   static_cast<uint32_t>(file_buffers[i].size()));
+                    int done = decoded_count.fetch_add(1) + 1;
+                    {
+                        std::lock_guard<std::mutex> lock(pm);
+                        float p = kDecodeStart +
+                                  (PipelineConstants::kProgressDecodeStart +
+                                   PipelineConstants::kProgressDecodeRange - kDecodeStart) *
+                                      static_cast<float>(done) / static_cast<float>(dng_paths.size());
+                        Report(progress, p,
+                               "Decoded image " + std::to_string(done) + "/" + std::to_string(dng_paths.size()));
+                    }
+                }
+            });
         }
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
         size_t ref_idx = SelectExposureRefIndex(images);

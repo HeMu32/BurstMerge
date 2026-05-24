@@ -87,6 +87,10 @@ struct RawImage
     HostBuffer   pixels;
 };
 
+// Decode a DNG from an in-memory buffer (splits I/O from decode).
+// The data pointer must remain valid for the duration of the call.
+RawImage ReadDngFromBuffer(const void* data, uint32_t size);
+
 class DngReader
 {
 public:
