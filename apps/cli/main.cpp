@@ -2,10 +2,13 @@
 #include "burstmerge/internal/io/dng_io.h"
 #include "cxxopts.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -92,16 +95,39 @@ void PrintInputSummary(const std::vector<std::string>& inputs) {
     }
 }
 
+std::vector<std::string> ExpandFolderInputs(const std::vector<std::string>& folders) {
+    std::vector<std::string> inputs;
+    for (const auto& folder : folders) {
+        std::filesystem::path folder_path(folder);
+        if (!std::filesystem::exists(folder_path)) {
+            throw std::runtime_error("Input folder does not exist: " + folder);
+        }
+        if (!std::filesystem::is_directory(folder_path)) {
+            throw std::runtime_error("Input folder is not a directory: " + folder);
+        }
+
+        for (const auto& entry : std::filesystem::directory_iterator(folder_path)) {
+            if (entry.is_regular_file()) {
+                inputs.push_back(entry.path().string());
+            }
+        }
+    }
+
+    std::sort(inputs.begin(), inputs.end());
+    return inputs;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
     cxxopts::Options opts("burstmerge", "Burst merge for RAW / RGB photo bursts");
     opts.add_options()
         ("i,input", "Input RAW/DNG or image files (PNG/JPEG/BMP/TIFF)", cxxopts::value<std::vector<std::string>>())
+        ("f,folder", "Input folder(s); expands regular files and reuses the normal input pipeline", cxxopts::value<std::vector<std::string>>())
         ("o,output", "Output file path or output directory", cxxopts::value<std::string>()->default_value("./out"))
         ("t,tile", "Tile size", cxxopts::value<int>()->default_value("32"))
         ("b,bit-depth", "Output bit depth (8, 10, 12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
-        ("f,frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
+        ("frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
         ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal)", cxxopts::value<float>())
         ("merge-algo", "Merge algorithm: spatial, frequency, temporal", cxxopts::value<std::string>())
         ("alignment", "Alignment mode: standard, dense, freq", cxxopts::value<std::string>()->default_value("standard"))
@@ -129,13 +155,30 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    if (!args.count("input")) {
-        std::cerr << "No input files. Use -i file1.dng -i file2.dng ..." << std::endl;
+    if (!args.count("input") && !args.count("folder")) {
+        std::cerr << "No inputs. Use -i file1.dng -i file2.dng ... or -f path\\to\\folder" << std::endl;
         return 2;
     }
 
     burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
-    auto inputs = args["input"].as<std::vector<std::string>>();
+    std::vector<std::string> inputs;
+    if (args.count("input")) {
+        auto direct_inputs = args["input"].as<std::vector<std::string>>();
+        inputs.insert(inputs.end(), direct_inputs.begin(), direct_inputs.end());
+    }
+    if (args.count("folder")) {
+        try {
+            auto folder_inputs = ExpandFolderInputs(args["folder"].as<std::vector<std::string>>());
+            inputs.insert(inputs.end(), folder_inputs.begin(), folder_inputs.end());
+        } catch (const std::exception& e) {
+            std::cerr << "Input folder error: " << e.what() << std::endl;
+            return 2;
+        }
+    }
+    if (inputs.empty()) {
+        std::cerr << "No input files found after expanding arguments" << std::endl;
+        return 2;
+    }
     for (const auto& input : inputs) bm.AddImage(input);
 
     burstmerge::Settings settings;
@@ -152,7 +195,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Invalid merge algorithm (use spatial, frequency, or temporal)" << std::endl;
         return 2;
     }
-    // --frequency / -f is a deprecated shorthand for --merge-algo frequency
+    // --frequency is a deprecated shorthand for --merge-algo frequency.
     if (args.count("frequency") && args.count("merge-algo")) {
         std::cerr << "Cannot specify both --frequency and --merge-algo; use --merge-algo" << std::endl;
         return 2;

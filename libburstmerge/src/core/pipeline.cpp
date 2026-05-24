@@ -51,6 +51,9 @@ uint32_t ResolveTargetWhiteLevel(int bit_depth, uint32_t sensor_white)
     // Supported bit depths: compute target white level directly.
     return (1u << bit_depth) - 1u;
 }
+
+} // unnamed namespace
+
 // RAW extensions known to the Adobe DNG Converter
 bool IsRawExtension(const std::string& ext)
 {
@@ -77,6 +80,7 @@ bool IsImageExtension(const std::string& ext)
            ext == ".tif" || ext == ".tiff";
 }
 
+namespace {
 enum class InputClass { RAW, Rgb, Mixed };
 
 static InputClass ClassifyInputs(const std::vector<std::string>& paths)
@@ -92,8 +96,7 @@ static InputClass ClassifyInputs(const std::vector<std::string>& paths)
 
         if (IsRawExtension(ext)) has_raw = true;
         else if (IsImageExtension(ext)) has_rgb = true;
-        // Unknown extension: treat as RAW (will error later if unsupported)
-        else has_raw = true;
+        else throw std::runtime_error("Unsupported input file format: " + p);
     }
     if (has_raw && has_rgb) return InputClass::Mixed;
     if (has_rgb) return InputClass::Rgb;

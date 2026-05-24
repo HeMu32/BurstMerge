@@ -64,4 +64,8 @@ private:
     std::string convert_dir_;
 };
 
+// Extension classification helpers (shared by pipeline.cpp and pipeline_io.cpp).
+bool IsRawExtension(const std::string& ext);
+bool IsImageExtension(const std::string& ext);
+
 } // namespace burstmerge

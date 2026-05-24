@@ -1,5 +1,6 @@
 #include "burstmerge/internal/core/pipeline_io.h"
 
+#include "burstmerge/internal/core/pipeline.h"
 #include "burstmerge/internal/io/dng_io.h"
 
 #include <algorithm>
@@ -119,8 +120,17 @@ std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_
         {
             throw std::runtime_error("Input does not exist: " + path);
         }
-        if (IsDngPath(path)) dng_paths.push_back(path);
-        else raw_paths.push_back(path);
+        if (IsDngPath(path))
+        {
+            dng_paths.push_back(path);
+        }
+        else
+        {
+            std::string ext = LowerExt(std::filesystem::path(path));
+            if (!IsRawExtension(ext))
+                throw std::runtime_error("Unsupported file format (not a RAW camera file): " + path);
+            raw_paths.push_back(path);
+        }
     }
 
     if (raw_paths.empty()) return dng_paths;
