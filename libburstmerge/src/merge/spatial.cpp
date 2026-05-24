@@ -286,9 +286,11 @@ FloatImage SpatialMerge(const FloatImage& reference,
     out.channels = reference.channels;
     out.data.resize(reference.data.size(), 0.0f);
 
-    const float noise_floor = linear_mode
-        ? EstimateLinearNoise(reference, ref_blur, params.guide_block_size)
-        : (params.noise_floor > 0.0f ? params.noise_floor : std::max(burstmerge::SpatialConstants::kNoiseFloorFallback, params.noise_reduction * 4.0f));
+    const float noise_floor = params.noise_floor > 0.0f
+        ? params.noise_floor
+        : (linear_mode
+            ? EstimateLinearNoise(reference, ref_blur, params.guide_block_size)
+            : std::max(burstmerge::SpatialConstants::kNoiseFloorFallback, params.noise_reduction * 4.0f));
     const float robustness = std::max(0.0f, params.robustness);
     const float min_comparison_weight = linear_mode ? burstmerge::SpatialConstants::kLinearMinComparisonWeight : burstmerge::SpatialConstants::kStandardMinComparisonWeight;
     const float highlight_threshold = params.highlight_threshold > 0.0f

@@ -17,7 +17,7 @@ namespace burstmerge
 namespace
 {
 
-constexpr bool kEnableAlignmentGrayDump = false;
+constexpr bool kEnableAlignmentGrayDump = true;
 
 inline void ApplyGammaGray(FloatImage& img, float white_level, float gamma)
 {
@@ -48,6 +48,32 @@ inline void ApplyGammaGray(FloatImage& img, float white_level, float gamma)
         }
     }
 }
+
+inline AlignmentResult InvertAlignmentResult(AlignmentResult ar)
+{
+    // Tile fields are stored as "sample source at output - shift" displacements.
+    // For the bracketed low-exposure side we intentionally estimate the opposite
+    // mapping first, then negate the whole field to approximate the inverse warp
+    // while keeping the final chain result in the parent's coordinate system.
+    ar.shift_x = -ar.shift_x;
+    ar.shift_y = -ar.shift_y;
+    for (auto& v : ar.tile_shift_x) v = static_cast<int16_t>(-v);
+    for (auto& v : ar.tile_shift_y) v = static_cast<int16_t>(-v);
+    return ar;
+}
+
+struct AlignmentPipelineContext
+{
+    // Shared alignment-side state passed into the small helper functions below.
+    // This keeps BuildAlignedComparisons focused on chain topology instead of
+    // repeatedly threading the same scalar parameters through local lambdas.
+    AlignParams params;
+    PipelineOrchestrator::ProgressFn progress;
+    size_t burst_size = 0;
+    float white_level = 0.0f;
+    float align_gamma = 1.0f;
+    const char* mode_tag = "standard";
+};
 
 // Progress callback shim kept local to the pipeline alignment partition.
 
@@ -247,20 +273,149 @@ void DumpWarpedGrayBmp(const FloatImage& gray_src,
     std::fprintf(stderr, "[DIAG] Saved warped gray BMP: %s (%ux%u)\n", fname, gray_src.width, gray_src.height);
 }
 
+FloatImage BuildGrayGuide(const FloatImage& image,
+                         float white_level,
+                         float align_gamma)
+{
+    // Alignment operates on single-channel guides so exposure-normalized Bayer
+    // planes and RGB inputs share the same motion-estimation path.
+    FloatImage gray = ConvertPlanesToGrayscale(image);
+    ApplyGammaGray(gray, white_level, align_gamma);
+    return gray;
+}
+
+AlignmentResult EstimateAlignmentPregrays(const FloatImage& gray_ref,
+                                          const FloatImage& gray_src,
+                                          size_t source_idx,
+                                          size_t progress_idx,
+                                          size_t total_count,
+                                          const AlignmentPipelineContext& ctx,
+                                          bool dump_result)
+{
+    // This helper owns the "estimate only" phase so callers can either use the
+    // field directly or invert it before warping, without duplicating progress
+    // reporting and gray-debug output rules.
+    Report(ctx.progress,
+           PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange *
+               static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
+           "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
+    AlignmentResult ar = EstimateTranslation(gray_ref, gray_src, ctx.params);
+
+    if (dump_result)
+    {
+        DumpWarpedGrayBmp(gray_src,
+                          ar,
+                          ctx.burst_size,
+                          source_idx,
+                          ctx.mode_tag,
+                          false,
+                          ctx.white_level);
+    }
+    return ar;
+}
+
+FloatImage WarpWithAlignment(const FloatImage& source,
+                             const AlignmentResult& ar,
+                             size_t progress_idx,
+                             size_t total_count,
+                             const AlignmentPipelineContext& ctx)
+{
+    // Warping is kept separate from motion estimation because some bracketed
+    // paths first modify the estimated field (invert it) before resampling.
+    Report(ctx.progress,
+           PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange *
+               static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
+           "Warping frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
+    return WarpAligned(source, ar);
+}
+
+FloatImage AlignAndWarpPregrays(const FloatImage& gray_ref,
+                                const FloatImage& gray_src,
+                                const FloatImage& source,
+                                size_t source_idx,
+                                size_t progress_idx,
+                                size_t total_count,
+                                const AlignmentPipelineContext& ctx)
+{
+    // Fast path for callers that already prepared grayscale guides.
+    AlignmentResult ar = EstimateAlignmentPregrays(gray_ref,
+                                                   gray_src,
+                                                   source_idx,
+                                                   progress_idx,
+                                                   total_count,
+                                                   ctx,
+                                                   true);
+    return WarpWithAlignment(source, ar, progress_idx, total_count, ctx);
+}
+
+FloatImage AlignAndWarp(const FloatImage& guide_ref,
+                        const FloatImage& source,
+                        size_t source_idx,
+                        size_t progress_idx,
+                        size_t total_count,
+                        const AlignmentPipelineContext& ctx)
+{
+    // Regular alignment path: estimate source -> guide_ref directly and warp it.
+    FloatImage gray_ref = BuildGrayGuide(guide_ref, ctx.white_level, ctx.align_gamma);
+    FloatImage gray_src = BuildGrayGuide(source, ctx.white_level, ctx.align_gamma);
+    return AlignAndWarpPregrays(gray_ref,
+                                gray_src,
+                                source,
+                                source_idx,
+                                progress_idx,
+                                total_count,
+                                ctx);
+}
+
+FloatImage AlignInvertedAndWarp(const FloatImage& logical_ref,
+                                const FloatImage& source,
+                                size_t source_idx,
+                                size_t progress_idx,
+                                size_t total_count,
+                                const AlignmentPipelineContext& ctx)
+{
+    // Low-exposure-side bracket handling:
+    // logical goal:      source(low) -> logical_ref(high)
+    // field estimation:  logical_ref(high) -> source(low)
+    // final application: invert estimated field, then warp source into the
+    //                    already-aligned parent coordinate system.
+    FloatImage gray_ref = BuildGrayGuide(logical_ref, ctx.white_level, ctx.align_gamma);
+    FloatImage gray_src = BuildGrayGuide(source, ctx.white_level, ctx.align_gamma);
+
+    AlignmentResult reverse_ar = EstimateAlignmentPregrays(gray_src,
+                                                           gray_ref,
+                                                           source_idx,
+                                                           progress_idx,
+                                                           total_count,
+                                                           ctx,
+                                                           false);
+    AlignmentResult forward_ar = InvertAlignmentResult(std::move(reverse_ar));
+
+    DumpWarpedGrayBmp(gray_src,
+                      forward_ar,
+                      ctx.burst_size,
+                      source_idx,
+                      ctx.mode_tag,
+                      false,
+                      ctx.white_level);
+    return WarpWithAlignment(source, forward_ar, progress_idx, total_count, ctx);
+}
+
 } // namespace
 
-std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& float_images,
-                                                const std::vector<RawImage>& raw_images,
-                                                size_t ref_idx,
-                                                const Settings& settings,
-                                                uint32_t cfa_period,
-                                                const PipelineOrchestrator::ProgressFn& progress)
+AlignedStack BuildAlignedComparisons(const std::vector<FloatImage>& float_images,
+                                     const std::vector<RawImage>& raw_images,
+                                     size_t align_ref_idx,
+                                     size_t exposure_ref_idx,
+                                     const Settings& settings,
+                                     uint32_t cfa_period,
+                                     const PipelineOrchestrator::ProgressFn& progress)
 {
     ProfileScope scope("time.pipeline.build_aligned_comparisons");
     // Pipeline-facing adapter around alignment: choose guides, dispatch to the
     // alignment code, and organize chaining for bracketed stacks.
-    std::vector<FloatImage> aligned;
-    aligned.reserve(float_images.size() > 0 ? float_images.size() - 1 : 0);
+    AlignedStack aligned_stack;
+    aligned_stack.comparisons.reserve(float_images.size() > 0 ? float_images.size() - 1 : 0);
 
     AlignParams params;
     params.tile_size = settings.tile_size;
@@ -277,52 +432,23 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
             "[WARN] Advanced dense alignment is experimental and not fully implemented yet. Results may be unstable.\n");
     }
 
-    const float wl = static_cast<float>(raw_images[ref_idx].metadata.white_level);
-    FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
-    ApplyGammaGray(gray_ref_full, wl, settings.align_gamma);
-    DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), ref_idx, AlignmentModeTag(params.mode), true, wl);
+    const float wl = static_cast<float>(raw_images[exposure_ref_idx].metadata.white_level);
+    AlignmentPipelineContext ctx;
+    ctx.params = params;
+    ctx.progress = progress;
+    ctx.burst_size = float_images.size();
+    ctx.white_level = wl;
+    ctx.align_gamma = settings.align_gamma;
+    ctx.mode_tag = AlignmentModeTag(params.mode);
+
+    FloatImage gray_ref_full = BuildGrayGuide(float_images[align_ref_idx], wl, settings.align_gamma);
+    DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), align_ref_idx, AlignmentModeTag(params.mode), true, wl);
     std::vector<FloatImage> gray_inputs;
     gray_inputs.reserve(float_images.size());
     for (const auto& img : float_images)
     {
-        gray_inputs.push_back(ConvertPlanesToGrayscale(img));
-        ApplyGammaGray(gray_inputs.back(), wl, settings.align_gamma);
+        gray_inputs.push_back(BuildGrayGuide(img, wl, settings.align_gamma));
     }
-
-    auto align_and_warp_pregrays = [&](const FloatImage& gray_ref,
-                                       const FloatImage& gray_src,
-                                       const FloatImage& source,
-                                       size_t source_idx,
-                                       size_t progress_idx,
-                                       size_t total_count) -> FloatImage
-    {
-        Report(progress,
-               PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange *
-                   static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
-               "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
-        AlignmentResult ar = EstimateTranslation(gray_ref, gray_src, params);
-
-        DumpWarpedGrayBmp(gray_src, ar, float_images.size(), source_idx, AlignmentModeTag(params.mode), false, wl);
-
-        Report(progress,
-               PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange *
-                   static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
-               "Warping frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
-        return WarpAligned(source, ar);
-    };
-
-    auto align_and_warp = [&](const FloatImage& guide_ref,
-                              const FloatImage& source,
-                              size_t source_idx,
-                              size_t progress_idx,
-                              size_t total_count) -> FloatImage
-    {
-        FloatImage gr = ConvertPlanesToGrayscale(guide_ref);
-        FloatImage gs = ConvertPlanesToGrayscale(source);
-        ApplyGammaGray(gr, wl, settings.align_gamma);
-        ApplyGammaGray(gs, wl, settings.align_gamma);
-        return align_and_warp_pregrays(gr, gs, source, source_idx, progress_idx, total_count);
-    };
 
     bool has_exposure = false;
     float min_exp = std::numeric_limits<float>::max();
@@ -343,31 +469,37 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 
     const bool use_transmission = has_exposure && !exposure_order.empty() &&
                                   max_exp > min_exp * std::pow(2.0f, PipelineConstants::kBracketTransmissionFallbackEv);
-                                  // Enable chained alignment for dense mode + bracketed stacks
+                                  // Enable chained alignment for bracketed stacks.
 
     if (!use_transmission)
     {
-        std::fprintf(stderr, "[DEBUG] BuildAlignedComparisons: fixed-reference alignment (ref=#%zu)\n", ref_idx);
+        std::fprintf(stderr, "[DEBUG] BuildAlignedComparisons: fixed-reference alignment (align_ref=#%zu, exposure_ref=#%zu)\n",
+            align_ref_idx, exposure_ref_idx);
         const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
-        aligned.clear();
-        aligned.reserve(total);
+        // Exposure normalization and alignment are intentionally decoupled.
+        // In fixed-reference mode these two roles coincide, so the merge base is
+        // simply the exposure reference frame in its native/root coordinate system.
+        aligned_stack.reference = float_images[exposure_ref_idx];
+        aligned_stack.comparisons.clear();
+        aligned_stack.comparisons.reserve(total);
         size_t processed = 0;
         for (size_t i = 0; i < float_images.size(); ++i)
         {
-            if (i == ref_idx) continue;
-            aligned.push_back(align_and_warp_pregrays(gray_ref_full,
-                                                      gray_inputs[i],
-                                                      float_images[i],
-                                                      i,
-                                                      processed,
-                                                      total));
+            if (i == exposure_ref_idx) continue;
+            aligned_stack.comparisons.push_back(AlignAndWarpPregrays(gray_ref_full,
+                                                                     gray_inputs[i],
+                                                                     float_images[i],
+                                                                     i,
+                                                                     processed,
+                                                                     total,
+                                                                     ctx));
             ++processed;
         }
-        return aligned;
+        return aligned_stack;
     }
 
-    std::fprintf(stderr, "[DEBUG] BuildAlignedComparisons: chained alignment (ref=#%zu, %zu frames)\n",
-        ref_idx, exposure_order.size());
+    std::fprintf(stderr, "[DEBUG] BuildAlignedComparisons: chained alignment (align_ref=#%zu, exposure_ref=#%zu, %zu frames)\n",
+        align_ref_idx, exposure_ref_idx, exposure_order.size());
 
     std::sort(exposure_order.begin(), exposure_order.end(),
               [](const auto& a, const auto& b)
@@ -377,7 +509,7 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     size_t root_pos = 0;
     for (size_t pos = 0; pos < exposure_order.size(); ++pos)
     {
-        if (exposure_order[pos].second == ref_idx)
+        if (exposure_order[pos].second == align_ref_idx)
         {
             root_pos = pos;
             break;
@@ -395,12 +527,17 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     {
         size_t parent_idx = exposure_order[pos].second;
         size_t child_idx = exposure_order[pos - 1].second;
-        std::fprintf(stderr, "[DEBUG] Chained align: frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
+        std::fprintf(stderr, "[DEBUG] Chained align (low side, logical Lo->Hi, estimated Hi->Lo then inverted): frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
             child_idx, exposure_order[pos - 1].first,
             parent_idx, exposure_order[pos].first);
         const FloatImage& parent_ref = has_aligned[parent_idx]
             ? aligned_to_root[parent_idx] : float_images[parent_idx];
-        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);
+        FloatImage child_aligned = AlignInvertedAndWarp(parent_ref,
+                                                        float_images[child_idx],
+                                                        child_idx,
+                                                        processed,
+                                                        total,
+                                                        ctx);
         aligned_to_root[child_idx] = std::move(child_aligned);
         has_aligned[child_idx] = 1;
         ++processed;
@@ -415,19 +552,52 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
             parent_idx, exposure_order[pos - 1].first);
         const FloatImage& parent_ref = has_aligned[parent_idx]
             ? aligned_to_root[parent_idx] : float_images[parent_idx];
-        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);
+        FloatImage child_aligned = AlignAndWarp(parent_ref,
+                                                float_images[child_idx],
+                                                child_idx,
+                                                processed,
+                                                total,
+                                                ctx);
         aligned_to_root[child_idx] = std::move(child_aligned);
         has_aligned[child_idx] = 1;
         ++processed;
     }
 
+    // Alignment defines a single common coordinate system for the whole burst:
+    // the alignment-root coordinate system.  Merge still wants an exposure-safe
+    // base image, so we use the exposure reference frame warped into that common
+    // coordinate system instead of switching merge to the alignment-root frame.
+    if (exposure_ref_idx == root_idx)
+    {
+        aligned_stack.reference = aligned_to_root[root_idx];
+    }
+    else if (has_aligned[exposure_ref_idx])
+    {
+        aligned_stack.reference = aligned_to_root[exposure_ref_idx];
+    }
+    else
+    {
+        aligned_stack.reference = AlignAndWarp(float_images[align_ref_idx],
+                                               float_images[exposure_ref_idx],
+                                               exposure_ref_idx,
+                                               processed,
+                                               total,
+                                               ctx);
+    }
+    aligned_stack.comparisons.clear();
+    aligned_stack.comparisons.reserve(float_images.size() > 0 ? float_images.size() - 1 : 0);
     for (size_t i = 0; i < float_images.size(); ++i)
     {
-        if (i == ref_idx) continue;
-        if (has_aligned[i]) aligned.push_back(std::move(aligned_to_root[i]));
-        else aligned.push_back(align_and_warp(float_images[ref_idx], float_images[i], i, processed, total));
+        if (i == exposure_ref_idx) continue;
+        if (has_aligned[i]) aligned_stack.comparisons.push_back(std::move(aligned_to_root[i]));
+        else aligned_stack.comparisons.push_back(AlignAndWarp(float_images[align_ref_idx],
+                                                              float_images[i],
+                                                              i,
+                                                              processed,
+                                                              total,
+                                                              ctx));
     }
-    return aligned;
+    return aligned_stack;
 }
 
 } // namespace burstmerge

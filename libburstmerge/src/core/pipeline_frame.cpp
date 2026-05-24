@@ -176,11 +176,72 @@ size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
             std::sort(exposure_order.begin(), exposure_order.end(),
                       [](const auto& a, const auto& b)
                       { return a.first < b.first; });
-            return exposure_order.front().second;
+            size_t chosen = exposure_order.front().second;
+            std::fprintf(stderr, "[DEBUG] SelectExposureRefIndex: bracketing detected (%.2fx = %.1f EV range), "
+                "chose lowest-exposure frame #%zu (Ev=%.2f)\n",
+                max_exp / min_exp, std::log2(max_exp / min_exp),
+                chosen, exposure_order.front().first);
+            return chosen;
         }
     }
 
-    return images.size() / 2;
+    size_t chosen = images.size() / 2;
+    if (has_exposure)
+    {
+        std::fprintf(stderr, "[DEBUG] SelectExposureRefIndex: constant-exposure burst (%.2fx range), "
+            "chose middle frame #%zu\n",
+            max_exp / min_exp, chosen);
+    } else
+    {
+        std::fprintf(stderr, "[DEBUG] SelectExposureRefIndex: no exposure data, "
+            "chose middle frame #%zu\n", chosen);
+    }
+    return chosen;
+}
+
+size_t SelectAlignmentRefIndex(const std::vector<RawImage>& images,
+                               size_t exposure_ref_idx)
+{
+    if (images.empty()) return 0;
+
+    bool has_exposure = false;
+    float min_exp = std::numeric_limits<float>::max();
+    float max_exp = 0.0f;
+    std::vector<std::pair<float, size_t>> exposure_order;
+    exposure_order.reserve(images.size());
+    for (size_t i = 0; i < images.size(); ++i)
+    {
+        float v = images[i].metadata.ev_value;
+        if (v > 0.0f)
+        {
+            has_exposure = true;
+            min_exp = std::min(min_exp, v);
+            max_exp = std::max(max_exp, v);
+            exposure_order.push_back({v, i});
+        }
+    }
+
+    if (has_exposure && !exposure_order.empty() && max_exp > min_exp * 1.25f)
+    {
+        std::sort(exposure_order.begin(), exposure_order.end(),
+                  [](const auto& a, const auto& b)
+                  { return a.first < b.first; });
+        // In bracketed stacks we decouple alignment-root selection from the
+        // exposure reference.  The exposure reference stays at the darkest frame
+        // for normalization/merge logic, while the alignment root is chosen from
+        // the middle exposure to build a balanced chain toward both sides.
+        const size_t mid = exposure_order.size() / 2;
+        const size_t chosen = exposure_order[mid].second;
+        std::fprintf(stderr, "[DEBUG] SelectAlignmentRefIndex: bracketing detected (%.2fx = %.1f EV range), "
+            "chose middle-exposure frame #%zu (Ev=%.2f) as alignment root; exposure ref remains frame #%zu\n",
+            max_exp / min_exp, std::log2(max_exp / min_exp),
+            chosen, exposure_order[mid].first, exposure_ref_idx);
+        return chosen;
+    }
+
+    std::fprintf(stderr, "[DEBUG] SelectAlignmentRefIndex: reusing exposure ref frame #%zu for alignment\n",
+        exposure_ref_idx);
+    return exposure_ref_idx;
 }
 
 FloatImage DecodedImageToFloatImage(const io::DecodedImage& img)

@@ -235,6 +235,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
 
             size_t ref_idx = decoded.size() / 2;
+            std::fprintf(stderr, "[DEBUG] RGB pipeline: middle-frame ref #%zu (%zu frames)\n",
+                ref_idx, decoded.size());
             std::vector<FloatImage> float_images = BuildRgbImages(decoded);
 
             float white_level = decoded[ref_idx].info.white_level;
@@ -255,7 +257,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
 
             Report(progress, PipelineConstants::kProgressAlignStart, "Aligning frames (RGB)");
-            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
+            AlignedStack aligned_stack = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx, ref_idx,
                 settings_, cfa_period, progress);
 
             FloatImage merged;
@@ -266,9 +268,9 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.strength = settings_.noise_reduction;
                 params.white_level = white_level;
                 params.black_level = 0.0f;
-                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.num_scales = static_cast<uint32_t>(aligned_stack.comparisons.size());
                 params.exposure_scales = nullptr;
-                merged = TemporalAverage(float_images[ref_idx], aligned, params);
+                merged = TemporalAverage(aligned_stack.reference, aligned_stack.comparisons, params);
             } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
             {
                 Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
@@ -278,9 +280,9 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.tile_size = settings_.tile_size;
                 params.white_level = white_level;
                 params.black_level = 0.0f;
-                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.num_scales = static_cast<uint32_t>(aligned_stack.comparisons.size());
                 params.exposure_scales = nullptr;
-                merged = FrequencyMerge(float_images[ref_idx], aligned, params);
+                merged = FrequencyMerge(aligned_stack.reference, aligned_stack.comparisons, params);
             } else
             {
                 Report(progress, PipelineConstants::kProgressMerge, "Merging frames (spatial)");
@@ -295,9 +297,9 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.highlight_threshold = white_level * PipelineConstants::kHighlightFactor;
                 params.clip_threshold = white_level * PipelineConstants::kClipFactor;
                 params.guide_block_size = 2;
-                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.num_scales = static_cast<uint32_t>(aligned_stack.comparisons.size());
                 params.exposure_scales = nullptr;
-                merged = SpatialMerge(float_images[ref_idx], aligned, params);
+                merged = SpatialMerge(aligned_stack.reference, aligned_stack.comparisons, params);
             }
 
             // Resolve output format (never Auto at this point).
@@ -368,8 +370,14 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             Report(progress, p, "Decoded image " + std::to_string(i + 1) + "/" + std::to_string(dng_paths.size()));
         }
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
-        size_t ref_idx = SelectExposureRefIndex(images);
-        Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
+        // Exposure reference frame drives exposure normalization, clipping logic,
+        // merge weighting, and output metadata.  Alignment root may differ for
+        // bracketed stacks and is selected separately below.
+        size_t exposure_ref_idx = SelectExposureRefIndex(images);
+        size_t align_ref_idx = SelectAlignmentRefIndex(images, exposure_ref_idx);
+        Report(progress, PipelineConstants::kProgressRefSelected,
+               "Reference frame selected: exposure " + std::to_string(exposure_ref_idx + 1) + "/" + std::to_string(images.size()) +
+               ", alignment " + std::to_string(align_ref_idx + 1) + "/" + std::to_string(images.size()));
 
         Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
         std::vector<FloatImage> float_images = BuildFloatImages(images);
@@ -381,21 +389,45 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                         images[0].metadata.black_level,
                         hotpixel_period);
         // Log the CFA pattern so we can verify channel ordering
-        if (images[ref_idx].metadata.mosaic_pattern_width > 0)
+        if (images[exposure_ref_idx].metadata.mosaic_pattern_width > 0)
         {
-            uint32_t pw = images[ref_idx].metadata.mosaic_pattern_width;
+            uint32_t pw = images[exposure_ref_idx].metadata.mosaic_pattern_width;
             char buf[128];
             int n = std::snprintf(buf, sizeof(buf), "CFA pattern (%ux%u):", pw, pw);
             for (uint32_t i = 0; i < pw * pw; ++i)
             {
                 n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %u",
-                    static_cast<unsigned>(images[ref_idx].metadata.mosaic_pattern[i]));
+                    static_cast<unsigned>(images[exposure_ref_idx].metadata.mosaic_pattern[i]));
             }
             Report(progress, PipelineConstants::kProgressCfaLog, std::string(buf));
         }
 
+        float pre_normalize_noise_floor = 8.0f;
+        // Estimate noise floor from a middle-exposure frame before
+        // NormalizeFrames scales everything to the reference (lowest-exposure)
+        // level.  This gives noise_floor a realistic magnitude so that the
+        // merge weight formula doesn't over-penalise well-exposed frames.
+        {
+            std::vector<std::pair<float, size_t>> ev_sorted;
+            size_t mid_noise_idx = align_ref_idx;
+            for (size_t i = 0; i < images.size(); ++i)
+                if (images[i].metadata.ev_value > 0.0f)
+                    ev_sorted.push_back({images[i].metadata.ev_value, i});
+            if (!ev_sorted.empty())
+            {
+                std::sort(ev_sorted.begin(), ev_sorted.end());
+                mid_noise_idx = ev_sorted[ev_sorted.size() / 2].second;
+            }
+            uint32_t noise_guide_block = images[exposure_ref_idx].metadata.mosaic_pattern_width >= 2
+                ? images[exposure_ref_idx].metadata.mosaic_pattern_width : 2;
+            pre_normalize_noise_floor = EstimateNoiseFloor(float_images[mid_noise_idx],
+                std::max<uint32_t>(1, noise_guide_block));
+            std::fprintf(stderr, "[DEBUG] pre-normalize noise_floor from mid-exposure frame #%zu (ev=%.2f) = %.1f\n",
+                mid_noise_idx, images[mid_noise_idx].metadata.ev_value, pre_normalize_noise_floor);
+        }
+
         Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
-        NormalizeFrames(float_images, images, ref_idx);
+        NormalizeFrames(float_images, images, exposure_ref_idx);
         for (size_t i = 1; i < images.size(); ++i)
         {
             if (!IsCompatibleForAverage(images[0], images[i]))
@@ -404,20 +436,33 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
         }
 
-        uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
-        std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, progress);
-        float ref_ev = images[ref_idx].metadata.ev_value;
-        float ref_bias = images[ref_idx].metadata.exposure_bias;
+        uint32_t cfa_period = images[exposure_ref_idx].metadata.mosaic_pattern_width;
+        // Exposure normalization and alignment are decoupled: exposure_ref_idx
+        // defines intensity scaling and metadata semantics, while align_ref_idx
+        // defines the single common coordinate system used by merge.  The merge
+        // base image itself is the exposure reference frame warped into that
+        // common coordinate system.
+        AlignedStack aligned_stack = BuildAlignedComparisons(float_images, images, align_ref_idx, exposure_ref_idx, settings_, cfa_period, progress);
+        float exposure_ref_ev = images[exposure_ref_idx].metadata.ev_value;
+        float exposure_ref_bias = images[exposure_ref_idx].metadata.exposure_bias;
         std::vector<float> exp_scales;
-        exp_scales.reserve(images.size());
+        exp_scales.reserve(images.size() > 0 ? images.size() - 1 : 0);
         for (size_t i = 0; i < images.size(); ++i)
         {
-            if (i == ref_idx) continue;
+            // Comparison ordering must exactly mirror BuildAlignedComparisons():
+            // merge base is the exposure reference frame (already expressed in
+            // the common alignment coordinate system), so the comparison list
+            // excludes exposure_ref_idx.
+            if (i == exposure_ref_idx) continue;
             float comp_ev = images[i].metadata.ev_value;
-            if (ref_ev > 0.0f && comp_ev > 0.0f)
+            if (exposure_ref_ev > 0.0f && comp_ev > 0.0f)
             {
-                exp_scales.push_back((ref_ev / comp_ev) *
-                    std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
+                // All float_images were normalized to the exposure reference
+                // frame before alignment.  Merge still needs the original
+                // per-comparison exposure scale in the same order as the aligned
+                // comparison list (which excludes the exposure reference frame).
+                exp_scales.push_back((exposure_ref_ev / comp_ev) *
+                    std::pow(2.0f, exposure_ref_bias - images[i].metadata.exposure_bias));
             } else
             {
                 exp_scales.push_back(1.0f);
@@ -437,11 +482,11 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal average");
             TemporalDenoiseParams params;
             params.strength = settings_.noise_reduction;   // stored but unused by TemporalAverage
-            params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
-            params.black_level = MeanBlackLevel(images[ref_idx].metadata);
+            params.white_level = static_cast<float>(images[exposure_ref_idx].metadata.white_level);
+            params.black_level = MeanBlackLevel(images[exposure_ref_idx].metadata);
             params.num_scales = static_cast<uint32_t>(exp_scales.size());
             params.exposure_scales = exp_scales.data();
-            merged = TemporalAverage(float_images[ref_idx], aligned, params);
+            merged = TemporalAverage(aligned_stack.reference, aligned_stack.comparisons, params);
         } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
         {
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with frequency path");
@@ -449,11 +494,11 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.mode = settings_.frequency_mode;
             params.noise_reduction = settings_.noise_reduction;
             params.tile_size = settings_.tile_size;
-            params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
-            params.black_level = MeanBlackLevel(images[ref_idx].metadata);
+            params.white_level = static_cast<float>(images[exposure_ref_idx].metadata.white_level);
+            params.black_level = MeanBlackLevel(images[exposure_ref_idx].metadata);
             params.num_scales = static_cast<uint32_t>(exp_scales.size());
             params.exposure_scales = exp_scales.data();
-            merged = FrequencyMerge(float_images[ref_idx], aligned, params);
+            merged = FrequencyMerge(aligned_stack.reference, aligned_stack.comparisons, params);
         } else
         {
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with spatial path");
@@ -461,26 +506,21 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.mode = settings_.spatial_mode;
             params.noise_reduction = settings_.noise_reduction;
             params.robustness = ComputeRobustness(settings_.noise_reduction);
-            float estimated_noise = EstimateNoiseFloor(float_images[ref_idx], std::max<uint32_t>(1, cfa_period));
-            float formula_noise = std::max(PipelineConstants::kNoiseFloorMin, settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
-            // Assertion: auto-estimate must not exceed formula value.
-            // Dark reference frames (Bkt) can produce inflated noise floor,
-            // which disables the robust weight formula and causes blur.
-            params.noise_floor = std::min(estimated_noise, formula_noise);
-            float avg_bl = MeanBlackLevel(images[ref_idx].metadata);
-            params.highlight_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kHighlightFactor;
-            params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kClipFactor;
-            params.guide_block_size = images[ref_idx].metadata.mosaic_pattern_width >= 2
-                ? images[ref_idx].metadata.mosaic_pattern_width
+            params.noise_floor = pre_normalize_noise_floor;
+            float avg_bl = MeanBlackLevel(images[exposure_ref_idx].metadata);
+            params.highlight_threshold = (static_cast<float>(images[exposure_ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kHighlightFactor;
+            params.clip_threshold = (static_cast<float>(images[exposure_ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kClipFactor;
+            params.guide_block_size = images[exposure_ref_idx].metadata.mosaic_pattern_width >= 2
+                ? images[exposure_ref_idx].metadata.mosaic_pattern_width
                 : 2;
             params.num_scales = static_cast<uint32_t>(exp_scales.size());
             params.exposure_scales = exp_scales.data();
-            merged = SpatialMerge(float_images[ref_idx], aligned, params);
+            merged = SpatialMerge(aligned_stack.reference, aligned_stack.comparisons, params);
         }
 
 // Compute bit-depth rescaling factor (must happen in black-subtracted space)
-        float ref_bl = MeanBlackLevel(images[ref_idx].metadata);
-        uint32_t sensor_white = images[ref_idx].metadata.white_level;
+        float ref_bl = MeanBlackLevel(images[exposure_ref_idx].metadata);
+        uint32_t sensor_white = images[exposure_ref_idx].metadata.white_level;
         uint32_t target_white = ResolveTargetWhiteLevel(settings_.bit_depth,
                                                         sensor_white);
         float bit_scale = (target_white != sensor_white && sensor_white > 0)
@@ -519,8 +559,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.mode = settings_.exposure_mode;
             params.curve_mode = settings_.exposure_curve_mode;
             params.stops = settings_.exposure_stops;
-            params.mosaic_pattern_width = images[ref_idx].metadata.mosaic_pattern_width;
-            for (int i = 0; i < 4; ++i) params.black_level[i] = images[ref_idx].metadata.black_level[i] * bit_scale;
+            params.mosaic_pattern_width = images[exposure_ref_idx].metadata.mosaic_pattern_width;
+            for (int i = 0; i < 4; ++i) params.black_level[i] = images[exposure_ref_idx].metadata.black_level[i] * bit_scale;
             // Exposure correction operates on data that already has black restored,
             // so the white_level passed must be the final (rescaled) one.
             ApplyExposure(merged, target_white, params);
@@ -537,7 +577,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             bool has_per_channel = false;
             for (int i = 0; i < 4 && i < static_cast<int>(merged.channels); ++i)
             {
-                float v = images[ref_idx].metadata.black_level[i];
+                float v = images[exposure_ref_idx].metadata.black_level[i];
                 if (v > 0.0f)
                 { bl_ch[i] = v; has_per_channel = true; }
                 else
@@ -561,13 +601,13 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
         }
 
-        if (images[ref_idx].metadata.mosaic_pattern_width > 1 &&
-            merged.channels == images[ref_idx].metadata.mosaic_pattern_width * images[ref_idx].metadata.mosaic_pattern_width)
+        if (images[exposure_ref_idx].metadata.mosaic_pattern_width > 1 &&
+            merged.channels == images[exposure_ref_idx].metadata.mosaic_pattern_width * images[exposure_ref_idx].metadata.mosaic_pattern_width)
             {
             merged = ConvertPlaneImageToMosaic(merged,
-                                               images[ref_idx].metadata.width,
-                                               images[ref_idx].metadata.height,
-                                               images[ref_idx].metadata.mosaic_pattern_width);
+                                               images[exposure_ref_idx].metadata.width,
+                                               images[exposure_ref_idx].metadata.height,
+                                               images[exposure_ref_idx].metadata.mosaic_pattern_width);
         }
 
         // Determine effective output format (never Auto at this point).
@@ -604,7 +644,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
             Report(progress, PipelineConstants::kProgressContainer, "Preparing output DNG container");
             RawImage output;
-            output.metadata = std::move(images[ref_idx].metadata);
+            output.metadata = std::move(images[exposure_ref_idx].metadata);
             output.metadata.white_level = target_white;
             if (bit_scale != 1.0f && ref_bl > 1.0f)
             {
@@ -638,14 +678,14 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             Report(progress, PipelineConstants::kProgressQuantize, "Writing RAW as non-DNG (Bayer mosaic)");
 
             io::DecodedImage raw_decoded;
-            raw_decoded.info.width     = images[ref_idx].metadata.width;
-            raw_decoded.info.height    = images[ref_idx].metadata.height;
+            raw_decoded.info.width     = images[exposure_ref_idx].metadata.width;
+            raw_decoded.info.height    = images[exposure_ref_idx].metadata.height;
             raw_decoded.info.pix_fmt   = io::kPixelGray;
             raw_decoded.info.bit_depth = settings_.bit_depth;
             raw_decoded.info.is_raw    = true;
             raw_decoded.info.white_level = static_cast<float>(target_white);
-            raw_decoded.info.ev_value = images[ref_idx].metadata.ev_value;
-            raw_decoded.info.exposure_bias     = images[ref_idx].metadata.exposure_bias;
+            raw_decoded.info.ev_value = images[exposure_ref_idx].metadata.ev_value;
+            raw_decoded.info.exposure_bias     = images[exposure_ref_idx].metadata.exposure_bias;
             raw_decoded.pixels = merged.data;
 
             // Build single-element input vector so WriteImage can infer format

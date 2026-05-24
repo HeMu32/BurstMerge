@@ -15,11 +15,20 @@ namespace burstmerge
 // frames are fed into the alignment algorithms, including grayscale guides,
 // progress reporting, and bracket-transmission chaining.
 
-std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& float_images,
-                                                const std::vector<RawImage>& raw_images,
-                                                size_t ref_idx,
-                                                const Settings& settings,
-                                                uint32_t cfa_period,
-                                                const PipelineOrchestrator::ProgressFn& progress);
+struct AlignedStack
+{
+    // Merge base image in the alignment-root coordinate system.
+    FloatImage reference;
+    // Comparison images in the same coordinate system, excluding `reference`.
+    std::vector<FloatImage> comparisons;
+};
+
+AlignedStack BuildAlignedComparisons(const std::vector<FloatImage>& float_images,
+                                     const std::vector<RawImage>& raw_images,
+                                     size_t align_ref_idx,
+                                     size_t exposure_ref_idx,
+                                     const Settings& settings,
+                                     uint32_t cfa_period,
+                                     const PipelineOrchestrator::ProgressFn& progress);
 
 } // namespace burstmerge

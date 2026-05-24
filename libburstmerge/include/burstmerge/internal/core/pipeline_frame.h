@@ -24,6 +24,8 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                      size_t ref_idx);
 std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images);
 size_t SelectExposureRefIndex(const std::vector<RawImage>& images);
+size_t SelectAlignmentRefIndex(const std::vector<RawImage>& images,
+                               size_t exposure_ref_idx);
 
 // --- Non-RAW helpers ---
 FloatImage DecodedImageToFloatImage(const io::DecodedImage& img);
