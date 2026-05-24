@@ -62,6 +62,90 @@ inline AlignmentResult InvertAlignmentResult(AlignmentResult ar)
     return ar;
 }
 
+AlignmentResult InvertAlignmentResultApprox(const AlignmentResult& forward)
+{
+    // WarpAligned() interprets a tile field on the OUTPUT grid:
+    //   out(x) = src(x - d(x))
+    // Therefore, if we estimate a reverse field r on the low-exposure grid, the
+    // inverse field on the high-exposure/output grid cannot be obtained by a
+    // simple sign flip.  We instead solve the fixed-point relation
+    //   x_hi = x_lo - r(x_lo)
+    // and then recover the forward field from d_fwd(x_hi) = x_lo - x_hi.
+    AlignmentResult inv = forward;
+    if (forward.tile_shift_x.empty() || forward.tile_shift_y.empty() ||
+        forward.tiles_x == 0 || forward.tiles_y == 0)
+    {
+        inv.shift_x = -forward.shift_x;
+        inv.shift_y = -forward.shift_y;
+        return inv;
+    }
+
+    const uint32_t tiles_x = forward.tiles_x;
+    const uint32_t tiles_y = forward.tiles_y;
+    const int spacing = forward.tile_spacing > 0 ? forward.tile_spacing : forward.tile_size;
+    const float spacing_f = static_cast<float>(std::max(1, spacing));
+    const size_t n_tiles = static_cast<size_t>(tiles_x) * tiles_y;
+
+    auto tile_center = [spacing_f](uint32_t t) -> float
+    {
+        return (static_cast<float>(t) + 1.0f) * spacing_f - 0.5f;
+    };
+
+    inv.tile_shift_x.assign(n_tiles, 0);
+    inv.tile_shift_y.assign(n_tiles, 0);
+    for (uint32_t ty = 0; ty < tiles_y; ++ty)
+    {
+        for (uint32_t tx = 0; tx < tiles_x; ++tx)
+        {
+            const size_t idx = static_cast<size_t>(ty) * tiles_x + tx;
+            const float x_hi = tile_center(tx);
+            const float y_hi = tile_center(ty);
+
+            // Solve x_hi = x_lo - d_rev(x_lo) by fixed-point iteration in the
+            // reverse-field domain, then derive d_fwd(x_hi) = x_lo - x_hi.
+            float x_lo = x_hi;
+            float y_lo = y_hi;
+            for (int iter = 0; iter < 6; ++iter)
+            {
+                const float sample_x = std::max(0.0f, x_lo);
+                const float sample_y = std::max(0.0f, y_lo);
+                const uint32_t px = static_cast<uint32_t>(std::lround(sample_x));
+                const uint32_t py = static_cast<uint32_t>(std::lround(sample_y));
+                const float dx_rev = InterpolateTileShift(forward.tile_shift_x,
+                                                         forward.tiles_x,
+                                                         forward.tiles_y,
+                                                         forward.tile_size,
+                                                         forward.tile_spacing,
+                                                         px,
+                                                         py);
+                const float dy_rev = InterpolateTileShift(forward.tile_shift_y,
+                                                         forward.tiles_x,
+                                                         forward.tiles_y,
+                                                         forward.tile_size,
+                                                         forward.tile_spacing,
+                                                         px,
+                                                         py);
+                x_lo = x_hi + dx_rev;
+                y_lo = y_hi + dy_rev;
+            }
+
+            const float dx_fwd = x_lo - x_hi;
+            const float dy_fwd = y_lo - y_hi;
+            inv.tile_shift_x[idx] = static_cast<int16_t>(std::lround(dx_fwd));
+            inv.tile_shift_y[idx] = static_cast<int16_t>(std::lround(dy_fwd));
+        }
+    }
+
+    long sx = 0;
+    long sy = 0;
+    for (int16_t v : inv.tile_shift_x) sx += v;
+    for (int16_t v : inv.tile_shift_y) sy += v;
+    const long denom = std::max<long>(1, static_cast<long>(n_tiles));
+    inv.shift_x = static_cast<int32_t>(std::lround(static_cast<double>(sx) / static_cast<double>(denom)));
+    inv.shift_y = static_cast<int32_t>(std::lround(static_cast<double>(sy) / static_cast<double>(denom)));
+    return inv;
+}
+
 struct AlignmentPipelineContext
 {
     // Shared alignment-side state passed into the small helper functions below.
@@ -374,11 +458,11 @@ FloatImage AlignInvertedAndWarp(const FloatImage& logical_ref,
                                 size_t total_count,
                                 const AlignmentPipelineContext& ctx)
 {
-    // Low-exposure-side bracket handling:
-    // logical goal:      source(low) -> logical_ref(high)
-    // field estimation:  logical_ref(high) -> source(low)
-    // final application: invert estimated field, then warp source into the
-    //                    already-aligned parent coordinate system.
+    // Low-exposure-side bracket handling uses the reverse-direction solve as its
+    // primary strategy because it is typically more stable near highlight-clipped
+    // boundaries.  The reverse field cannot be inverted by a plain sign flip for
+    // a non-uniform tile field, so we rebuild an approximate inverse field on the
+    // destination tile grid before warping the low-exposure frame.
     FloatImage gray_ref = BuildGrayGuide(logical_ref, ctx.white_level, ctx.align_gamma);
     FloatImage gray_src = BuildGrayGuide(source, ctx.white_level, ctx.align_gamma);
 
@@ -389,7 +473,7 @@ FloatImage AlignInvertedAndWarp(const FloatImage& logical_ref,
                                                            total_count,
                                                            ctx,
                                                            false);
-    AlignmentResult forward_ar = InvertAlignmentResult(std::move(reverse_ar));
+    AlignmentResult forward_ar = InvertAlignmentResultApprox(reverse_ar);
 
     DumpWarpedGrayBmp(gray_src,
                       forward_ar,
@@ -527,7 +611,12 @@ AlignedStack BuildAlignedComparisons(const std::vector<FloatImage>& float_images
     {
         size_t parent_idx = exposure_order[pos].second;
         size_t child_idx = exposure_order[pos - 1].second;
-        std::fprintf(stderr, "[DEBUG] Chained align (low side, logical Lo->Hi, estimated Hi->Lo then inverted): frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
+        // Low-exposure side uses the reverse-direction solve as its primary
+        // strategy, then negates the tile field to approximate Lo->Hi.  This is
+        // the intended behavior for highlight-stability testing in bracketed
+        // sequences and should not be replaced by a direct Lo->Hi solve without
+        // explicit validation.
+        std::fprintf(stderr, "[DEBUG] Chained align (low side, logical Lo->Hi): frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
             child_idx, exposure_order[pos - 1].first,
             parent_idx, exposure_order[pos].first);
         const FloatImage& parent_ref = has_aligned[parent_idx]
