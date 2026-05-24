@@ -271,12 +271,6 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     params.align_gamma = settings.align_gamma;
     params.smooth_tile_field = settings.smooth_tile_field;
 
-    if (settings.alignment_mode == AlignmentMode::DenseTile)
-    {
-        std::fprintf(stderr,
-            "[WARN] Advanced dense alignment is experimental and not fully implemented yet. Results may be unstable.\n");
-    }
-
     const float wl = static_cast<float>(raw_images[ref_idx].metadata.white_level);
     FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
     ApplyGammaGray(gray_ref_full, wl, settings.align_gamma);

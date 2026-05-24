@@ -537,31 +537,75 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             ? static_cast<float>(target_white) / static_cast<float>(sensor_white)
             : 1.0f;
 
-        // Black level restore: exposure correction (LocalReinhard) uses a single
-        // mean black level for multi-channel images, so we must first add back
-        // ref_bl (mean), let exposure do its work, then inject per-channel delta
-        // afterward.  This way the DNG pixel data matches per-channel BlackLevel
-        // metadata without confusing the tone mapper.
-        if (ref_bl > 1.0f)
+        // -----------------------------------------------------------------
+        // Bit-depth rescaling and black-level handling.
+        //
+        // There are two output formats depending on requested bit depth:
+        //
+        // 1. LOW BIT DEPTH (<=10): Black-subtracted pixel data + BlackLevel=0.
+        //    ACR/Lightroom has a rendering bug when WhiteLevel is low (<=1023)
+        //    and BlackLevel is non-zero: shadows are flooded with red because
+        //    the black subtraction is applied incorrectly.  By baking the black
+        //    offset into the pixel data and writing BlackLevel=0 we avoid the
+        //    bug.  WhiteLevel is reduced to (sensor_white - ref_bl)*bit_scale.
+        //
+        // 2. HIGH BIT DEPTH (>10): Original black-restored format.
+        //    Pixel data = raw * bit_scale + ref_bl*bit_scale.
+        //    BlackLevel = ref_bl * bit_scale (non-zero).
+        //    WhiteLevel = sensor_white * bit_scale.
+        //    This is the mathematically correct DNG representation and works
+        //    fine with ACR because the quantization step is fine enough that
+        //    the bug does not manifest.
+        //
+        // NOTE on per-channel delta code:
+        // After exposure correction we inject per-channel black-level deltas
+        // when merged.channels==4.  BuildFloatImages() converts Bayer mosaic
+        // into a 4-plane (R,Gr,Gb,B) image, so merged.channels is always 4
+        // at this point (before ConvertPlaneImageToMosaic below).  The delta
+        // is skipped for low bit depth because the zero-black path bakes the
+        // offset uniformly into pixel data.
+        // -----------------------------------------------------------------
+        bool use_zero_black = (settings_.bit_depth <= 10);
+
+        if (use_zero_black)
         {
-            float scaled_bl = ref_bl * bit_scale;
-            if (bit_scale != 1.0f)
-            {
-                for (float& v : merged.data)
-                {
-                    v = v * bit_scale + scaled_bl;
-                }
-            } else
-            {
-                for (float& v : merged.data) v += ref_bl;
-            }
-        } else
-        {
+            // Pixel data is already black-subtracted from NormalizeFrames().
+            // Just apply the bit-depth scaling; do NOT restore the black offset.
             if (bit_scale != 1.0f)
             {
                 for (float& v : merged.data) v *= bit_scale;
             }
         }
+        else
+        {
+            // Original path (bit_depth > 10): restore the mean black level so
+            // that the DNG pixel values include the black offset.  The decoder
+            // will subtract it later using the BlackLevel metadata tag.
+            if (ref_bl > 1.0f)
+            {
+                float scaled_bl = ref_bl * bit_scale;
+                if (bit_scale != 1.0f)
+                {
+                    for (float& v : merged.data)
+                    {
+                        v = v * bit_scale + scaled_bl;
+                    }
+                }
+                else
+                {
+                    for (float& v : merged.data) v += ref_bl;
+                }
+            }
+            else
+            {
+                if (bit_scale != 1.0f)
+                {
+                    for (float& v : merged.data) v *= bit_scale;
+                }
+            }
+        }
+
+        // Exposure correction ------------------------------------------------
         if (settings_.exposure_mode != ExposureMode::Off || settings_.exposure_stops != 0.0f)
         {
             Report(progress, PipelineConstants::kProgressExposure, "Exposure correction");
@@ -570,20 +614,30 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.curve_mode = settings_.exposure_curve_mode;
             params.stops = settings_.exposure_stops;
             params.mosaic_pattern_width = images[ref_idx].metadata.mosaic_pattern_width;
-            for (int i = 0; i < 4; ++i) params.black_level[i] = images[ref_idx].metadata.black_level[i] * bit_scale;
-            // Exposure correction operates on data that already has black restored,
-            // so the white_level passed must be the final (rescaled) one.
-            ApplyExposure(merged, target_white, params);
+            if (use_zero_black)
+            {
+                // Black is already subtracted; tell ApplyExposure there is no
+                // black offset.  white_level must match the rescaled range.
+                for (int i = 0; i < 4; ++i) params.black_level[i] = 0.0f;
+                uint32_t exposure_white = static_cast<uint32_t>(std::lround(
+                    (static_cast<float>(sensor_white) - ref_bl) * bit_scale));
+                ApplyExposure(merged, exposure_white, params);
+            }
+            else
+            {
+                // Original path: black level is present in pixel data.
+                for (int i = 0; i < 4; ++i) params.black_level[i] = images[ref_idx].metadata.black_level[i] * bit_scale;
+                ApplyExposure(merged, target_white, params);
+            }
         }
 
-        // After exposure (which uses mean black level for multi-channel images),
-        // inject per-channel delta so final pixel data matches per-channel
-        // BlackLevel metadata.  Only needed when the image is still in plane
-        // layout (4 channels) and per-channel black levels differ from the mean.
-        if (merged.channels == 4 && ref_bl > 1.0f)
+        // Per-channel black-level delta for 4-plane images (Bayer demosaiced).
+        // Only needed when the image is still in plane layout and per-channel
+        // black levels differ from the mean.  Skipped for low bit depth because
+        // the zero-black path bakes the offset into pixel data uniformly.
+        if (!use_zero_black && merged.channels == 4 && ref_bl > 1.0f)
         {
-            float bl_ch[4] =
-            {};
+            float bl_ch[4] = {};
             bool has_per_channel = false;
             for (int i = 0; i < 4 && i < static_cast<int>(merged.channels); ++i)
             {
@@ -596,7 +650,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             if (has_per_channel)
             {
                 float delta[4];
-                for (int i = 0; i < 4; ++i) delta[i] = bl_ch[i] - ref_bl;
+                for (int i = 0; i < 4; ++i) delta[i] = (bl_ch[i] - ref_bl) * bit_scale;
                 for (uint32_t y = 0; y < merged.height; ++y)
                 {
                     for (uint32_t x = 0; x < merged.width; ++x)
@@ -647,6 +701,9 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         // Resolve output path after format decision (see audit A.1)
         std::string output_path = ResolveImageOutputPath(output_path_or_dir, eff_fmt);
 
+        // -----------------------------------------------------------------
+        // DNG output.
+        // -----------------------------------------------------------------
         if (want_dng)
         {
             Report(progress, PipelineConstants::kProgressQuantize, "Quantizing float image to UInt16");
@@ -656,21 +713,50 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             RawImage output;
             output.metadata = std::move(images[ref_idx].metadata);
             output.metadata.white_level = target_white;
-            if (bit_scale != 1.0f && ref_bl > 1.0f)
+
+            if (use_zero_black)
             {
-                for (int i = 0; i < 4; ++i)
+                // Low bit depth: write BlackLevel=0 and adjust WhiteLevel to
+                // the rescaled dynamic range (sensor_white - ref_bl)*bit_scale.
+                // The pixel data already has the black offset baked in via
+                // NormalizeFrames(), so the decoder sees BlackLevel=0 and does
+                // not attempt to subtract anything further.
+                for (int i = 0; i < 4; ++i) output.metadata.black_level[i] = 0.0f;
+                if (ref_bl > 1.0f && bit_scale != 1.0f)
                 {
-                    if (output.metadata.black_level[i] > 0.0f)
+                    output.metadata.white_level = static_cast<uint32_t>(std::lround(
+                        (static_cast<float>(sensor_white) - ref_bl) * bit_scale));
+                }
+            }
+            else
+            {
+                // High bit depth: original behaviour.  Scale the metadata
+                // BlackLevel values by bit_scale so they match the rescaled
+                // pixel data.  The decoder subtracts these values to recover
+                // the linear light signal.
+                if (bit_scale != 1.0f && ref_bl > 1.0f)
+                {
+                    for (int i = 0; i < 4; ++i)
                     {
-                        output.metadata.black_level[i] *= bit_scale;
+                        if (output.metadata.black_level[i] > 0.0f)
+                        {
+                            output.metadata.black_level[i] *= bit_scale;
+                        }
                     }
                 }
             }
             output.pixels = std::move(averaged);
 
             Report(progress, PipelineConstants::kProgressWrite, "Writing output DNG file");
-            io::SetDngWhiteLevel(output.metadata.dng_negative, target_white);
-            if (bit_scale != 1.0f && ref_bl > 1.0f)
+            io::SetDngWhiteLevel(output.metadata.dng_negative, output.metadata.white_level);
+            if (use_zero_black)
+            {
+                // Force BlackLevel to 0 in the DNG SDK negative so the
+                // resulting DNG tag is exactly [0,0,0,0].
+                float zero_bl[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                io::SetDngBlackLevel(output.metadata.dng_negative, zero_bl);
+            }
+            else if (bit_scale != 1.0f && ref_bl > 1.0f)
             {
                 float scaled_bl[4];
                 for (int i = 0; i < 4; ++i)
