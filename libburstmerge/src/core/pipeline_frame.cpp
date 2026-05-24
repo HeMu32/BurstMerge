@@ -89,7 +89,7 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                      size_t ref_idx)
 {
     ProfileScope scope("time.pipeline.normalize_frames");
-    float ref_iso = raw_images[ref_idx].metadata.iso_exposure_time;
+    float ref_ev = raw_images[ref_idx].metadata.ev_value;
 
     ParallelFor(float_images.size(), 1, [&](size_t i0, size_t i1)
     {
@@ -109,10 +109,10 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
 
             if (i == ref_idx) continue;
 
-            float comp_iso = meta.iso_exposure_time;
-            if (ref_iso > 0.0f && comp_iso > 0.0f)
+            float comp_ev = meta.ev_value;
+            if (ref_ev > 0.0f && comp_ev > 0.0f)
             {
-                float scale = (ref_iso / comp_iso) *
+                float scale = (ref_ev / comp_ev) *
                               std::pow(2.0f,
                                        raw_images[ref_idx].metadata.exposure_bias - meta.exposure_bias);
                 if (std::abs(scale - 1.0f) > 0.001f)
@@ -153,7 +153,7 @@ size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
     float max_exp = 0.0f;
     for (const auto& img : images)
     {
-        float v = img.metadata.iso_exposure_time;
+        float v = img.metadata.ev_value;
         if (v > 0.0f)
         {
             has_exposure = true;
@@ -168,7 +168,7 @@ size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
         exposure_order.reserve(images.size());
         for (size_t i = 0; i < images.size(); ++i)
         {
-            float v = images[i].metadata.iso_exposure_time;
+            float v = images[i].metadata.ev_value;
             if (v > 0.0f) exposure_order.push_back({v, i});
         }
         if (!exposure_order.empty())

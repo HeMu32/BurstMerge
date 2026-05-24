@@ -5,6 +5,7 @@
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/pipeline_io.h"
 #include "burstmerge/internal/core/profiler.h"
+#include "burstmerge/internal/core/task_executor.h"
 #include "burstmerge/internal/denoise/temporal.h"
 #include "burstmerge/internal/exposure/exposure.h"
 #include "burstmerge/internal/core/image_buffer.h"
@@ -15,11 +16,14 @@
 #include "burstmerge/internal/merge/spatial.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <vector>
 
 namespace burstmerge
@@ -167,6 +171,18 @@ static std::string ResolveImageOutputPath(const std::string& output_path_or_dir,
     return (out / ("burstmerge_output" + std::string(def_ext))).string();
 }
 
+static std::vector<uint8_t> ReadFileToMemory(const std::string& path)
+{
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) throw std::runtime_error("Failed to open file: " + path);
+    auto size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buf(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(buf.data()), buf.size()))
+        throw std::runtime_error("Failed to read file: " + path);
+    return buf;
+}
+
 } // namespace
 
 PipelineOrchestrator::PipelineOrchestrator(BackendType backend, Settings settings)
@@ -250,7 +266,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             {
                 RawImage ri;
                 ri.metadata.white_level = static_cast<uint32_t>(d.info.white_level);
-                ri.metadata.iso_exposure_time = d.info.iso_exposure_time;
+                ri.metadata.ev_value = d.info.ev_value;
                 ri.metadata.exposure_bias = d.info.exposure_bias;
                 std::memcpy(ri.metadata.black_level, d.info.black_level, sizeof(float) * 4);
                 ri.metadata.mosaic_pattern_width = 0;
@@ -360,15 +376,46 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
-        Report(progress, PipelineConstants::kProgressDecodeStart, "Reading and decoding DNG files");
-        std::vector<RawImage> images;
-        images.reserve(dng_paths.size());
+// DNG read Phase 1: read all DNG files into memory (sequential I/O)
+        constexpr float kReadFraction = 0.3f;
+        const float kReadEnd = PipelineConstants::kProgressDecodeStart +
+                               PipelineConstants::kProgressDecodeRange * kReadFraction;
+        Report(progress, PipelineConstants::kProgressDecodeStart, "Reading DNG files");
+        std::vector<std::vector<uint8_t>> file_buffers(dng_paths.size());
         for (size_t i = 0; i < dng_paths.size(); ++i)
         {
-            DngReader reader(dng_paths[i].c_str());
-            images.push_back(reader.Read());
-            float p = PipelineConstants::kProgressDecodeStart + PipelineConstants::kProgressDecodeRange * static_cast<float>(i + 1) / static_cast<float>(dng_paths.size());
-            Report(progress, p, "Decoded image " + std::to_string(i + 1) + "/" + std::to_string(dng_paths.size()));
+            file_buffers[i] = ReadFileToMemory(dng_paths[i]);
+            float p = PipelineConstants::kProgressDecodeStart +
+                      (kReadEnd - PipelineConstants::kProgressDecodeStart) *
+                          static_cast<float>(i + 1) / static_cast<float>(dng_paths.size());
+            Report(progress, p, "Read file " + std::to_string(i + 1) + "/" + std::to_string(dng_paths.size()));
+        }
+
+// DNG read Phase 2: decode all DNGs from memory in parallel (CPU-bound)
+        const float kDecodeStart = kReadEnd;
+        Report(progress, kDecodeStart, "Decoding DNG files");
+        std::vector<RawImage> images(dng_paths.size());
+        {
+            std::atomic<int> decoded_count{0};
+            std::mutex pm;
+            ParallelFor(dng_paths.size(), 1, [&](size_t begin, size_t end)
+            {
+                for (size_t i = begin; i < end; ++i)
+                {
+                    images[i] = ReadDngFromBuffer(file_buffers[i].data(),
+                                                   static_cast<uint32_t>(file_buffers[i].size()));
+                    int done = decoded_count.fetch_add(1) + 1;
+                    {
+                        std::lock_guard<std::mutex> lock(pm);
+                        float p = kDecodeStart +
+                                  (PipelineConstants::kProgressDecodeStart +
+                                   PipelineConstants::kProgressDecodeRange - kDecodeStart) *
+                                      static_cast<float>(done) / static_cast<float>(dng_paths.size());
+                        Report(progress, p,
+                               "Decoded image " + std::to_string(done) + "/" + std::to_string(dng_paths.size()));
+                    }
+                }
+            });
         }
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
         size_t ref_idx = SelectExposureRefIndex(images);
@@ -409,17 +456,17 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
         uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
         std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, progress);
-        float ref_iso = images[ref_idx].metadata.iso_exposure_time;
+        float ref_ev = images[ref_idx].metadata.ev_value;
         float ref_bias = images[ref_idx].metadata.exposure_bias;
         std::vector<float> exp_scales;
         exp_scales.reserve(images.size());
         for (size_t i = 0; i < images.size(); ++i)
         {
             if (i == ref_idx) continue;
-            float comp_iso = images[i].metadata.iso_exposure_time;
-            if (ref_iso > 0.0f && comp_iso > 0.0f)
+            float comp_ev = images[i].metadata.ev_value;
+            if (ref_ev > 0.0f && comp_ev > 0.0f)
             {
-                exp_scales.push_back((ref_iso / comp_iso) *
+                exp_scales.push_back((ref_ev / comp_ev) *
                     std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
             } else
             {
@@ -647,7 +694,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             raw_decoded.info.bit_depth = settings_.bit_depth;
             raw_decoded.info.is_raw    = true;
             raw_decoded.info.white_level = static_cast<float>(target_white);
-            raw_decoded.info.iso_exposure_time = images[ref_idx].metadata.iso_exposure_time;
+            raw_decoded.info.ev_value = images[ref_idx].metadata.ev_value;
             raw_decoded.info.exposure_bias     = images[ref_idx].metadata.exposure_bias;
             raw_decoded.pixels = merged.data;
 

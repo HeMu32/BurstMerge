@@ -84,7 +84,7 @@ void ExtractRawMetadata(DngNegativeHolder* holder,
 
 void ExtractExposureMetadata(DngNegativeHolder* holder,
                              float& exposure_bias,
-                             float& iso_exposure_time);
+                             float& ev_value);
 
 // Override the output DNG's white/black level to match the desired bit depth.
 void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level);

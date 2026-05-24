@@ -80,47 +80,55 @@ burstmerge::FloatImage BinomialBlur(const burstmerge::FloatImage& src,
 
     burstmerge::FloatImage out = tmp;
 
-    for (uint32_t y = 0; y < src.height; ++y)
+    burstmerge::ParallelForRows(src.height, burstmerge::RecommendedImageRowGrain(src.width, src.channels, burstmerge::kRowGrainMinPixels, burstmerge::kRowGrainMinRows),
+    [&](uint32_t y_begin, uint32_t y_end)
     {
-        for (uint32_t x = 0; x < src.width; ++x)
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            for (uint32_t c = 0; c < src.channels; ++c)
+            for (uint32_t x = 0; x < src.width; ++x)
             {
-                double sum = 0.0;
-                double weight = 0.0;
-                for (int dx = -radius; dx <= radius; ++dx)
+                for (uint32_t c = 0; c < src.channels; ++c)
                 {
-                    int sx = static_cast<int>(x) + dx;
-                    if (sx < 0 || sx >= static_cast<int>(src.width)) continue;
-                    float w = bw[std::abs(dx)];
-                    sum += static_cast<double>(w) * src.At(static_cast<uint32_t>(sx), y, c);
-                    weight += w;
+                    double sum = 0.0;
+                    double weight = 0.0;
+                    for (int dx = -radius; dx <= radius; ++dx)
+                    {
+                        int sx = static_cast<int>(x) + dx;
+                        if (sx < 0 || sx >= static_cast<int>(src.width)) continue;
+                        float w = bw[std::abs(dx)];
+                        sum += static_cast<double>(w) * src.At(static_cast<uint32_t>(sx), y, c);
+                        weight += w;
+                    }
+                    tmp.At(x, y, c) = static_cast<float>(sum / std::max(1.0, weight));
                 }
-                tmp.At(x, y, c) = static_cast<float>(sum / std::max(1.0, weight));
             }
         }
-    }
+    });
 
-    for (uint32_t y = 0; y < src.height; ++y)
+    burstmerge::ParallelForRows(src.height, burstmerge::RecommendedImageRowGrain(src.width, src.channels, burstmerge::kRowGrainMinPixels, burstmerge::kRowGrainMinRows),
+    [&](uint32_t y_begin, uint32_t y_end)
     {
-        for (uint32_t x = 0; x < src.width; ++x)
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            for (uint32_t c = 0; c < src.channels; ++c)
+            for (uint32_t x = 0; x < src.width; ++x)
             {
-                double sum = 0.0;
-                double weight = 0.0;
-                for (int dy = -radius; dy <= radius; ++dy)
+                for (uint32_t c = 0; c < src.channels; ++c)
                 {
-                    int sy = static_cast<int>(y) + dy;
-                    if (sy < 0 || sy >= static_cast<int>(src.height)) continue;
-                    float w = bw[std::abs(dy)];
-                    sum += static_cast<double>(w) * tmp.At(x, static_cast<uint32_t>(sy), c);
-                    weight += w;
+                    double sum = 0.0;
+                    double weight = 0.0;
+                    for (int dy = -radius; dy <= radius; ++dy)
+                    {
+                        int sy = static_cast<int>(y) + dy;
+                        if (sy < 0 || sy >= static_cast<int>(src.height)) continue;
+                        float w = bw[std::abs(dy)];
+                        sum += static_cast<double>(w) * tmp.At(x, static_cast<uint32_t>(sy), c);
+                        weight += w;
+                    }
+                    out.At(x, y, c) = static_cast<float>(sum / std::max(1.0, weight));
                 }
-                out.At(x, y, c) = static_cast<float>(sum / std::max(1.0, weight));
             }
         }
-    }
+    });
     return out;
 }
 
@@ -141,16 +149,42 @@ float EstimateLinearNoise(const burstmerge::FloatImage& image,
 {
     if (image.data.empty() || blurred.data.empty()) return burstmerge::SpatialConstants::kNoiseFloorFallback;
     const uint32_t step = std::max<uint32_t>(1, sample_step);
+    const uint32_t sample_rows = (image.height + step - 1) / step;
+    const uint32_t grain_rows = burstmerge::RecommendedImageRowGrain(
+        image.width,
+        image.channels,
+        burstmerge::kRowGrainMinPixels,
+        std::max<uint32_t>(burstmerge::kRowGrainMinRows, step));
+
+    std::vector<double> partial_sum(sample_rows, 0.0);
+    std::vector<uint64_t> partial_count(sample_rows, 0);
+
+    burstmerge::ParallelForRows(image.height, grain_rows, [&](uint32_t y_begin, uint32_t y_end)
+    {
+        uint32_t y = ((y_begin + step - 1) / step) * step;
+        while (y < y_end && y < image.height)
+        {
+            const uint32_t sample_idx = y / step;
+            double local_sum = 0.0;
+            uint64_t local_count = 0;
+            for (uint32_t x = 0; x < image.width; x += step)
+            {
+                size_t idx = static_cast<size_t>(y) * image.width + x;
+                local_sum += ColorDifferenceAt(image, blurred, idx);
+                ++local_count;
+            }
+            partial_sum[sample_idx] = local_sum;
+            partial_count[sample_idx] = local_count;
+            y += step;
+        }
+    });
+
     double sum = 0.0;
     uint64_t count = 0;
-    for (uint32_t y = 0; y < image.height; y += step)
+    for (uint32_t i = 0; i < sample_rows; ++i)
     {
-        for (uint32_t x = 0; x < image.width; x += step)
-        {
-            size_t idx = static_cast<size_t>(y) * image.width + x;
-            sum += ColorDifferenceAt(image, blurred, idx);
-            ++count;
-        }
+        sum += partial_sum[i];
+        count += partial_count[i];
     }
     if (count == 0) return burstmerge::SpatialConstants::kNoiseFloorFallback;
     return std::max(burstmerge::SpatialConstants::kNoiseFloorMin, static_cast<float>(sum / static_cast<double>(count)));
@@ -217,12 +251,33 @@ FloatImage SpatialMerge(const FloatImage& reference,
     }
 
     const bool linear_mode = params.mode == SpatialMergeMode::Linear;
-    const FloatImage ref_blur = linear_mode ? BinomialBlur(reference) : BoxBlur(reference, 2);
+    FloatImage ref_blur;
+    {
+        ProfileScope scope(linear_mode ? "time.merge.spatial.linear.ref_blur" : "time.merge.spatial.standard.ref_blur");
+        ref_blur = linear_mode ? BinomialBlur(reference) : BoxBlur(reference, 2);
+    }
     std::vector<FloatImage> cmp_blurs;
     cmp_blurs.reserve(aligned_comparisons.size());
-    for (const auto& img : aligned_comparisons)
+    if (linear_mode)
     {
-        cmp_blurs.push_back(linear_mode ? BinomialBlur(img) : BoxBlur(img, 2));
+        // Avoid nested parallelism here. BinomialBlur() already parallelizes
+        // over rows; calling it inside another ParallelFor() causes the inner
+        // row-parallel loops to hit omp_in_parallel() and fall back to serial
+        // execution, which underutilizes the CPU for typical 3-5 frame bursts.
+        cmp_blurs.reserve(aligned_comparisons.size());
+        ProfileScope scope("time.merge.spatial.linear.cmp_blurs");
+        for (const auto& img : aligned_comparisons)
+        {
+            cmp_blurs.push_back(BinomialBlur(img));
+        }
+    }
+    else
+    {
+        ProfileScope scope("time.merge.spatial.standard.cmp_blurs");
+        for (const auto& img : aligned_comparisons)
+        {
+            cmp_blurs.push_back(BoxBlur(img, 2));
+        }
     }
 
     FloatImage out;
@@ -240,11 +295,17 @@ FloatImage SpatialMerge(const FloatImage& reference,
         ? params.highlight_threshold
         : MaxValue(reference) * burstmerge::SpatialConstants::kHighlightThresholdFactor;
     const uint32_t guide_block = std::max<uint32_t>(1, params.guide_block_size);
-    const FloatImage ref_guide_map = linear_mode ? FloatImage{} : BuildBlockMeanGuide(reference, guide_block);
+    FloatImage ref_guide_map;
+    if (!linear_mode)
+    {
+        ProfileScope scope("time.merge.spatial.standard.ref_guide_map");
+        ref_guide_map = BuildBlockMeanGuide(reference, guide_block);
+    }
     std::vector<FloatImage> cmp_guide_maps;
     if (!linear_mode)
     {
         cmp_guide_maps.reserve(aligned_comparisons.size());
+        ProfileScope scope("time.merge.spatial.standard.cmp_guide_maps");
         for (const auto& img : aligned_comparisons)
         {
             cmp_guide_maps.push_back(BuildBlockMeanGuide(img, guide_block));
@@ -253,6 +314,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
 
     if (reference.channels == 1)
     {
+        ProfileScope scope(linear_mode ? "time.merge.spatial.linear.merge_loop" : "time.merge.spatial.standard.merge_loop");
         // Single-channel (mosaic): per-pixel weight, each position one guide value
         ParallelForRows(out.height, RecommendedImageRowGrain(out.width, 1, kRowGrainMinPixels, kRowGrainMinRows), [&](uint32_t y_begin, uint32_t y_end)
         {
@@ -318,6 +380,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
         });
     } else
     {
+        ProfileScope scope(linear_mode ? "time.merge.spatial.linear.merge_loop" : "time.merge.spatial.standard.merge_loop");
         // Multi-channel (CFA planes or RGB): use a single shared weight per
         // comparison frame (from max_diff across all channels) so that one
         // channel's misalignment does not create different blend factors per
