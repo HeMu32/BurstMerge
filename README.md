@@ -55,6 +55,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Support working together with Adobe LrC/ACR AI noise reduction
 - Support working together with DxO PureRAW
 - More comperhensive metadata copying for output
+- Write processing parameters and program version to output
 - Support images with more channels
 - Non-Bayer sensor support
 - Multi-threaded RAW conversion and image loading
