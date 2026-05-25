@@ -876,7 +876,7 @@ FloatImage WienerFftMergeRobust(const FloatImage& reference,
                 }
                 bands[b] = std::move(band);
             }
-        });
+        }, "freq_merge_robust" /* named tag for profiler */);
 
         for (const auto& band : bands)
         {
@@ -969,7 +969,7 @@ FloatImage WienerFftMerge(const FloatImage& reference,
             }
             bands[b] = std::move(band);
         }
-    });
+    }, "freq_merge_standard" /* named tag for profiler */);
 
     for (const auto& band : bands)
     {

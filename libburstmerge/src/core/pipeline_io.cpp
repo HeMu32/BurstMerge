@@ -1,5 +1,6 @@
 #include "burstmerge/internal/core/pipeline_io.h"
 
+#include "burstmerge/internal/core/pipeline.h"
 #include "burstmerge/internal/io/dng_io.h"
 
 #include <algorithm>
@@ -45,11 +46,6 @@ std::string LowerExt(const std::filesystem::path& p)
 bool IsDngPath(const std::string& path)
 {
     return LowerExt(std::filesystem::path(path)) == ".dng";
-}
-
-bool LooksLikeDngOutputPath(const std::string& path)
-{
-    return IsDngPath(path);
 }
 
 std::string GenerateRunId()
@@ -107,22 +103,6 @@ std::string MakeTempConvertDir(const std::string& output_path)
 
 } // namespace
 
-std::string ResolveOutputPath(const std::string& output_path_or_dir)
-{
-    std::filesystem::path out(output_path_or_dir.empty() ? "." : output_path_or_dir);
-    if (LooksLikeDngOutputPath(out.string()))
-    {
-        if (out.has_parent_path())
-        {
-            std::filesystem::create_directories(out.parent_path());
-        }
-        return out.string();
-    }
-
-    std::filesystem::create_directories(out);
-    return (out / "burstmerge_output.dng").string();
-}
-
 std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_paths,
                                           const std::string& output_path,
                                           const PipelineOrchestrator::ProgressFn& progress,
@@ -140,8 +120,17 @@ std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_
         {
             throw std::runtime_error("Input does not exist: " + path);
         }
-        if (IsDngPath(path)) dng_paths.push_back(path);
-        else raw_paths.push_back(path);
+        if (IsDngPath(path))
+        {
+            dng_paths.push_back(path);
+        }
+        else
+        {
+            std::string ext = LowerExt(std::filesystem::path(path));
+            if (!IsRawExtension(ext))
+                throw std::runtime_error("Unsupported file format (not a RAW camera file): " + path);
+            raw_paths.push_back(path);
+        }
     }
 
     if (raw_paths.empty()) return dng_paths;

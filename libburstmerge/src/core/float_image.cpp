@@ -48,7 +48,7 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale)
             ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
             {
                 for (size_t i = i0; i < i1; ++i) out.data[i] = static_cast<float>(p[i]) * scale;
-            });
+            }, "format_R8" /* named tag for profiler */);
             break;
         }
         case PixelFormat::R16_Uint:
@@ -57,7 +57,7 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale)
             ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
             {
                 for (size_t i = i0; i < i1; ++i) out.data[i] = static_cast<float>(p[i]) * scale;
-            });
+            }, "format_R16" /* named tag for profiler */);
             break;
         }
         case PixelFormat::R32_Float:
@@ -67,7 +67,7 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale)
             ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
             {
                 for (size_t i = i0; i < i1; ++i) out.data[i] = p[i] * scale;
-            });
+            }, "format_R32" /* named tag for profiler */);
             break;
         }
     }
@@ -102,7 +102,7 @@ HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_le
             float v = std::max(0.0f, std::min(src.data[i], hi));
             dst[i] = static_cast<uint16_t>(std::lround(v));
         }
-    });
+    }, "convert_uint16" /* named tag for profiler */);
     return out;
 }
 
@@ -138,7 +138,7 @@ FloatImage Downsample2x(const FloatImage& src)
                 }
             }
         }
-    });
+    }, "downsample2x" /* named tag for profiler */);
     return out;
 }
 
@@ -173,7 +173,7 @@ void Downsample2x(const FloatImage& src, FloatImage& dst)
                 }
             }
         }
-    });
+    }, "downsample2x" /* named tag for profiler */);
 }
 
 FloatImage Downsample4x(const FloatImage& src)
@@ -214,7 +214,7 @@ void Downsample4x(const FloatImage& src, FloatImage& dst)
                 }
             }
         }
-    });
+    }, "downsample4x" /* named tag for profiler */);
 }
 
 FloatImage BoxBlur(const FloatImage& src, int radius)
@@ -248,7 +248,7 @@ FloatImage BoxBlur(const FloatImage& src, int radius)
                 }
             }
         }
-    });
+    }, "box_blur" /* named tag for profiler */);
     return out;
 }
 
@@ -276,7 +276,7 @@ FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y)
                 }
             }
         }
-    });
+    }, "warp_translate" /* named tag for profiler */);
     return out;
 }
 
@@ -304,7 +304,7 @@ FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period)
                 out.At(ox, oy, c) = src.At(x, y, 0);
             }
         }
-    });
+    }, "mosaic_to_plane" /* named tag for profiler */);
 
     return out;
 }
@@ -339,7 +339,7 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
                 out.At(x, y, 0) = src.At(sx, sy, c);
             }
         }
-    });
+    }, "plane_to_mosaic" /* named tag for profiler */);
 
     return out;
 }
@@ -372,7 +372,7 @@ FloatImage ConvertPlanesToGrayscale(const FloatImage& src)
                 dst.At(x, y, 0) = sum * inv_ch;
             }
         }
-    });
+    }, "to_grayscale" /* named tag for profiler */);
 
     return dst;
 }

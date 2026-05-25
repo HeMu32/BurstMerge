@@ -179,7 +179,7 @@ AlignmentResult EstimateFrequencyTileField(
             }
             partial[i] = best;
         }
-    });
+    }, "freq_coarse" /* named tag for profiler */);
     for (const auto& best : partial)
     {
         if (best.score < gbest)
@@ -254,7 +254,7 @@ AlignmentResult EstimateFrequencyTileField(
                         }
                     }
                 }
-            });
+            }, "freq_propagate" /* named tag for profiler */);
         }
 
         AlignmentResult next;
@@ -360,7 +360,7 @@ AlignmentResult EstimateFrequencyTileField(
                     }
                 }
             }
-        });
+        }, "freq_search" /* named tag for profiler */);
 
         SmoothTileField(next, params.smooth_tile_field);
         cur = std::move(next);

@@ -62,7 +62,7 @@ float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size)
             partial_sum_sq[sample_idx] = local_sum_sq;
             partial_count[sample_idx] = local_count;
         }
-    });
+    }, "estimate_noise" /* named tag for profiler */);
 
     double sum_sq = std::accumulate(partial_sum_sq.begin(), partial_sum_sq.end(), 0.0);
     uint64_t count = std::accumulate(partial_count.begin(), partial_count.end(), uint64_t(0));
@@ -89,7 +89,7 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                      size_t ref_idx)
 {
     ProfileScope scope("time.pipeline.normalize_frames");
-    float ref_iso = raw_images[ref_idx].metadata.iso_exposure_time;
+    float ref_ev = raw_images[ref_idx].metadata.ev_value;
 
     ParallelFor(float_images.size(), 1, [&](size_t i0, size_t i1)
     {
@@ -104,15 +104,15 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                 ParallelFor(img.data.size(), 1u << 16, [&](size_t p0, size_t p1)
                 {
                     for (size_t p = p0; p < p1; ++p) img.data[p] -= bl;
-                });
+                }, "normalize_black" /* named tag for profiler */);
             }
 
             if (i == ref_idx) continue;
 
-            float comp_iso = meta.iso_exposure_time;
-            if (ref_iso > 0.0f && comp_iso > 0.0f)
+            float comp_ev = meta.ev_value;
+            if (ref_ev > 0.0f && comp_ev > 0.0f)
             {
-                float scale = (ref_iso / comp_iso) *
+                float scale = (ref_ev / comp_ev) *
                               std::pow(2.0f,
                                        raw_images[ref_idx].metadata.exposure_bias - meta.exposure_bias);
                 if (std::abs(scale - 1.0f) > 0.001f)
@@ -120,11 +120,11 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                     ParallelFor(img.data.size(), 1u << 16, [&](size_t p0, size_t p1)
                     {
                         for (size_t p = p0; p < p1; ++p) img.data[p] *= scale;
-                    });
+                    }, "normalize_exposure" /* named tag for profiler */);
                 }
             }
         }
-    });
+    }, "normalize_frame" /* named tag for profiler */);
 }
 
 std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images)
@@ -153,7 +153,7 @@ size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
     float max_exp = 0.0f;
     for (const auto& img : images)
     {
-        float v = img.metadata.iso_exposure_time;
+        float v = img.metadata.ev_value;
         if (v > 0.0f)
         {
             has_exposure = true;
@@ -168,7 +168,7 @@ size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
         exposure_order.reserve(images.size());
         for (size_t i = 0; i < images.size(); ++i)
         {
-            float v = images[i].metadata.iso_exposure_time;
+            float v = images[i].metadata.ev_value;
             if (v > 0.0f) exposure_order.push_back({v, i});
         }
         if (!exposure_order.empty())
@@ -181,6 +181,27 @@ size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
     }
 
     return images.size() / 2;
+}
+
+FloatImage DecodedImageToFloatImage(const io::DecodedImage& img)
+{
+    FloatImage fi;
+    fi.width = img.info.width;
+    fi.height = img.info.height;
+    fi.channels = img.info.pix_fmt & 0xFF;
+    fi.data = img.pixels;
+    return fi;
+}
+
+std::vector<FloatImage> BuildRgbImages(const std::vector<io::DecodedImage>& images)
+{
+    std::vector<FloatImage> out;
+    out.reserve(images.size());
+    for (const auto& img : images)
+    {
+        out.push_back(DecodedImageToFloatImage(img));
+    }
+    return out;
 }
 
 } // namespace burstmerge

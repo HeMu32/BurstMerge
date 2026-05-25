@@ -1,5 +1,6 @@
 #include "burstmerge/internal/core/profiler.h"
 
+#ifndef NDEBUG
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -7,9 +8,11 @@
 #include <sstream>
 #include <unordered_map>
 #include <vector>
+#endif
 
 namespace burstmerge
 {
+#ifndef NDEBUG
 namespace
 {
 
@@ -17,7 +20,11 @@ using Clock = std::chrono::steady_clock;
 
 struct ProfileStat
 {
+    // For time rows this is the number of timed scope completions.
+    // For counter rows this is the accumulated counter value.
     uint64_t count = 0;
+
+    // Only used by time rows. Counter rows leave this at 0.
     uint64_t total_ns = 0;
 };
 
@@ -40,43 +47,67 @@ uint64_t NowNs()
 }
 
 } // namespace
+#endif
 
 bool ProfileEnabled()
 {
+#ifdef NDEBUG
+    return false;
+#else
     static int enabled = []()
     {
         const char* env = std::getenv("BURSTMERGE_PROFILE");
         return (env && env[0] && env[0] != '0') ? 1 : 0;
     }();
     return enabled != 0;
+#endif
 }
 
 void ResetProfiler()
 {
+#ifdef NDEBUG
+    return;
+#else
     if (!ProfileEnabled()) return;
     std::lock_guard<std::mutex> lock(ProfilerMutex());
     ProfilerMap().clear();
+#endif
 }
 
 void AddProfileTime(const char* name, uint64_t nanoseconds)
 {
+#ifdef NDEBUG
+    (void)name;
+    (void)nanoseconds;
+    return;
+#else
     if (!ProfileEnabled()) return;
     std::lock_guard<std::mutex> lock(ProfilerMutex());
     auto& s = ProfilerMap()[name];
     s.count += 1;
     s.total_ns += nanoseconds;
+#endif
 }
 
 void AddProfileCounter(const char* name, uint64_t value)
 {
+#ifdef NDEBUG
+    (void)name;
+    (void)value;
+    return;
+#else
     if (!ProfileEnabled()) return;
     std::lock_guard<std::mutex> lock(ProfilerMutex());
     auto& s = ProfilerMap()[name];
     s.count += value;
+#endif
 }
 
 std::string BuildProfileReport()
 {
+#ifdef NDEBUG
+    return std::string();
+#else
     if (!ProfileEnabled()) return std::string();
 
     std::vector<std::pair<std::string, ProfileStat>> rows;
@@ -97,10 +128,14 @@ std::string BuildProfileReport()
         const auto& stat = row.second;
         if (name.rfind("counter.", 0) == 0)
         {
+            // Counter rows are reported as a single accumulated value. Their
+            // semantics are defined by the counter name at the call site.
             oss << "[PROFILE] " << name << " = " << stat.count << "\n";
         }
         else
         {
+            // Time rows report how many times the scope completed, plus total
+            // and average wall time across all recorded completions.
             double total_ms = static_cast<double>(stat.total_ns) / 1.0e6;
             double avg_ms = stat.count ? total_ms / static_cast<double>(stat.count) : 0.0;
             oss << "[PROFILE] " << name
@@ -111,18 +146,26 @@ std::string BuildProfileReport()
     }
     oss << "[PROFILE] ---- end ----\n";
     return oss.str();
+#endif
 }
 
 ProfileScope::ProfileScope(const char* name)
-    : name_(name), enabled_(ProfileEnabled())
+    : name_(name)
 {
+#ifndef NDEBUG
+    enabled_ = ProfileEnabled();
     if (enabled_) start_ns_ = NowNs();
+#endif
 }
 
 ProfileScope::~ProfileScope()
 {
+#ifdef NDEBUG
+    return;
+#else
     if (!enabled_) return;
     AddProfileTime(name_, NowNs() - start_ns_);
+#endif
 }
 
 } // namespace burstmerge

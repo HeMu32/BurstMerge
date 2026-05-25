@@ -27,4 +27,19 @@ add_burstmerge_test(test_stage0)
 set_tests_properties(test_stage0 PROPERTIES TIMEOUT 300)
 
 add_burstmerge_test(test_stage1)
-set_tests_properties(test_stage1 PROPERTIES TIMEOUT 300)
+set_tests_properties(test_stage1 PROPERTIES TIMEOUT 600)
+
+add_burstmerge_test(test_common_rgb_fmt)
+target_sources(test_common_rgb_fmt PRIVATE test_aux.cpp)
+set_tests_properties(test_common_rgb_fmt PROPERTIES TIMEOUT 600)
+
+set(TEST_COMMON_RGB_FMT_LD_PATH "${PROJECT_SOURCE_DIR}/3rdparty/libtiff/install/bin")
+# Seprator for PATH environment variable: ";" on Windows, ":" on Unix
+if (WIN32)
+    set(TEST_PATH_SEP ";")
+else()
+    set(TEST_PATH_SEP ":")
+endif()
+
+set_tests_properties(test_common_rgb_fmt PROPERTIES
+    ENVIRONMENT "PATH=${TEST_COMMON_RGB_FMT_LD_PATH}${TEST_PATH_SEP}$ENV{PATH}")
