@@ -47,7 +47,7 @@ uint32_t ResolveTargetWhiteLevel(int bit_depth, uint32_t sensor_white)
     }
 
     if (bit_depth > 16)
-    {   // illegal for current DNG container — keep sensor white level unchanged
+    {   // illegal for current DNG container - keep sensor white level unchanged
         std::fprintf(stderr, "[WARN] ResolveTargetWhiteLevel: requested bit_depth=%d out of range [1..16]; falling back to sensor white level %u\n", bit_depth, sensor_white);
         return sensor_white;
     }
@@ -224,7 +224,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 // Keep RAW files + unknown extension files (they will fail
                 // in PrepareDngInputs with a clear error, rather than being
-                // silently dropped — see audit A.3/C.4).
+                // silently dropped - see audit A.3/C.4).
                 if (IsRawExtension(ext) || ext == ".dng" || !IsImageExtension(ext))
                 {
                     filtered.push_back(p);
@@ -331,13 +331,13 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 if (eff_fmt != fallback)
                 {
                     Report(progress, PipelineConstants::kProgressMerge,
-                        "Warning: output format not specified — inferred "
+                        "Warning: output format not specified - inferred "
                         + std::string(io::OutputFormatToString(eff_fmt))
                         + " from filename extension");
                 } else
                 {
                     Report(progress, PipelineConstants::kProgressMerge,
-                        "Warning: output format not specified — defaulting to "
+                        "Warning: output format not specified - defaulting to "
                         + std::string(io::OutputFormatToString(eff_fmt)));
                 }
             }
@@ -411,11 +411,11 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                                   (PipelineConstants::kProgressDecodeStart +
                                    PipelineConstants::kProgressDecodeRange - kDecodeStart) *
                                       static_cast<float>(done) / static_cast<float>(dng_paths.size());
-                        Report(progress, p,
-                               "Decoded image " + std::to_string(done) + "/" + std::to_string(dng_paths.size()));
+                            Report(progress, p,
+                                   "Decoded image " + std::to_string(done) + "/" + std::to_string(dng_paths.size()));
                     }
                 }
-            });
+            }, "decode_dng" /* named tag for profiler */);
         }
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
         size_t ref_idx = SelectExposureRefIndex(images);
@@ -483,7 +483,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
         {
             // TemporalAverage: simple exposure-weighted frame average.
-            // noise_reduction is ignored — averaging is averaging.
+            // noise_reduction is ignored - averaging is averaging.
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal average");
             TemporalDenoiseParams params;
             params.strength = settings_.noise_reduction;   // stored but unused by TemporalAverage
@@ -686,13 +686,13 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             if (eff_fmt != fallback)
             {
                 Report(progress, PipelineConstants::kProgressMerge,
-                    "Warning: output format not specified — inferred "
+                    "Warning: output format not specified - inferred "
                     + std::string(io::OutputFormatToString(eff_fmt))
                     + " from filename extension");
             } else
             {
                 Report(progress, PipelineConstants::kProgressMerge,
-                    "Warning: output format not specified — defaulting to "
+                    "Warning: output format not specified - defaulting to "
                     + std::string(io::OutputFormatToString(eff_fmt)));
             }
         }

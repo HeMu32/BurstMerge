@@ -62,7 +62,7 @@ float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size)
             partial_sum_sq[sample_idx] = local_sum_sq;
             partial_count[sample_idx] = local_count;
         }
-    });
+    }, "estimate_noise" /* named tag for profiler */);
 
     double sum_sq = std::accumulate(partial_sum_sq.begin(), partial_sum_sq.end(), 0.0);
     uint64_t count = std::accumulate(partial_count.begin(), partial_count.end(), uint64_t(0));
@@ -104,7 +104,7 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                 ParallelFor(img.data.size(), 1u << 16, [&](size_t p0, size_t p1)
                 {
                     for (size_t p = p0; p < p1; ++p) img.data[p] -= bl;
-                });
+                }, "normalize_black" /* named tag for profiler */);
             }
 
             if (i == ref_idx) continue;
@@ -120,11 +120,11 @@ void NormalizeFrames(std::vector<FloatImage>& float_images,
                     ParallelFor(img.data.size(), 1u << 16, [&](size_t p0, size_t p1)
                     {
                         for (size_t p = p0; p < p1; ++p) img.data[p] *= scale;
-                    });
+                    }, "normalize_exposure" /* named tag for profiler */);
                 }
             }
         }
-    });
+    }, "normalize_frame" /* named tag for profiler */);
 }
 
 std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images)

@@ -76,7 +76,7 @@ void CorrectUpsamplingError(const FloatImage& ref,
                 }
             }
         }
-    });
+    }, "dense_correct" /* named tag for profiler */);
 }
 
 void SearchDenseLocal(const FloatImage& ref,
@@ -137,7 +137,7 @@ void SearchDenseLocal(const FloatImage& ref,
                 }
             }
         }
-    });
+    }, "dense_search" /* named tag for profiler */);
 }
 
 } // namespace
@@ -181,7 +181,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
             }
             partial[i] = best;
         }
-    });
+    }, "dense_coarse" /* named tag for profiler */);
     for (const auto& best : partial)
     {
         if (best.score < global_best)
@@ -247,7 +247,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
                         }
                     }
                 }
-            });
+            }, "dense_propagate" /* named tag for profiler */);
         }
 
         const int weight_ssd = (level > 0) ? 1 : 0;

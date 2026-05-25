@@ -90,7 +90,7 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
                 }
                 partial[i] = best;
             }
-        });
+        }, "align_search" /* named tag for profiler */);
         for (const auto& best : partial)
         {
             if (best.score < level_best)

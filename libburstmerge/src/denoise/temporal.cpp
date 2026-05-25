@@ -35,12 +35,12 @@ void RepairHotPixels(std::vector<FloatImage>& images,
             for (const auto& img : images) s += img.data[i];
             avg.data[i] = s;
         }
-    });
+    }, "hotpix_avg_sum" /* named tag for profiler */);
     const float inv_n = 1.0f / static_cast<float>(images.size());
     ParallelFor(total, 1u << 16, [&](size_t i0, size_t i1)
     {
         for (size_t i = i0; i < i1; ++i) avg.data[i] *= inv_n;
-    });
+    }, "hotpix_avg_norm" /* named tag for profiler */);
 
     std::vector<float> mean_subpixel(std::max<uint32_t>(c, 4u), 0.0f);
     std::vector<uint64_t> mean_count(std::max<uint32_t>(c, 4u), 0);
@@ -75,7 +75,7 @@ void RepairHotPixels(std::vector<FloatImage>& images,
                 }
             }
         }
-    });
+    }, "hotpix_mean_sub" /* named tag for profiler */);
     for (uint32_t g = 0; g < row_groups; ++g)
     {
         for (uint32_t i = 0; i < bins; ++i)
@@ -153,7 +153,7 @@ void RepairHotPixels(std::vector<FloatImage>& images,
                         img.At(x, y, 0) = wgt * neigh + (1.0f - wgt) * img.At(x, y, 0);
                     }
                 }
-            });
+            }, "hotpix_correct_mono" /* named tag for profiler */);
         }
         return;
     }
@@ -188,9 +188,9 @@ void RepairHotPixels(std::vector<FloatImage>& images,
                         }
                     }
                 }
-            });
+            }, "hotpix_detect_rows" /* named tag for profiler */);
         }
-    });
+    }, "hotpix_detect_ch" /* named tag for profiler */);
 
     for (auto& img : images)
     {
@@ -214,9 +214,9 @@ void RepairHotPixels(std::vector<FloatImage>& images,
                             img.At(x, y, ch) = wgt * neigh + (1.0f - wgt) * img.At(x, y, ch);
                         }
                     }
-                });
+                }, "hotpix_correct_rows" /* named tag for profiler */);
             }
-        });
+        }, "hotpix_correct_ch" /* named tag for profiler */);
     }
 }
 
@@ -273,7 +273,7 @@ FloatImage TemporalAverage(const FloatImage& reference,
                     out.data[i] = sum / std::max(1e-6f, weight_sum);
                 }
             }
-        });
+        }, "temporal_avg" /* named tag for profiler */);
         return out;
     }
 

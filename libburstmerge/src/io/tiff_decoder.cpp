@@ -122,7 +122,7 @@ public:
 
         // Read path selection strictly based on sample_format, not bps alone.
         // uint32 TIFFs with SAMPLEFORMAT_UINT must NOT go through the float
-        // path — TIFFReadScanline would copy raw uint32 bit patterns, which
+        // path - TIFFReadScanline would copy raw uint32 bit patterns, which
         // the subsequent reinterpret_cast<float> would misread completely.
         if (is_float)
         {
