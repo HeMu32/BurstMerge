@@ -341,7 +341,9 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 
     if (!use_transmission)
     {
+#ifndef NDEBUG
         std::fprintf(stderr, "[DEBUG] BuildAlignedComparisons: fixed-reference alignment (ref=#%zu)\n", ref_idx);
+#endif
         const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
         aligned.clear();
         aligned.reserve(total);
@@ -360,8 +362,10 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         return aligned;
     }
 
+#ifndef NDEBUG
     std::fprintf(stderr, "[DEBUG] BuildAlignedComparisons: chained alignment (ref=#%zu, %zu frames)\n",
         ref_idx, exposure_order.size());
+#endif
 
     std::sort(exposure_order.begin(), exposure_order.end(),
               [](const auto& a, const auto& b)
@@ -389,9 +393,11 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     {
         size_t parent_idx = exposure_order[pos].second;
         size_t child_idx = exposure_order[pos - 1].second;
+#ifndef NDEBUG
         std::fprintf(stderr, "[DEBUG] Chained align: frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
             child_idx, exposure_order[pos - 1].first,
             parent_idx, exposure_order[pos].first);
+#endif
         const FloatImage& parent_ref = has_aligned[parent_idx]
             ? aligned_to_root[parent_idx] : float_images[parent_idx];
         FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);
@@ -404,9 +410,11 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     {
         size_t parent_idx = exposure_order[pos - 1].second;
         size_t child_idx = exposure_order[pos].second;
+#ifndef NDEBUG
         std::fprintf(stderr, "[DEBUG] Chained align: frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
             child_idx, exposure_order[pos].first,
             parent_idx, exposure_order[pos - 1].first);
+#endif
         const FloatImage& parent_ref = has_aligned[parent_idx]
             ? aligned_to_root[parent_idx] : float_images[parent_idx];
         FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);

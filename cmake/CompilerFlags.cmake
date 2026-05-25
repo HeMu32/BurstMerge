@@ -2,7 +2,7 @@
 # GCC/MSVC/Clang flags
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(CMAKE_CXX_FLAGS_RELEASE   "-O2 -DNDEBUG -fopenmp -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter")
+    set(CMAKE_CXX_FLAGS_RELEASE   "-O3 -march=native -ffast-math -DNDEBUG -fopenmp -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter")
     set(CMAKE_CXX_FLAGS_DEBUG     "-O0 -g -D_DEBUG -fopenmp -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter")
 
 elseif(MSVC)

@@ -10,10 +10,12 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 
 ### Core capabilities
 
+- Multi-Frame Noise Reduction (MFNR)
 - RAW-in RAW-out: DNG RAW output support
 - DNG RAW input support
 - Camera manufacturer proprietary RAW format support (via Adobe DNG Converter)
-- Common RGB picture formats input/output support (PNG, TIF, etc.)
+- Common RGB picture formats input/output support
+    - JPEG, PNG, TIF input and output
     - Note: RAW-in RGB-out and RGB-in RAW-out are not supported
 - Bayer color filter array support
 - CLI application
@@ -49,8 +51,10 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - DPX support
 - Hot pixel suppression (current implementation not working well)
 - Preserve lens correction profiles (via exiftool, Sony ARW only)
+- Configurable path to Adobe DNG Converter (hard-coded for now, will not be a problem on most machines)
 - Support working together with Adobe LrC/ACR AI noise reduction
 - Support working together with DxO PureRAW
+- More comperhensive metadata copying for output
 - Support images with more channels
 - Non-Bayer sensor support
 - Multi-threaded RAW conversion and image loading

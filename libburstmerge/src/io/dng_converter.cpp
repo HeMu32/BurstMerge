@@ -161,13 +161,15 @@ bool RunAdobeDngConverter(const std::vector<std::string>& input_files,
         return false;
     }
 
-    // Poll for output files to appear and stabilize
+    // WEAK!!!
+    // Poll for output files to appear and stabilize.
     // The converter process exits before files are fully written,
-    // so we poll each expected output file until it exists and its
-    // size is stable for at least 1 second.
-    const int max_poll_ms = 120000;  // 2 minutes max
-    const int poll_interval_ms = 500;
-    const int stable_checks = 3;     // need 3 consecutive stable reads
+    // so keep checking more frequently while still requiring roughly
+    // one second of stable file size before treating a DNG as complete.
+    const int max_poll_ms       = 120000;   // 2 minutes max
+    const int poll_interval_ms  = 200;
+    const int stable_window_ms  = 1000;
+    const int stable_checks     = stable_window_ms / poll_interval_ms;
 
     std::vector<uint64_t> prev_sizes(expected_outputs.size(), 0);
     std::vector<int> stable_counts(expected_outputs.size(), 0);
