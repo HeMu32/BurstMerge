@@ -291,11 +291,11 @@ void BinomialBlur5Tap(const FloatImage& src, FloatImage& dst, FloatImage& tmp)
                     tmp.At(x, y, c) = static_cast<float>(sum / 16.0);
                 }
             }
-        }
-    });
+            }
+        }, "align_blur_h" /* named tag for profiler */);
 
-    // Vertical pass: tmp → dst
-    ParallelForRows(sh, 1, [&](uint32_t y_begin, uint32_t y_end)
+        // Vertical pass: tmp → dst
+        ParallelForRows(sh, 1, [&](uint32_t y_begin, uint32_t y_end)
     {
         for (uint32_t y = y_begin; y < y_end; ++y)
         {
@@ -320,7 +320,7 @@ void BinomialBlur5Tap(const FloatImage& src, FloatImage& dst, FloatImage& tmp)
                 }
             }
         }
-    });
+    }, "align_blur_v" /* named tag for profiler */);
 }
 
 FloatImage BinomialBlur5Tap(const FloatImage& src)

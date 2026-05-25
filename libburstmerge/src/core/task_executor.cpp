@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <string>
 
 #include <omp.h>
 
@@ -63,7 +64,8 @@ uint32_t RecommendedBandCount(uint32_t items,
 void ParallelFor(size_t begin,
                  size_t end,
                  size_t grain,
-                 const std::function<void(size_t, size_t)>& fn)
+                 const std::function<void(size_t, size_t)>& fn,
+                 const char* tag)
 {
     ProfileScope scope("time.parallel_for.total");
     AddProfileCounter("counter.parallel_for.calls");
@@ -82,6 +84,7 @@ void ParallelFor(size_t begin,
     if (thread_count <= 1 || omp_in_parallel() || total <= grain)
     {
         AddProfileCounter("counter.parallel_for.serial_fallback");
+        if (tag) { AddProfileCounter((std::string("counter.parallel_for.submitted.") + tag).c_str(), 1); }
         fn(begin, end);
         return;
     }
@@ -94,15 +97,19 @@ void ParallelFor(size_t begin,
 
     const size_t max_task_count = (total + grain - 1) / grain;
     const size_t task_count = std::min<size_t>(max_task_count, static_cast<size_t>(thread_count));
-    const size_t chunk_size = (total + task_count - 1) / task_count;
     AddProfileCounter("counter.parallel_for.parallel_calls");
     AddProfileCounter("counter.parallel_for.tasks", static_cast<uint64_t>(task_count));
+    if (tag)
+    {
+        AddProfileCounter((std::string("counter.parallel_for.submitted.") + tag).c_str(), static_cast<uint64_t>(max_task_count));
+        AddProfileCounter((std::string("counter.parallel_for.tasks.") + tag).c_str(), static_cast<uint64_t>(task_count));
+    }
 
 #pragma omp parallel for schedule(static) num_threads(thread_count)
-    for (int task_idx = 0; task_idx < static_cast<int>(task_count); ++task_idx)
+    for (int task_idx = 0; task_idx < static_cast<int>(max_task_count); ++task_idx)
     {
-        const size_t chunk_begin = begin + static_cast<size_t>(task_idx) * chunk_size;
-        const size_t chunk_end = std::min(end, chunk_begin + chunk_size);
+        const size_t chunk_begin = begin + static_cast<size_t>(task_idx) * grain;
+        const size_t chunk_end = std::min(end, chunk_begin + grain);
         if (chunk_begin < chunk_end)
         {
             fn(chunk_begin, chunk_end);
@@ -113,7 +120,8 @@ void ParallelFor(size_t begin,
 void ParallelForRows(uint32_t begin_row,
                      uint32_t end_row,
                      uint32_t grain_rows,
-                     const std::function<void(uint32_t, uint32_t)>& fn)
+                     const std::function<void(uint32_t, uint32_t)>& fn,
+                     const char* tag)
 {
     ParallelFor(static_cast<size_t>(begin_row),
                 static_cast<size_t>(end_row),
@@ -121,7 +129,8 @@ void ParallelForRows(uint32_t begin_row,
                 [&](size_t y0, size_t y1)
                 {
                     fn(static_cast<uint32_t>(y0), static_cast<uint32_t>(y1));
-                });
+                },
+                tag);
 }
 
 } // namespace burstmerge

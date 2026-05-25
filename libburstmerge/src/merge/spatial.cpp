@@ -103,7 +103,7 @@ burstmerge::FloatImage BinomialBlur(const burstmerge::FloatImage& src,
                 }
             }
         }
-    });
+    }, "spatial_blur_h" /* named tag for profiler */);
 
     burstmerge::ParallelForRows(src.height, burstmerge::RecommendedImageRowGrain(src.width, src.channels, burstmerge::kRowGrainMinPixels, burstmerge::kRowGrainMinRows),
     [&](uint32_t y_begin, uint32_t y_end)
@@ -128,7 +128,7 @@ burstmerge::FloatImage BinomialBlur(const burstmerge::FloatImage& src,
                 }
             }
         }
-    });
+    }, "spatial_blur_v" /* named tag for profiler */);
     return out;
 }
 
@@ -177,7 +177,7 @@ float EstimateLinearNoise(const burstmerge::FloatImage& image,
             partial_count[sample_idx] = local_count;
             y += step;
         }
-    });
+    }, "est_noise" /* named tag for profiler */);
 
     double sum = 0.0;
     uint64_t count = 0;
@@ -230,7 +230,7 @@ burstmerge::FloatImage BuildBlockMeanGuide(const burstmerge::FloatImage& img,
                 }
             }
         }
-    });
+    }, "block_guide" /* named tag for profiler */);
 
     return guide;
 }
@@ -377,7 +377,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
                     out.data[i] = weighted_sum / weight_sum;
                 }
             }
-        });
+        }, "spatial_merge_mosaic" /* named tag for profiler */);
     } else
     {
         ProfileScope scope(linear_mode ? "time.merge.spatial.linear.merge_loop" : "time.merge.spatial.standard.merge_loop");
@@ -485,7 +485,7 @@ FloatImage SpatialMerge(const FloatImage& reference,
                     }
                 }
             }
-        });
+        }, "spatial_merge_planar" /* named tag for profiler */);
     }
     return out;
 }

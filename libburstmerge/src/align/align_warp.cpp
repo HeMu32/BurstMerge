@@ -161,7 +161,7 @@ FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignmen
                 }
             }
         }
-    });
+    }, "warp_aligned" /* named tag for profiler */);
 
     return out;
 }

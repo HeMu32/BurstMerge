@@ -100,7 +100,7 @@ void WriteImage(const std::string& path,
 
     // Use the output path extension to determine the format, matching the
     // pipeline's resolution logic in pipeline.cpp.  This keeps the actual
-    // writer in sync with the file extension — e.g. --output-format auto
+    // writer in sync with the file extension - e.g. --output-format auto
     // -o out.jpg chooses JPEG here, not the bare all_raw fallback.
     OutputFormat fmt = InferFormatFromExtension(path, InferOutputFormat(settings, all_raw));
 

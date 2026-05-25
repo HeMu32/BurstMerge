@@ -27,19 +27,22 @@ constexpr uint32_t kBandCountDenseMax    = 32;          // tighter cap for dense
 void ParallelFor(size_t begin,
                  size_t end,
                  size_t grain,
-                 const std::function<void(size_t, size_t)>& fn);
+                 const std::function<void(size_t, size_t)>& fn,
+                 const char* tag = nullptr);
 
 inline void ParallelFor(size_t end,
                         size_t grain,
-                        const std::function<void(size_t, size_t)>& fn)
+                        const std::function<void(size_t, size_t)>& fn,
+                        const char* tag = nullptr)
 {
-    ParallelFor(0, end, grain, fn);
+    ParallelFor(0, end, grain, fn, tag);
 }
 
 void ParallelForRows(uint32_t begin_row,
                      uint32_t end_row,
                      uint32_t grain_rows,
-                     const std::function<void(uint32_t, uint32_t)>& fn);
+                     const std::function<void(uint32_t, uint32_t)>& fn,
+                     const char* tag = nullptr);
 
 size_t ParallelismHint();
 uint32_t RecommendedImageRowGrain(uint32_t width,
@@ -52,9 +55,10 @@ uint32_t RecommendedBandCount(uint32_t items,
 
 inline void ParallelForRows(uint32_t rows,
                             uint32_t grain_rows,
-                            const std::function<void(uint32_t, uint32_t)>& fn)
+                            const std::function<void(uint32_t, uint32_t)>& fn,
+                            const char* tag = nullptr)
 {
-    ParallelForRows(0, rows, grain_rows, fn);
+    ParallelForRows(0, rows, grain_rows, fn, tag);
 }
 
 } // namespace burstmerge
