@@ -68,6 +68,8 @@ void ParallelFor(size_t begin,
                  const char* tag)
 {
     ProfileScope scope("time.parallel_for.total");
+    // Total number of ParallelFor invocations, regardless of whether they run
+    // in parallel or fall back to a single direct fn(begin, end) call.
     AddProfileCounter("counter.parallel_for.calls");
     if (end <= begin)
     {
@@ -83,8 +85,16 @@ void ParallelFor(size_t begin,
     const int thread_count = RequestedThreadCount();
     if (thread_count <= 1 || omp_in_parallel() || total <= grain)
     {
+        // Serial fallback reasons:
+        // - only one worker requested,
+        // - nested OpenMP region already active,
+        // - total work is too small to split.
         AddProfileCounter("counter.parallel_for.serial_fallback");
-        if (tag) { AddProfileCounter((std::string("counter.parallel_for.submitted.") + tag).c_str(), 1); }
+        if (tag)
+        {
+            // The tagged task function runs exactly once in the serial path.
+            AddProfileCounter((std::string("counter.parallel_for.submitted.") + tag).c_str(), 1);
+        }
         fn(begin, end);
         return;
     }
@@ -97,17 +107,33 @@ void ParallelFor(size_t begin,
 
     const size_t max_task_count = (total + grain - 1) / grain;
     const size_t task_count = std::min<size_t>(max_task_count, static_cast<size_t>(thread_count));
+
+    // Number of ParallelFor invocations that entered the OpenMP path.
     AddProfileCounter("counter.parallel_for.parallel_calls");
+
+    // Worker budget contributed by this invocation. This per-call value is
+    // capped by the requested thread count and can be lower than the number of
+    // submitted chunks when one worker processes multiple chunks. The counter
+    // accumulates these per-call budgets across the full run; it is not a peak.
     AddProfileCounter("counter.parallel_for.tasks", static_cast<uint64_t>(task_count));
     if (tag)
     {
+        // submitted.<tag>: how many times the tagged task function fn() will
+        // actually run for this invocation. Each submitted chunk results in one
+        // fn(chunk_begin, chunk_end) call below.
         AddProfileCounter((std::string("counter.parallel_for.submitted.") + tag).c_str(), static_cast<uint64_t>(max_task_count));
+
+        // tasks.<tag>: per-call worker budget contributed by this invocation.
+        // Reported values are the accumulated sum across all invocations for
+        // the tag, not a single-call maximum and not the number of fn() calls.
         AddProfileCounter((std::string("counter.parallel_for.tasks.") + tag).c_str(), static_cast<uint64_t>(task_count));
     }
 
 #pragma omp parallel for schedule(static) num_threads(thread_count)
     for (int task_idx = 0; task_idx < static_cast<int>(max_task_count); ++task_idx)
     {
+        // Each loop iteration is one submitted chunk and therefore one actual
+        // fn() execution for the tagged task.
         const size_t chunk_begin = begin + static_cast<size_t>(task_idx) * grain;
         const size_t chunk_end = std::min(end, chunk_begin + grain);
         if (chunk_begin < chunk_end)

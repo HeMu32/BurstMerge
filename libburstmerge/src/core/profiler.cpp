@@ -17,7 +17,11 @@ using Clock = std::chrono::steady_clock;
 
 struct ProfileStat
 {
+    // For time rows this is the number of timed scope completions.
+    // For counter rows this is the accumulated counter value.
     uint64_t count = 0;
+
+    // Only used by time rows. Counter rows leave this at 0.
     uint64_t total_ns = 0;
 };
 
@@ -97,10 +101,14 @@ std::string BuildProfileReport()
         const auto& stat = row.second;
         if (name.rfind("counter.", 0) == 0)
         {
+            // Counter rows are reported as a single accumulated value. Their
+            // semantics are defined by the counter name at the call site.
             oss << "[PROFILE] " << name << " = " << stat.count << "\n";
         }
         else
         {
+            // Time rows report how many times the scope completed, plus total
+            // and average wall time across all recorded completions.
             double total_ms = static_cast<double>(stat.total_ns) / 1.0e6;
             double avg_ms = stat.count ? total_ms / static_cast<double>(stat.count) : 0.0;
             oss << "[PROFILE] " << name
