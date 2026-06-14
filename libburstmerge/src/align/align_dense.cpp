@@ -50,10 +50,13 @@ void CorrectUpsamplingError(const FloatImage& ref,
                     cand_y[2] = std::max(0, std::min(static_cast<int>(tiles_y) - 1,
                         static_cast<int>(ty) + ((ty % 2 == 0) ? -1 : 1)));
 
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                    double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
+#else
                     float best_score = std::numeric_limits<float>::max();
                     int best_dx = prev_x[idx];
                     int best_dy = prev_y[idx];
-
+#endif
                     for (int c = 0; c < 3; ++c)
                     {
                         size_t cidx = static_cast<size_t>(cand_y[c]) * tiles_x + static_cast<uint32_t>(cand_x[c]);
@@ -63,16 +66,28 @@ void CorrectUpsamplingError(const FloatImage& ref,
                             tx * half_tile, ty * half_tile,
                             tile_size, tile_size,
                             dx, dy, sample_step, weight_ssd > 0);
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                        double w = 1.0 / (static_cast<double>(score) * static_cast<double>(score) + 1e-8);
+                        sum_w += w;
+                        sum_wx += w * dx;
+                        sum_wy += w * dy;
+#else
                         if (score < best_score)
                         {
                             best_score = score;
                             best_dx = dx;
                             best_dy = dy;
                         }
+#endif
                     }
 
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                    out_x[idx] = static_cast<int16_t>(std::lround(sum_wx / sum_w));
+                    out_y[idx] = static_cast<int16_t>(std::lround(sum_wy / sum_w));
+#else
                     out_x[idx] = static_cast<int16_t>(best_dx);
                     out_y[idx] = static_cast<int16_t>(best_dy);
+#endif
                 }
             }
         }
@@ -109,10 +124,13 @@ void SearchDenseLocal(const FloatImage& ref,
                     int sx0 = seed_x[idx];
                     int sy0 = seed_y[idx];
 
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                    double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
+#else
                     float best_score = std::numeric_limits<float>::max();
                     int best_x = sx0;
                     int best_y = sy0;
-
+#endif
                     for (int dy = sy0 - kSearchDist; dy <= sy0 + kSearchDist; ++dy)
                     {
                         for (int dx = sx0 - kSearchDist; dx <= sx0 + kSearchDist; ++dx)
@@ -123,17 +141,29 @@ void SearchDenseLocal(const FloatImage& ref,
                                 tx * half_tile, ty * half_tile,
                                 tile_size, tile_size,
                                 sx, sy, sample_step, weight_ssd > 0);
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                            double w = 1.0 / (static_cast<double>(score) * static_cast<double>(score) + 1e-8);
+                            sum_w += w;
+                            sum_wx += w * sx;
+                            sum_wy += w * sy;
+#else
                             if (score < best_score)
                             {
                                 best_score = score;
                                 best_x = sx;
                                 best_y = sy;
                             }
+#endif
                         }
                     }
 
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                    out_x[idx] = static_cast<int16_t>(std::lround(sum_wx / sum_w));
+                    out_y[idx] = static_cast<int16_t>(std::lround(sum_wy / sum_w));
+#else
                     out_x[idx] = static_cast<int16_t>(best_x);
                     out_y[idx] = static_cast<int16_t>(best_y);
+#endif
                 }
             }
         }

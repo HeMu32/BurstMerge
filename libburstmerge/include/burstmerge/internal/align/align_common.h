@@ -5,6 +5,14 @@
 #include <cstdint>
 #include <limits>
 
+// Toggle between argmin selection (0) and inverse-squared weighted average (1).
+// Set via compiler flag -DBURSTMERGE_ALIGN_WEIGHTED_AVG=0 to revert to argmin.
+// Weighted align will improve robustness under specific conditions but not 
+// universally better and is NOT noise-robust. 
+#ifndef BURSTMERGE_ALIGN_WEIGHTED_AVG
+#define BURSTMERGE_ALIGN_WEIGHTED_AVG 1
+#endif
+
 namespace burstmerge
 {
 
