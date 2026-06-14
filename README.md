@@ -24,6 +24,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 ### Merge and processing modes
 
 - Simple temporal averaging merge
+- Simple temporal median merge
 - Motion-robust merge in the spatial domain
 - Motion-robust merge in the frequency domain
 - Optional exposure correction for improved shadow tonality
@@ -62,7 +63,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Multi-threaded RAW conversion and image loading
 - Better alignment algorithm for extreme exposure bracket range
 - More constrained alignment algorithms: perspective, ...
-- Simple median and mid-percentage merge options
+- Simple median (done) and mid-percentage merge (todo) options
 - More texture-preserving and noise-robust frame merging algorithm
 - Algorithms dedicated for STF synthesis
 - Vulkan processing support

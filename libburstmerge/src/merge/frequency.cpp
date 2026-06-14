@@ -274,33 +274,33 @@ TileStats ComputeTileStats(const FloatImage& reference,
         0.5 * stats.rms + 0.5 * stats.rms / std::max(1.0, exposure_factor) + 1.0);
     stats.mismatch = mean_diff / std::max(1e-9, mismatch_denom);
 
-    if (exposure_factor > 1.001)
+    double clipped = 0.0;
+    for (size_t yy = 0; yy < th; ++yy)
     {
-        double clipped = 0.0;
-        for (size_t yy = 0; yy < th; ++yy)
+        for (size_t xx = 0; xx < tw; ++xx)
         {
-            for (size_t xx = 0; xx < tw; ++xx)
+            double pixel_max = 0.0;
+            for (uint32_t c = 0; c < comparison.channels; ++c)
             {
-                double pixel_max = 0.0;
-                for (uint32_t c = 0; c < comparison.channels; ++c)
-                {
-                    pixel_max = std::max(pixel_max,
-                        static_cast<double>(comparison.At(
-                            x0 + static_cast<uint32_t>(xx),
-                            y0 + static_cast<uint32_t>(yy), c)));
-                }
-                pixel_max = (pixel_max - params.black_level) * exposure_factor + params.black_level;
-                clipped += ClampDouble(
-                    (pixel_max / std::max(1.0f, params.white_level) - 0.50) / 0.49,
-                    0.0, 1.0);
+                pixel_max = std::max(pixel_max,
+                    static_cast<double>(comparison.At(
+                        x0 + static_cast<uint32_t>(xx),
+                        y0 + static_cast<uint32_t>(yy), c)));
             }
+            // aligned comparison tiles are already normalized to reference
+            // exposure; recover their original brightness before estimating
+            // clipped-highlight risk.
+            pixel_max = pixel_max * exposure_factor + params.black_level;
+            clipped += ClampDouble(
+                (pixel_max / std::max(1.0f, params.white_level) - 0.50) / 0.49,
+                0.0, 1.0);
         }
-        clipped /= std::max<size_t>(1, tw * th);
-        stats.highlights_norm = ClampDouble(
-            (1.0 - clipped) * (1.0 - clipped),
-            0.04 / std::min(exposure_factor, 4.0),
-            1.0);
     }
+    clipped /= std::max<size_t>(1, tw * th);
+    stats.highlights_norm = ClampDouble(
+        (1.0 - clipped) * (1.0 - clipped),
+        0.04 / std::min(std::max(1.0, exposure_factor), 4.0),
+        1.0);
 
     return stats;
 }
@@ -447,16 +447,23 @@ TileMergeResult ComputeStandardTileResult(const StandardTileContext& ctx,
                         std::sin(-2.0 * kPi *
                             (static_cast<double>(fx) * best_sx / static_cast<double>(tw) +
                              static_cast<double>(fy) * best_sy / static_cast<double>(th))));
-                double d2_mean = 0.0;
+                double noise_term = std::max(1e-9, noise_norm);
+                std::vector<double> w_c(ctx.reference.channels);
                 std::vector<std::complex<double>> shifted(ctx.reference.channels);
                 for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
                     shifted[c] = comp_spectra[c * stride + k] * phase;
-                    d2_mean += std::norm(ref_spectra[c * stride + k] - shifted[c]);
+                    double d2 = std::norm(ref_spectra[c * stride + k] - shifted[c]);
+                    w_c[c] = d2 / (d2 + noise_term);
                 }
-                d2_mean /= static_cast<double>(ctx.reference.channels);
-                double weight = d2_mean / (d2_mean + std::max(1e-9, noise_norm));
-                if (k == 0) weight = 0.0;
+                
+                double weight = 0.0;
+                for (double w : w_c)
+                {
+                    weight = std::max(weight, w);
+                }
+                weight = ClampDouble(weight, 0.0, 1.0);
+                
                 for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
                     merged_spectra[c * stride + k] +=
@@ -547,7 +554,7 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
     {
         const double exposure_factor =
             (ctx.params.exposure_scales != nullptr && comp_idx < static_cast<size_t>(ctx.params.num_scales))
-            ? std::max(1e-6f, ctx.params.exposure_scales[comp_idx])
+            ? 1.0 / std::max(1e-6f, ctx.params.exposure_scales[comp_idx])
             : 1.0;
         comp_stats[comp_idx].exposure_factor = exposure_factor;
         {
@@ -681,18 +688,17 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
                             std::sin(-2.0 * kPi *
                                 (static_cast<double>(fx) * best_sx / static_cast<double>(tw) +
                                  static_cast<double>(fy) * best_sy / static_cast<double>(th))));
-                    double d2_mean = 0.0;
                     double ref_mag_sum = 0.0;
                     double shifted_mag_sum = 0.0;
+                    std::vector<double> w_c(ctx.reference.channels);
                     std::complex<double> shifted[4];
                     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                     {
                         shifted[c] = comp_spectra[c * stride + k] * phase;
-                        d2_mean += std::norm(ref_spectra[c * stride + k] - shifted[c]);
+                        w_c[c] = std::norm(ref_spectra[c * stride + k] - shifted[c]);
                         ref_mag_sum += std::abs(ref_spectra[c * stride + k]);
                         shifted_mag_sum += std::abs(shifted[c]);
                     }
-                    d2_mean /= static_cast<double>(ctx.reference.channels);
                     double magnitude_norm = 1.0;
                     if (fx + fy > 0 && tile_stats.stats.mismatch < 0.3 &&
                         std::abs(tile_stats.exposure_factor - 1.0) < 1e-3)
@@ -702,12 +708,23 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
                         magnitude_norm = mismatch_weight *
                             ClampDouble(ratio * ratio * ratio * ratio, 0.5, 3.0);
                     }
-                    const double denom = d2_mean +
+                    const double noise_term = 
                         magnitude_norm * motion_norm_exposure *
                         (noise_norm * static_cast<double>(tile * tile) * ctx.robustness_norm) *
                         tile_stats.stats.highlights_norm;
-                    double weight = d2_mean / std::max(1e-9, denom);
-                    if (k == 0) weight = 0.0;
+                    
+                    for (uint32_t c = 0; c < ctx.reference.channels; ++c)
+                    {
+                        w_c[c] = w_c[c] / (w_c[c] + std::max(1e-9, noise_term));
+                    }
+                    
+                    double weight = 0.0;
+                    for (double w : w_c)
+                    {
+                        weight = std::max(weight, w);
+                    }
+                    weight = ClampDouble(weight, 0.0, 1.0);
+                    
                     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                     {
                         merged_spectra[c * stride + k] +=
@@ -723,26 +740,39 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
     const double mismatch_avg = comp_stats.empty() ? 0.0 :
         total_mismatch / static_cast<double>(comp_stats.size());
 
+    double magnitude_zero = 0.0;
     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
-        std::complex<double>* ms = merged_spectra.data() + c * stride;
-        const double magnitude_zero = std::abs(ms[0]);
-        for (size_t fy = 0; fy < th; ++fy)
+        magnitude_zero += std::abs(merged_spectra[c * stride]);
+    }
+
+    for (size_t fy = 0; fy < th; ++fy)
+    {
+        for (size_t fx = 0; fx < tw; ++fx)
         {
-            for (size_t fx = 0; fx < tw; ++fx)
+            if (fx + fy == 0 || mismatch_avg >= 0.3) continue;
+            const size_t k = fy * tw + fx;
+            
+            double magnitude = 0.0;
+            for (uint32_t c = 0; c < ctx.reference.channels; ++c)
             {
-                if (fx + fy == 0 || mismatch_avg >= 0.3) continue;
-                const size_t k = fy * tw + fx;
-                const double magnitude = std::abs(ms[k]);
-                const double mismatch_weight = ClampDouble(
-                    1.0 - 10.0 * (mismatch_avg - 0.2), 0.0, 1.0);
-                const double deconv_weight = mismatch_weight * ClampDouble(
-                    1.25 - 25.0 * magnitude / std::max(1e-12, magnitude_zero), 0.0, 1.0);
-                static const double cw[8] =
-                {0.00, 0.02, 0.04, 0.08, 0.04, 0.08, 0.04, 0.02};
-                ms[k] *=
-                    (1.0 + deconv_weight * cw[std::min<size_t>(fx, 7)]) *
-                    (1.0 + deconv_weight * cw[std::min<size_t>(fy, 7)]);
+                magnitude += std::abs(merged_spectra[c * stride + k]);
+            }
+            
+            const double mismatch_weight = ClampDouble(
+                1.0 - 10.0 * (mismatch_avg - 0.2), 0.0, 1.0);
+            const double deconv_weight = mismatch_weight * ClampDouble(
+                1.25 - 25.0 * magnitude / std::max(1e-12, magnitude_zero), 0.0, 1.0);
+            static const double cw[8] =
+            {0.00, 0.02, 0.04, 0.08, 0.04, 0.08, 0.04, 0.02};
+            
+            const double w_factor = 
+                (1.0 + deconv_weight * cw[std::min<size_t>(fx, 7)]) *
+                (1.0 + deconv_weight * cw[std::min<size_t>(fy, 7)]);
+                
+            for (uint32_t c = 0; c < ctx.reference.channels; ++c)
+            {
+                merged_spectra[c * stride + k] *= w_factor;
             }
         }
     }

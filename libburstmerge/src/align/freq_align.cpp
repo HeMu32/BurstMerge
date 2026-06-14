@@ -287,11 +287,6 @@ AlignmentResult EstimateFrequencyTileField(
 
 #if BURSTMERGE_ALIGN_WEIGHTED_AVG
                         double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
-#else
-                        int best_int_x = seed_x;
-                        int best_int_y = seed_y;
-                        float best_int_cost = std::numeric_limits<float>::max();
-#endif
                         for (int iy = -kTileSearchR; iy <= kTileSearchR; ++iy)
                         {
                             for (int ix = -kTileSearchR; ix <= kTileSearchR; ++ix)
@@ -300,7 +295,6 @@ AlignmentResult EstimateFrequencyTileField(
                                 int cand_y = seed_y + iy;
                                 float cost = TileSad(ref, cmp, x0, y0, tw, th,
                                     cand_x, cand_y, 1);
-#if BURSTMERGE_ALIGN_WEIGHTED_AVG
                                 if (cost >= 0.0f)
                                 {
                                     double w = 1.0 / (static_cast<double>(cost) * static_cast<double>(cost) + 1e-8);
@@ -308,21 +302,30 @@ AlignmentResult EstimateFrequencyTileField(
                                     sum_wx += w * cand_x;
                                     sum_wy += w * cand_y;
                                 }
+                            }
+                        }
+                        int total_ix = static_cast<int>(std::lround(sum_wx / sum_w));
+                        int total_iy = static_cast<int>(std::lround(sum_wy / sum_w));
 #else
+                        int best_int_x = seed_x;
+                        int best_int_y = seed_y;
+                        float best_int_cost = std::numeric_limits<float>::max();
+                        for (int iy = -kTileSearchR; iy <= kTileSearchR; ++iy)
+                        {
+                            for (int ix = -kTileSearchR; ix <= kTileSearchR; ++ix)
+                            {
+                                int cand_x = seed_x + ix;
+                                int cand_y = seed_y + iy;
+                                float cost = TileSad(ref, cmp, x0, y0, tw, th,
+                                    cand_x, cand_y, 1);
                                 if (cost >= 0.0f && cost < best_int_cost)
                                 {
                                     best_int_cost = cost;
                                     best_int_x = cand_x;
                                     best_int_y = cand_y;
                                 }
-#endif
                             }
                         }
-
-#if BURSTMERGE_ALIGN_WEIGHTED_AVG
-                        int total_ix = static_cast<int>(std::lround(sum_wx / sum_w));
-                        int total_iy = static_cast<int>(std::lround(sum_wy / sum_w));
-#else
                         int total_ix = best_int_x;
                         int total_iy = best_int_y;
 #endif

@@ -23,3 +23,180 @@ DNG格式参考 DNG_Spec_1_7_1_0
 你还有一些样本文件 (包括Sample sequences), 在 (工作区根目录)\libburstmerge\test\samples\ 下. 当任何时候你需要样本文件的时候, 都可以查看这个文件夹. 其中 Seq 开头的文件夹包含一个曝光值恒定 (或者接近恒定) 的连拍序列; Bkt 开头的文件夹包含一个曝光包围序列. 部分样本文件和序列还被测试用例所引用. 
 
 PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它们辅助排查. 
+
+代码风格约定 (务必遵循):
+	- 缩进: 4 空格, 大括号独占一行 (Allman 风格). 
+	- C++17, `CMAKE_CXX_EXTENSIONS OFF` (不使用 GNU 扩展). 
+	- 不允许使用 MSVC 编译, 但源码中保留了少量 `#ifdef _WIN32` / MSVC 分支以备未来, 不要删除. 
+	- 第三方 RAW 解码 (LibRaw 等) 源代码禁止引入; LibRaw 仅用于查证 RAW 字段含义. 
+	- 不引入 stb_image; 每种图像格式由对应专用库 (libjpeg-turbo / libpng / libtiff) 处理, BMP 为手写. 
+	- 默认情况下不要添加注释, 除非用户要求. 
+
+==============================
+项目整体架构 (Architecture)
+==============================
+
+## 分层与编译产物
+	- `libburstmerge` (静态库, `.a`): 全部核心算法, 不暴露 DNG SDK 头文件给上层. 
+	- `burstmerge_cli` (`apps/cli/main.cpp`): 命令行前端, 用 cxxopts 解析参数. 
+	- `burstmerge_console` (`apps/console/main.cpp`): 占位 REPL, 仅识别 `process`/`exit`. 
+	- `burstmerge_compare` (`apps/console/compare_dng_pixels.cpp`): DNG 逐像素回归比对工具. 
+	- `tools/dump_dng.cpp`: 独立的 DNG 像素检查器, **不在 CMake 中构建**, 需手动 g++ 编译. 
+
+## 双层 API
+	- C++ 主入口: `burstmerge::BurstMerge` (PIMPL, `include/burstmerge/api.h`), 委托给 `PipelineOrchestrator` (`src/core/pipeline.cpp:192`). 
+	- C ABI: `BM_*` 系列函数 (`include/burstmerge/api_c.h`), 为未来 Python/Rust/C# GUI 预留. 
+
+## 核心处理管线 (CPU RAW 路径, `pipeline.cpp:192`)
+顺序大致为:
+	1. 后端守卫: 非 CPU 直接返回错误 (`pipeline.cpp:202`, "Stage 1 currently supports CPU backend only"). 
+	2. `ClassifyInputs`: RAW / Rgb / Mixed; Mixed 会递归过滤掉非 RAW 后走 RAW 路径. 
+	3. RGB 分支: `io::ReadImage` 逐帧解码 → 参考帧取 `size()/2` → `BuildRgbImages` → 对齐 → 合并 → 写出. 
+	4. RAW 分支:
+		- `PrepareDngInputs` (`pipeline_io.cpp:106`): 非 DNG 的 RAW 在 Windows 上调 Adobe DNG Converter 转换. 
+		- 两阶段读取: 先顺序读到内存, 再 `ReadDngFromBuffer` 并行解码 (`ParallelFor` 带 `decode_dng` tag). 
+		- `SelectExposureRefIndex` (`pipeline_frame.cpp:147`): 包围曝光 (max_ev > 1.25×min_ev) 取最暗帧, 否则取中间帧. 
+		- `RepairHotPixels` → `NormalizeFrames` (减黑电平, 按 EV 比例缩放) → `BuildAlignedComparisons`. 
+		- 三选一合并: `TemporalAverage` / `FrequencyMerge` / `SpatialMerge`. 
+		- 位深缩放 (`pipeline.cpp:531-606`): ≤10bit 走 "黑电平置零" 路径, >10bit 路径还原黑电平. 此处注释记录了 ACR/Lightroom 低 bit 黑电平渲染 bug 的规避. 
+		- 可选 `ApplyExposure` → 逐通道黑电平 delta → `ConvertPlaneImageToMosaic` → 写出. 
+	5. 清理: 删除转换临时目录; 若设置了 `BURSTMERGE_PROFILE` 打印 profile 报告. 
+
+## 模块职责与对应参考实现 (hdr-plus-swift)
+	- `core/`: 管线编排/线程/性能/缓冲/FFT. 对应 Swift 的 `denoise.swift` (TileInfo/progress/Metal device) 和 `texture.swift`. 
+	- `align/`: 金字塔 + 三种估计器 (Standard/Dense/Frequency) + warp. 对应 `align/align.swift` + `align.metal`. 
+	- `merge/`: spatial (像素域加权) 与 frequency (Laplacian / WienerFft / WienerFftRobust). 对应 `merge/spatial.swift` 和 `merge/frequency.swift` + `.metal`. 
+	- `denoise/temporal.cpp`: 热像素修复 + 时域平均. 
+	- `exposure/exposure.cpp`: 线性 / Reinhard 曲线提亮. 对应 `exposure/exposure.swift`. 
+	- `io/dng_sdk_bridge.cpp`: 用不透明指针持有 `dng_negative`, 完整保留 Opcode/CameraProfile/EXIF/XMP. 对应 Swift 的 `dng_sdk_wrapper.cpp` Obj-C++ 桥. 
+	- `io/dng_converter.cpp` (Windows-only): 包装 Adobe DNG Converter CLI. 对应 `io_dng_sdk.swift::convert_raws_to_dngs`. 
+	- `core/fft_util.cpp`: 用 PocketFFT 替代 Metal FFT shader; **必须 thread-local 持有 plan** (pocketfft plan 内部有工作缓冲, 不可多线程共享). 
+
+## 关键数据结构
+	- `FloatImage` (`core/float_image.h`): `width/height/channels + std::vector<float>`, NHWC 布局, 贯穿整个管线. 
+	- `RawImage` / `RawMetadata` (`io/dng_io.h`): DNG 解码产物, 含 `DngNegativeHolder*` 不透明指针 (move-only). 
+	- `HostBuffer` (`core/image_buffer.h`): 拥有所有权、move-only 的主机缓冲; `DeviceBuffer` 是非拥有的 GPU 句柄 (目前未用). 
+	- `AlignmentResult` (`align/align.h`): 全局标量位移 + 每瓦片位移向量 + 置信度. 
+	- `TileInfo` (`core/types.h`): 瓦片几何. 
+	- `SubGraph` (`core/sub_graph.h`): 计算后端执行用的 DAG IR (NodeType 枚举 ~40 种), **当前 CPU 路径不产生也不消费**, 是为 Vulkan 预留的. 
+	- `IComputeBackend` (`compute/compute_backend.h`): 后端抽象接口, **当前无任何具体实现**. 
+
+## 后端现状
+	- 唯一可用后端是 CPU (OpenMP). CLI 中后端被硬编码为 `BackendType::CPU` (`apps/cli/main.cpp:163`). 
+	- Vulkan (`BackendType::Vulkan`) 在 `pipeline.cpp:202` 被直接拒绝; `3rdparty/vulkan` 头/库已就位但未链接 (仅 `if(MSVC)` 时链接, 见 `libburstmerge/CMakeLists.txt:91`). 
+	- `SubGraph` / `IComputeBackend` 是为 Phase-2 Vulkan 预留的接口, 当前完全是 dead code. 
+
+==============================
+构建与依赖 (Build & Dependencies)
+==============================
+
+## 配置入口
+	- 顶层 `CMakeLists.txt` → `include(local_config.cmake)` (所有依赖路径集中) + `cmake/CompilerFlags.cmake`. 
+	- `local_config.cmake` 假设 libjpeg/libpng/zlib 在 `C:/MinGW`, libtiff 在 `3rdparty/libtiff/install`. `local_config.cmake` 被 `.gitignore` 忽略 (顶层 `/*.cmake`), 属于本机配置. 
+	- 生成器: `MinGW Makefiles`. 标准配置命令见 `Readme.md`. 
+
+## 编译开关 (重要)
+	- `find_package(OpenMP REQUIRED)`: OpenMP 必须存在. 
+	- `BUILD_TESTS` (默认 ON): 构建单元测试. 
+	- 条件宏 (在 `libburstmerge/CMakeLists.txt` 中按依赖是否存在定义): 
+		- `BURSTMERGE_HAVE_JPEG` / `BURSTMERGE_HAVE_PNG` / `BURSTMERGE_HAVE_TIFF` 
+		- 缺少对应库时, 该格式编解码器源文件不参与编译, 运行时解码/编码会抛 "... not available (... not linked)". 
+	- `WIN32` 时额外编译 `src/io/dng_converter.cpp` (Adobe DNG Converter 包装). 
+
+## 三方依赖状态
+	- `dng_sdk`: 完整 vendored 源码, 编译为内部静态库, 符号隐藏 (`-fvisibility=hidden`). 构建 fighting 见 `docs/plan-dsv4.md` (`qWinOS` 宏, XMP INT64 宏冲突, SEH 移除等). `dng_host` 非线程安全, 并行解码需每线程独立构造. 
+	- `pocketfft`: 单文件 `.c` + `.h`, MIT. 直接编进 `burstmerge` 静态库. 
+	- `cxxopts`: header-only, 仅 CLI 使用. 
+	- `libtiff`: 完整源码 + 预编译 install (`3rdparty/libtiff/install/`). 需要运行时 `libtiff.dll` 在 PATH (ctest 已为 `test_common_rgb_fmt` 配置). 
+	- `vulkan`: 头/库/dll 齐全, 当前未实际链接 (CPU-only). 
+	- `openmp`: 当前 MinGW 静态链接 `libgomp.a`, 无需分发 DLL; 仅含 readme. 
+
+## 运行时环境变量
+	- `BURSTMERGE_THREADS`: 覆盖 OpenMP 线程数 (`task_executor.cpp:16`). 
+	- `BURSTMERGE_GRAIN_SCALE`: 缩放并行粒度 (`task_executor.cpp:26`). 
+	- `BURSTMERGE_PROFILE`: 启用性能报告输出 (仅 Debug 生效, Release 整模块被 `#ifndef NDEBUG` 抹除). 
+
+==============================
+测试 (Testing)
+==============================
+	- 测试位于 `libburstmerge/test/`, 每个独立可执行, 退出码 0=pass. 
+	- `test_deps`: 依赖与底层 API 检查. 
+	- `test_dng_io`: DNG 读写路径. 
+	- `test_stage0`: 单帧处理. 
+	- `test_stage1`: 多帧处理 (超时 600s). 
+	- `test_common_rgb_fmt`: RGB 格式 IO 检查 (需 libtiff runtime 在 PATH). 
+	- 测试引用的样本在 `libburstmerge/test/samples/` (Seq* = 等曝光连拍, Bkt* = 包围曝光; 还含 ARW/DNG/jpg/png/tif 单帧与若干 `folder_*` 目录用于混合输入测试). 样本不上传 git. 
+
+==============================
+重要断言与临时措施 (Important Assertions & Temporary Measures)
+==============================
+本节是排查/重构时的重点提示. 
+
+## 明确标注的临时/弱措施
+	- `libburstmerge/src/io/dng_converter.cpp:164` 有 `// WEAK!!!`: Adobe DNG Converter 进程退出后文件可能还没写完, 用 200ms 轮询 + 1s 稳定窗口 (最长 2 分钟) 等 DNG 落盘. 这是明确的弱实现. 
+	- `apps/console/main.cpp:6`: `burstmerge_console` 是 placeholder, 只认 `process`/`exit`, 输出硬编码到 `./out`. 
+	- `dng_writer_adapter.cpp:31`: DNG 通过通用 `ImageWriter` 写出会抛 `"use the dedicated RAW pipeline for DNG output"`. 这是**故意的误用防护**, 不是缺陷. 
+
+## todos.txt 记录的已知问题 (根目录 `todos.txt`)
+	- 参考帧选取: 用户指定参考帧**未实现/未移植** (自动选取已实现: 包围取最暗, 普通取中间; 但无 CLI `--reference`). 
+	- HotPixel Suppression: "目前的算法好像是坏的" (另见 `Readme.md` TODOs: "current implementation not working well"). 
+	- `NormalizeFrames`: 只考虑 ISO 与快门速度, 不考虑其他因素及 EXIF 不准确问题. 
+	- `ImageMetadata::tags`: 字段从未被写入 (dead field). 
+	- CLI 待加: 指定缓存目录 / 指定参考图 / 拷贝元数据(含畸变) / 指定搜索位移限制. 
+
+## 硬编码路径与平台假设
+	- Adobe DNG Converter 路径硬编码: `C:\Program Files\Adobe\Adobe DNG Converter\Adobe DNG Converter.exe` (`dng_converter.cpp:23,29`). 
+	- `apps/cli/main.cpp:163`: 后端硬编码为 CPU. 
+	- `pipeline_align.cpp:244`: 调试 BMP dump 到硬编码 `R:\` (Windows 盘符), 由 `kEnableAlignmentGrayDump=false` 关闭. 
+	- 非显式 DNG 的 RAW 输入在非 Windows 平台会抛 `"Non-DNG RAW input requires pre-conversion on this platform"` (`pipeline_io.cpp:153`). 
+	- 根目录脚本大量硬编码本机路径: `SyncARWLensCorr.ps1` (`C:\MultiMediaTools\Bin\exiftool.exe`), `Scripts/benchmark_parallel.ps1` (`Z:\seq1/seq2`, 注意默认 CLI 路径用大写 `Build` 与实际不符), `_bench.ps1` (用 `NUL` 作输出, 传位置参数且用了未定义的 `--profiler`, **当前 CLI 下无法运行**). 
+
+## 尚未实现 / 占位
+	- Vulkan 后端: 接口 (`IComputeBackend`/`SubGraph`) 已定义但无实现, 运行时被拒绝. 属于 `plan-dsv4.md` 的 Phase-2. 
+	- X-Trans CFA 支持: `float_image.h:46` 与 `float_image.cpp:349` 各有一条 `TODO(X-Trans)`, 当前非 Bayer 走通道平均 fallback, 可能不保色相位. 
+	- `tools/dump_dng.cpp` 不在 CMake 构建中; 其头注释 (列 `x,y,r,g,b`) 与实际输出 (`x,y,raw_value`) 不一致, 且有未使用变量 `search_rows`. 
+
+## 数值/算法层面的不一致与魔法数
+	- `freq_align.cpp:82` 的傅里叶亚像素搜索网格实际是 6×6 (±0.417), 但 `frequency.h:13` 常量 `kFourierSearchGrid=7` (frequency merge 用 7×7). 两处网格不一致, 均能跑通. 
+	- `kPi = 3.14159265358979323846` 在 `frequency.cpp` (5 处) 和 `freq_align.cpp` (1 处) 重复字面量, 未共享常量. 
+	- `align_common.cpp:109` 越界惩罚 `kOBPenalty = 65504.0` (half-finite max). 
+	- `frequency.cpp:766` 去卷积权重 `cw[8] = {0.00,0.02,0.04,0.08,0.04,0.08,0.04,0.02}` 等魔法数无注释. 
+	- `temporal.cpp:93-94` 热像素阈值/强度实为常量 (`2.0f`/`1.0f`); `cfa_period` 为 0/1 时被 `max(2, ...)` 提升到 2. 
+	- `task_executor.h:13` `kRowGrainMinPixels = 1<<18` 注释自承 "a magic number for CPU processing". 
+	- `align_common.h:8` 编译期开关 `BURSTMERGE_ALIGN_WEIGHTED_AVG` (默认 1=加权平均, 注释承认 "NOT noise-robust"; 设 0 走 argmin). 
+	- `CompilerFlags.cmake:5` 使用 `-ffast-math -march=native`: 前者会影响浮点精度 (使 `compare_dng_pixels.cpp:43` 的精确浮点相等比较变得脆弱), 后者产生不可移植二进制. 
+
+## 复核遗留风险 (来自 `docs/reviews/26-5-23-0-21.md` 最终复核)
+	- RGB 路径 `WriteImage` 未接收已解析的 `eff_fmt` (A.2/C.3, 部分修复). 
+	- TIFF `bps==32` 的 uint 样本仍被当 float 读取 ("数据损坏问题", B.4/C.1, 部分修复). 
+	- BMP 8-bit 调色板分支假设 40 字节 DIB 头, 未校验 `biSize`/`biClrUsed`/`bfOffBits` (C.2). 
+	- `ResolveImageOutputPath()` 会"静默改扩展名", 对 CLI 友好但对库 API 调用方未必可预期. 
+	- `ImageDecoder::CanDecode()` 在工厂路径中几乎没被用到, 路由全靠扩展名. 
+
+==============================
+子项目: Sony 镜头校正注入 (见 PROGRESS.md)
+==============================
+独立于主管线的 PowerShell 子项目, 目标是把 Sony ARW 的畸变/暗角参数注入 DNG, 使 Capture One 能识别. 
+	- `SyncARWLensCorr.ps1` (根目录): 从 ARW/DNG 读 Sony MakerNote `DistortionCorrParams`/`VignettingCorrParams` (16 个 int16 样条节点), 拟合多项式, 组装 `OpcodeList3` 二进制 (WarpRectilinear + FixVignetteRadial), 直接 patch 目标 DNG 的 TIFF IFD. 
+	- 关键: C1 用 `OpcodeList3` 里的 WarpRectilinear, **不用** Sony MakerNote 或 Adobe `DistortionCorrParams`; C1 通过 `kr1` 符号判断桶形/枕形方向. 
+	- 已知限制 (PROGRESS.md): 暗角参数翻译结果与原 ARW 在 C1 中不匹配 (但 C1 自己对 ARW 暗角解释也很差); CA 校正参数未拷贝. 
+	- PS 脚本坑: PowerShell 变量不区分大小写 (`$X`/`$x` 同一变量), 脚本已全部改用小写规避. 
+
+==============================
+关键文件速查 (File:Line 参考)
+==============================
+	- 公共 API: `libburstmerge/include/burstmerge/api.h`, `api_c.h`
+	- 管线主流程: `libburstmerge/src/core/pipeline.cpp:192` (`PipelineOrchestrator::Process`)
+	- 管线常量: `libburstmerge/src/core/pipeline.h:13` (`PipelineConstants`)
+	- 对齐常量/入口: `libburstmerge/include/burstmerge/internal/align/align.h:11` (`AlignConstants`), `align.cpp:22` (`EstimateTranslation`)
+	- 空间合并: `libburstmerge/src/merge/spatial.cpp:243` (`SpatialMerge`)
+	- 频域合并: `libburstmerge/src/merge/frequency.cpp:1026` (`FrequencyMerge`)
+	- 热像素/时域平均: `libburstmerge/src/denoise/temporal.cpp:13` / `:223`
+	- 曝光: `libburstmerge/src/exposure/exposure.cpp:118` (`ApplyExposure`)
+	- DNG 读取: `libburstmerge/src/io/dng_reader.cpp:142` (`ReadDngFromBuffer`)
+	- DNG SDK 桥 (不透明指针): `libburstmerge/src/io/dng_sdk_bridge.cpp`
+	- Adobe DNG Converter 包装: `libburstmerge/src/io/dng_converter.cpp:93`
+	- 线程/粒度: `libburstmerge/src/core/task_executor.cpp:64` (`ParallelFor`)
+	- FFT (thread-local plan): `libburstmerge/src/core/fft_util.cpp:8`
+	- 参考帧选择: `libburstmerge/src/core/pipeline_frame.cpp:147` (`SelectExposureRefIndex`)
+	- CLI 选项定义: `apps/cli/main.cpp:124`
