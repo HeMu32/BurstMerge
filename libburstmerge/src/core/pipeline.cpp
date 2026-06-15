@@ -288,6 +288,16 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.num_scales = static_cast<uint32_t>(aligned.size());
                 params.exposure_scales = nullptr;
                 merged = TemporalAverage(float_images[ref_idx], aligned, params);
+            } else if (settings_.merge_algo == MergeAlgorithm::TemporalMedian)
+            {
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (temporal median)");
+                TemporalDenoiseParams params;
+                params.strength = settings_.noise_reduction;
+                params.white_level = white_level;
+                params.black_level = 0.0f;
+                params.num_scales = static_cast<uint32_t>(aligned.size());
+                params.exposure_scales = nullptr;
+                merged = TemporalMedian(float_images[ref_idx], aligned, params);
             } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
             {
                 Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
@@ -492,6 +502,18 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.num_scales = static_cast<uint32_t>(exp_scales.size());
             params.exposure_scales = exp_scales.data();
             merged = TemporalAverage(float_images[ref_idx], aligned, params);
+        } else if (settings_.merge_algo == MergeAlgorithm::TemporalMedian)
+        {
+            // TemporalMedian: per-pixel median across all frames.
+            // Robust to outliers; noise_reduction / exposure_scales unused.
+            Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal median");
+            TemporalDenoiseParams params;
+            params.strength = settings_.noise_reduction;
+            params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
+            params.black_level = MeanBlackLevel(images[ref_idx].metadata);
+            params.num_scales = static_cast<uint32_t>(exp_scales.size());
+            params.exposure_scales = exp_scales.data();
+            merged = TemporalMedian(float_images[ref_idx], aligned, params);
         } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
         {
             Report(progress, PipelineConstants::kProgressMerge, "Merging frames with frequency path");

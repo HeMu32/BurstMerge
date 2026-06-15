@@ -10,7 +10,7 @@
 // Weighted align will improve robustness under specific conditions but not 
 // universally better and is NOT noise-robust. 
 #ifndef BURSTMERGE_ALIGN_WEIGHTED_AVG
-#define BURSTMERGE_ALIGN_WEIGHTED_AVG 1
+#define BURSTMERGE_ALIGN_WEIGHTED_AVG 0
 #endif
 
 namespace burstmerge

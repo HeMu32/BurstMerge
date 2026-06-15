@@ -287,4 +287,122 @@ FloatImage TemporalAverage(const FloatImage& reference,
     return out;
 }
 
+FloatImage TemporalMedian(const FloatImage& reference,
+                          const std::vector<FloatImage>& aligned_comparisons,
+                          const TemporalDenoiseParams& params)
+{
+    ProfileScope scope("time.merge.temporal_median_total");
+    FloatImage out;
+    out.width = reference.width;
+    out.height = reference.height;
+    out.channels = reference.channels;
+    out.data.resize(reference.data.size(), 0.0f);
+
+    const size_t num_comp = aligned_comparisons.size();
+    if (num_comp == 0)
+    {
+        out.data = reference.data;
+        return out;
+    }
+
+    const float* ref_ptr = reference.data.data();
+    float* out_ptr = out.data.data();
+    const uint32_t channels = reference.channels;
+    const size_t num_pixels = static_cast<size_t>(reference.width) * reference.height;
+
+    std::vector<const float*> comp_ptrs;
+    comp_ptrs.reserve(num_comp);
+    for (const auto& img : aligned_comparisons) comp_ptrs.push_back(img.data.data());
+
+    const float* exp_scales = params.exposure_scales;
+    const uint32_t num_scales = params.num_scales;
+
+    // Clip threshold (0.98 of dynamic range, matching SpatialMerge kClipFactor).
+    constexpr float kClipFactor = 0.98f;
+    const float clip_threshold = (params.white_level > params.black_level + 1.0f)
+        ? (params.white_level - params.black_level) * kClipFactor
+        : 0.0f;
+    const bool have_clip = (clip_threshold > 0.0f);
+
+    constexpr size_t kStackFrames = 64;
+    const size_t grain_pixels = std::max<size_t>(1, (1u << 16) / std::max<uint32_t>(1u, channels));
+
+    // Precompute per-comparison clip thresholds so the hot loop does a single
+    // comparison instead of a division per comparison per pixel.
+    float clip_scaled[kStackFrames];
+    if (have_clip)
+    {
+        for (size_t k = 0; k < num_comp; ++k)
+        {
+            float scale = (exp_scales && k < num_scales && exp_scales[k] > 0.0f)
+                ? exp_scales[k] : 1.0f;
+            clip_scaled[k] = clip_threshold * scale;
+        }
+    }
+
+    ParallelFor(num_pixels, grain_pixels, [&](size_t p0, size_t p1)
+    {
+        float buf[kStackFrames];
+        bool clipped[kStackFrames];
+        for (size_t p = p0; p < p1; ++p)
+        {
+            const size_t base = p * channels;
+
+            for (size_t k = 0; k < num_comp; ++k)
+            {
+                clipped[k] = false;
+                if (!have_clip) continue;
+
+                float cmp_max = comp_ptrs[k][base];
+                for (uint32_t c = 1; c < channels; ++c)
+                {
+                    const float v = comp_ptrs[k][base + c];
+                    if (v > cmp_max) cmp_max = v;
+                }
+                if (cmp_max >= clip_scaled[k]) clipped[k] = true;
+            }
+
+            for (uint32_t c = 0; c < channels; ++c)
+            {
+                const size_t ci = base + c;
+
+                // Bypass: preserve reference values at/near clipping so the
+                // RAW converter's highlight recovery can detect and reconstruct
+                // them.  Without this, the median pulls clipped values below
+                // white_level by averaging with non-clipped comparisons,
+                // hiding the clipping signal → no recovery → color cast.
+                if (have_clip && ref_ptr[ci] >= clip_threshold)
+                {
+                    out_ptr[ci] = ref_ptr[ci];
+                    continue;
+                }
+
+                size_t cnt = 0;
+                buf[cnt++] = ref_ptr[ci];
+                for (size_t k = 0; k < num_comp; ++k)
+                    if (!clipped[k]) buf[cnt++] = comp_ptrs[k][ci];
+
+                if (cnt == 1) { out_ptr[ci] = buf[0]; continue; }
+
+                const size_t mid = cnt / 2;
+                std::nth_element(buf, buf + mid, buf + cnt);
+                if (cnt & 1u)
+                {
+                    out_ptr[ci] = buf[mid];
+                }
+                else
+                {
+                    const float hi = buf[mid];
+                    float lo = buf[0];
+                    for (size_t k = 1; k < mid; ++k)
+                        if (buf[k] > lo) lo = buf[k];
+                    out_ptr[ci] = 0.5f * (lo + hi);
+                }
+            }
+        }
+    }, "temporal_median" /* named tag for profiler */);
+
+    return out;
+}
+
 } // namespace burstmerge
