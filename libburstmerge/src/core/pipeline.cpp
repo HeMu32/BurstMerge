@@ -190,8 +190,6 @@ PipelineOrchestrator::PipelineOrchestrator(BackendType backend, Settings setting
 {
     if (settings_.tile_size < PipelineConstants::kMinTileSize)
         settings_.tile_size = PipelineConstants::kMinTileSize;
-    else if (settings_.tile_size > PipelineConstants::kMaxTileSize)
-        settings_.tile_size = PipelineConstants::kMaxTileSize;
 }
 
 Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths,
