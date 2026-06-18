@@ -235,7 +235,7 @@ TileStats ComputeTileStats(const FloatImage& reference,
             }
         }
         stats.rms += FrequencyConstants::kRmsScale * std::sqrt(sum_sq) /
-            std::max<size_t>(1, tw * th);
+            static_cast<double>(FrequencyConstants::kWienerTileSize);
     }
     stats.rms /= std::max<uint32_t>(1, reference.channels);
 
@@ -339,6 +339,7 @@ TileMergeResult ComputeStandardTileResult(const StandardTileContext& ctx,
     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
         std::complex<double>* dst = ref_spectra.data() + c * stride;
+        double sum_sq_c = 0.0;
         for (size_t yy = 0; yy < th; ++yy)
         {
             for (size_t xx = 0; xx < tw; ++xx)
@@ -347,14 +348,20 @@ TileMergeResult ComputeStandardTileResult(const StandardTileContext& ctx,
                     x0 + static_cast<uint32_t>(xx),
                     y0 + static_cast<uint32_t>(yy), c);
                 dst[yy * tw + xx] = sample;
-                rms += std::max(0.0, sample) * std::max(0.0, sample);
+                const double v = std::max(0.0, sample);
+                sum_sq_c += v * v;
             }
+        }
+        rms += FrequencyConstants::kRmsScale * std::sqrt(sum_sq_c) /
+            static_cast<double>(FrequencyConstants::kWienerTileSize);
+        for (size_t k = 0; k < n; ++k)
+        {
+            dst[k] *= result.window[k];
         }
         Fft2D(dst, tw, th, false);
         std::copy_n(dst, n, merged_spectra.data() + c * stride);
     }
-    rms = FrequencyConstants::kRmsScale * std::sqrt(rms) /
-        std::max<size_t>(1, n * ctx.reference.channels);
+    rms /= std::max<uint32_t>(1, ctx.reference.channels);
     const double noise_norm =
         (rms + ctx.read_noise) * static_cast<double>(tile * tile) * ctx.robustness_norm;
 
@@ -372,6 +379,10 @@ TileMergeResult ComputeStandardTileResult(const StandardTileContext& ctx,
                         x0 + static_cast<uint32_t>(xx),
                         y0 + static_cast<uint32_t>(yy), c);
                 }
+            }
+            for (size_t k = 0; k < n; ++k)
+            {
+                dst[k] *= result.window[k];
             }
             Fft2D(dst, tw, th, false);
         }
@@ -456,11 +467,23 @@ TileMergeResult ComputeStandardTileResult(const StandardTileContext& ctx,
                     double d2 = std::norm(ref_spectra[c * stride + k] - shifted[c]);
                     w_c[c] = d2 / (d2 + noise_term);
                 }
-                
+
                 double weight = 0.0;
-                for (double w : w_c)
+                if (w_c.size() >= 4)
                 {
-                    weight = std::max(weight, w);
+                    double wmin = w_c[0], wmax = w_c[0], wsum = w_c[0];
+                    for (size_t i = 1; i < w_c.size(); ++i)
+                    {
+                        wmin = std::min(wmin, w_c[i]);
+                        wmax = std::max(wmax, w_c[i]);
+                        wsum += w_c[i];
+                    }
+                    weight = 0.5 * (wsum - wmin - wmax);
+                }
+                else
+                {
+                    for (double w : w_c) weight += w;
+                    weight /= static_cast<double>(std::max<size_t>(1, w_c.size()));
                 }
                 weight = ClampDouble(weight, 0.0, 1.0);
                 
@@ -485,7 +508,7 @@ TileMergeResult ComputeStandardTileResult(const StandardTileContext& ctx,
                 const size_t k = yy * tw + xx;
                 const size_t out_idx = (yy * tw + xx) * ctx.reference.channels + c;
                 result.pixels[out_idx] =
-                    static_cast<float>(src[k].real() * inv_stack * result.window[k]);
+                    static_cast<float>(src[k].real() * inv_stack);
             }
         }
     }
@@ -532,12 +555,14 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
             {
                 for (size_t xx = 0; xx < tw; ++xx)
                 {
-                    const double v = std::max(0.0,
-                        static_cast<double>(ctx.reference.At(
-                            x0 + static_cast<uint32_t>(xx),
-                            y0 + static_cast<uint32_t>(yy), c)));
-                    dst[yy * tw + xx] = v;
+                    dst[yy * tw + xx] = ctx.reference.At(
+                        x0 + static_cast<uint32_t>(xx),
+                        y0 + static_cast<uint32_t>(yy), c);
                 }
+            }
+            for (size_t k = 0; k < n; ++k)
+            {
+                dst[k] *= result.window[k];
             }
             Fft2D(dst, tw, th, false);
             std::copy_n(dst, n, merged_spectra.data() + c * stride);
@@ -605,6 +630,10 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
                             x0 + static_cast<uint32_t>(xx),
                             y0 + static_cast<uint32_t>(yy), c);
                     }
+                }
+                for (size_t k = 0; k < n; ++k)
+                {
+                    dst[k] *= result.window[k];
                 }
                 Fft2D(dst, tw, th, false);
             }
@@ -719,12 +748,24 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
                     }
                     
                     double weight = 0.0;
-                    for (double w : w_c)
+                    if (w_c.size() >= 4)
                     {
-                        weight = std::max(weight, w);
+                        double wmin = w_c[0], wmax = w_c[0], wsum = w_c[0];
+                        for (size_t i = 1; i < w_c.size(); ++i)
+                        {
+                            wmin = std::min(wmin, w_c[i]);
+                            wmax = std::max(wmax, w_c[i]);
+                            wsum += w_c[i];
+                        }
+                        weight = 0.5 * (wsum - wmin - wmax);
+                    }
+                    else
+                    {
+                        for (double w : w_c) weight += w;
+                        weight /= static_cast<double>(std::max<size_t>(1, w_c.size()));
                     }
                     weight = ClampDouble(weight, 0.0, 1.0);
-                    
+
                     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                     {
                         merged_spectra[c * stride + k] +=
@@ -739,6 +780,7 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
     for (const auto& item : comp_stats) total_mismatch += item.stats.mismatch;
     const double mismatch_avg = comp_stats.empty() ? 0.0 :
         total_mismatch / static_cast<double>(comp_stats.size());
+
 
     double magnitude_zero = 0.0;
     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
@@ -791,7 +833,7 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
                     const size_t k = yy * tw + xx;
                     const size_t out_idx = (yy * tw + xx) * ctx.reference.channels + c;
                     result.pixels[out_idx] =
-                        static_cast<float>(ms[k].real() * inv_stack * result.window[k]);
+                        static_cast<float>(ms[k].real() * inv_stack);
                 }
             }
         }
@@ -807,12 +849,13 @@ void ReduceTileBorderArtifacts(FloatImage& image,
 {
     (void)reference;
     (void)tile;
+    (void)black_level;
 
-    // In our by-plane CPU path, overlap-add already suppresses most tile seams.
-    // Re-blending every internal 8x8 tile border with the reference creates a
-    // visible grid after plane->mosaic reconstruction, so keep only the safe
-    // negative-value clamp from the reference implementation.
-    const float min_value = black_level - 1.0f;
+    // The merge input is black-subtracted (NormalizeFrames already removed the
+    // black offset), so pixel values live in signal space centered near 0. The
+    // reference reduce_artifacts_tile_border clamps to black_level-1 because it
+    // keeps the black offset in the data; here the equivalent floor is -1.
+    const float min_value = -1.0f;
     for (uint32_t y = 0; y < image.height; ++y)
     {
         for (uint32_t x = 0; x < image.width; ++x)

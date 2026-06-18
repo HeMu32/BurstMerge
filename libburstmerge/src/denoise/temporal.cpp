@@ -5,10 +5,35 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <vector>
+
+#include <omp.h>
 
 namespace burstmerge
 {
+namespace
+{
+
+// Upper bound on the worker count ParallelFor may spawn for the merge loop.
+// Mirrors task_executor.cpp::RequestedThreadCount(): env override
+// BURSTMERGE_THREADS wins when set, otherwise omp_get_max_threads() is the
+// ceiling. Used only to size per-thread scratch buffers for the >64-frame
+// path of TemporalMedian; we take the max so the buffer is always at least
+// as large as whatever ParallelFor actually requests.
+int MergeMaxThreads()
+{
+    int bound = std::max(1, omp_get_max_threads());
+    if (const char* env = std::getenv("BURSTMERGE_THREADS"))
+    {
+        int parsed = std::atoi(env);
+        if (parsed > bound) bound = parsed;
+    }
+    return bound;
+}
+
+} // namespace
 
 void RepairHotPixels(std::vector<FloatImage>& images,
                      float white_level,
@@ -324,14 +349,41 @@ FloatImage TemporalMedian(const FloatImage& reference,
         : 0.0f;
     const bool have_clip = (clip_threshold > 0.0f);
 
+    // Scratch-buffer capacity tuning.
+    //
+    // kStackFrames is the largest comparison-frame count the per-pixel hot
+    // loop can serve from thread-stack arrays (zero malloc, best cache
+    // behavior, and the historically only supported path). Bursts that supply
+    // more than kStackFrames comparison frames previously overflowed these
+    // arrays (clip_scaled on the main-thread stack; buf/clipped on every
+    // worker stack) and silently corrupted the process — see
+    // docs/reviews/26-6-18-temporal-median-stack-overflow.md.
+    //
+    // The fix keeps the stack fast path for bursts that fit and falls back to
+    // per-worker heap buffers (pre-sized in this serial section) for larger
+    // bursts. The stack path's algorithm, memory layout, and performance are
+    // unchanged.
     constexpr size_t kStackFrames = 64;
+    const size_t buf_cap = num_comp + 1;            // reference + comparisons
+    const bool use_stack = (buf_cap <= kStackFrames);
+
     const size_t grain_pixels = std::max<size_t>(1, (1u << 16) / std::max<uint32_t>(1u, channels));
 
     // Precompute per-comparison clip thresholds so the hot loop does a single
     // comparison instead of a division per comparison per pixel.
-    float clip_scaled[kStackFrames];
+    // Indexed by comparison frame k in [0, num_comp), so the backing storage
+    // must follow num_comp; heap-allocated only when num_comp exceeds the
+    // stack capacity.
+    float clip_scaled_stack[kStackFrames];
+    std::vector<float> clip_scaled_heap;
+    float* clip_scaled = clip_scaled_stack;
     if (have_clip)
     {
+        if (!use_stack)
+        {
+            clip_scaled_heap.resize(num_comp);
+            clip_scaled = clip_scaled_heap.data();
+        }
         for (size_t k = 0; k < num_comp; ++k)
         {
             float scale = (exp_scales && k < num_scales && exp_scales[k] > 0.0f)
@@ -340,10 +392,53 @@ FloatImage TemporalMedian(const FloatImage& reference,
         }
     }
 
+    // Per-worker scratch for the large-burst path. Allocated up-front in this
+    // main-thread serial section so the OpenMP parallel body never allocates:
+    // a std::bad_alloc thrown inside an OpenMP structured block is formally
+    // undefined behavior and on MinGW libgomp tends to invoke
+    // std::terminate rather than unwind to pipeline.cpp:825's catch.
+    //
+    // Buffers are sized for the upper bound on worker count (MergeMaxThreads);
+    // any unused slots when real parallelism is lower cost only a few KiB.
+    //
+    // uint8_t (not bool) is used for clipped_*: std::vector<bool> is bit-packed
+    // and does not expose a bool*, which would block the stack/heap pointer
+    // unification below. uint8_t is byte-compatible with bool on every target
+    // we support and reads correctly in boolean context, so the hot loop is
+    // unaffected.
+    std::vector<std::vector<float>> buf_heap;
+    std::vector<std::vector<uint8_t>> clipped_heap;
+    if (!use_stack)
+    {
+        const int max_threads = MergeMaxThreads();
+        buf_heap.resize(max_threads);
+        clipped_heap.resize(max_threads);
+        for (int t = 0; t < max_threads; ++t)
+        {
+            buf_heap[t].resize(buf_cap);
+            clipped_heap[t].resize(num_comp);
+        }
+    }
+
     ParallelFor(num_pixels, grain_pixels, [&](size_t p0, size_t p1)
     {
-        float buf[kStackFrames];
-        bool clipped[kStackFrames];
+        // Small-burst fast path: zero-alloc stack scratch, identical to the
+        // historical implementation.
+        float buf_stack[kStackFrames];
+        uint8_t clipped_stack[kStackFrames];
+
+        float* buf = buf_stack;
+        uint8_t* clipped = clipped_stack;
+
+        // Large-burst path: borrow this worker's pre-sized heap slot.
+        // Indexed by omp_get_thread_num(), which is bounded by
+        // MergeMaxThreads() used to size buf_heap / clipped_heap above.
+        if (!use_stack)
+        {
+            const int tid = omp_get_thread_num();
+            buf = buf_heap[tid].data();
+            clipped = clipped_heap[tid].data();
+        }
         for (size_t p = p0; p < p1; ++p)
         {
             const size_t base = p * channels;
