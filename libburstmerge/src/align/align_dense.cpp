@@ -50,10 +50,28 @@ void CorrectUpsamplingError(const FloatImage& ref,
                     cand_y[2] = std::max(0, std::min(static_cast<int>(tiles_y) - 1,
                         static_cast<int>(ty) + ((ty % 2 == 0) ? -1 : 1)));
 
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                    double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        size_t cidx = static_cast<size_t>(cand_y[c]) * tiles_x + static_cast<uint32_t>(cand_x[c]);
+                        int dx = prev_x[cidx];
+                        int dy = prev_y[cidx];
+                        float score = TileCost(ref, cmp,
+                            tx * half_tile, ty * half_tile,
+                            tile_size, tile_size,
+                            dx, dy, sample_step, weight_ssd > 0);
+                        double w = 1.0 / (static_cast<double>(score) * static_cast<double>(score) + 1e-8);
+                        sum_w += w;
+                        sum_wx += w * dx;
+                        sum_wy += w * dy;
+                    }
+                    out_x[idx] = static_cast<int16_t>(std::lround(sum_wx / sum_w));
+                    out_y[idx] = static_cast<int16_t>(std::lround(sum_wy / sum_w));
+#else
                     float best_score = std::numeric_limits<float>::max();
                     int best_dx = prev_x[idx];
                     int best_dy = prev_y[idx];
-
                     for (int c = 0; c < 3; ++c)
                     {
                         size_t cidx = static_cast<size_t>(cand_y[c]) * tiles_x + static_cast<uint32_t>(cand_x[c]);
@@ -70,9 +88,9 @@ void CorrectUpsamplingError(const FloatImage& ref,
                             best_dy = dy;
                         }
                     }
-
                     out_x[idx] = static_cast<int16_t>(best_dx);
                     out_y[idx] = static_cast<int16_t>(best_dy);
+#endif
                 }
             }
         }
@@ -109,10 +127,30 @@ void SearchDenseLocal(const FloatImage& ref,
                     int sx0 = seed_x[idx];
                     int sy0 = seed_y[idx];
 
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                    double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
+                    for (int dy = sy0 - kSearchDist; dy <= sy0 + kSearchDist; ++dy)
+                    {
+                        for (int dx = sx0 - kSearchDist; dx <= sx0 + kSearchDist; ++dx)
+                        {
+                            int sx = SnapToPeriod(dx, cfa_period);
+                            int sy = SnapToPeriod(dy, cfa_period);
+                            float score = TileCost(ref, cmp,
+                                tx * half_tile, ty * half_tile,
+                                tile_size, tile_size,
+                                sx, sy, sample_step, weight_ssd > 0);
+                            double w = 1.0 / (static_cast<double>(score) * static_cast<double>(score) + 1e-8);
+                            sum_w += w;
+                            sum_wx += w * sx;
+                            sum_wy += w * sy;
+                        }
+                    }
+                    out_x[idx] = static_cast<int16_t>(std::lround(sum_wx / sum_w));
+                    out_y[idx] = static_cast<int16_t>(std::lround(sum_wy / sum_w));
+#else
                     float best_score = std::numeric_limits<float>::max();
                     int best_x = sx0;
                     int best_y = sy0;
-
                     for (int dy = sy0 - kSearchDist; dy <= sy0 + kSearchDist; ++dy)
                     {
                         for (int dx = sx0 - kSearchDist; dx <= sx0 + kSearchDist; ++dx)
@@ -131,9 +169,9 @@ void SearchDenseLocal(const FloatImage& ref,
                             }
                         }
                     }
-
                     out_x[idx] = static_cast<int16_t>(best_x);
                     out_y[idx] = static_cast<int16_t>(best_y);
+#endif
                 }
             }
         }
@@ -194,7 +232,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
 
     AlignmentResult cur;
     cur.cfa_period = std::max<uint32_t>(1, params.cfa_period);
-    cur.tile_size = AlignConstants::kDefaultTileSize;
+    cur.tile_size = ResolveAlignTile(params.tile_size);
     cur.tile_spacing = cur.tile_size;
     cur.tiles_x = 1;
     cur.tiles_y = 1;
@@ -208,7 +246,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
     {
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
-        const uint32_t tile_size = AlignConstants::kDefaultTileSize;
+        const uint32_t tile_size = static_cast<uint32_t>(ResolveAlignTile(params.tile_size));
         const uint32_t half_tile = tile_size / 2;
         const uint32_t tiles_x = std::max<uint32_t>(1,
             static_cast<uint32_t>(std::ceil(static_cast<double>(ref.width) / static_cast<double>(half_tile))) - 1);

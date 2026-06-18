@@ -17,6 +17,16 @@ namespace burstmerge
 namespace
 {
 
+// Base for the pixel subsampling stride used inside the Standard estimator's
+// coarse-to-fine global SAD seed search (the SparseSad loop below). The actual
+// stride at a given pyramid level is kGlobalSadStepBase >> (level + 1), i.e. it
+// halves toward finer levels. This is a search-acceleration heuristic ONLY; it
+// is intentionally decoupled from AlignParams::tile_size (which governs tile
+// geometry elsewhere) because seed-search density must not change with the
+// user's tile-size choice, or the global seed may miss the true shift and the
+// per-tile RefineTileField (local_radius search) cannot recover it.
+constexpr int kGlobalSadStepBase = 16;
+
 } // namespace
 
 AlignmentResult EstimateTranslation(const FloatImage& reference,
@@ -28,7 +38,7 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
     // dispatch to the requested estimator.
     std::vector<FloatImage> ref_pyr;
     std::vector<FloatImage> cmp_pyr;
-    BuildPyramid(reference, comparison, ref_pyr, cmp_pyr);
+    BuildPyramid(reference, comparison, ref_pyr, cmp_pyr, params.tile_size);
 
     if (params.mode == AlignmentMode::DenseTile)
     {
@@ -61,7 +71,7 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
         const uint32_t longest = std::max(ref.width, ref.height);
         int radius = std::max(AlignConstants::kMinSearchRadius,
                               static_cast<int>(longest >> shift));
-        int step = std::max(1, AlignConstants::kDefaultTileSize >> (level + 1));
+        int step = std::max(1, kGlobalSadStepBase >> (level + 1));
 
         float level_best = std::numeric_limits<float>::max();
         int level_x = best_x;

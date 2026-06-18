@@ -20,6 +20,8 @@ extern "C"
 
 #define BM_ALGO_SPATIAL   0
 #define BM_ALGO_FREQUENCY 1
+#define BM_ALGO_TEMPORAL_AVERAGE 2
+#define BM_ALGO_TEMPORAL_MEDIAN  3
 
 #define BM_EXPOSURE_OFF   0
 #define BM_EXPOSURE_LINEAR 1

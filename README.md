@@ -11,6 +11,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 ### Core capabilities
 
 - Multi-Frame Noise Reduction (MFNR)
+- STF synthesis like Minolta α7 camera (but with inter-frame alignment)
 - RAW-in RAW-out: DNG RAW output support
 - DNG RAW input support
 - Camera manufacturer proprietary RAW format support (via Adobe DNG Converter)
@@ -23,6 +24,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 ### Merge and processing modes
 
 - Simple temporal averaging merge
+- Simple temporal median merge
 - Motion-robust merge in the spatial domain
 - Motion-robust merge in the frequency domain
 - Optional exposure correction for improved shadow tonality
@@ -55,13 +57,15 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Support working together with Adobe LrC/ACR AI noise reduction
 - Support working together with DxO PureRAW
 - More comperhensive metadata copying for output
+- Write processing parameters and program version to output
 - Support images with more channels
 - Non-Bayer sensor support
 - Multi-threaded RAW conversion and image loading
 - Better alignment algorithm for extreme exposure bracket range
 - More constrained alignment algorithms: perspective, ...
-- Simple median and mid-percentage merge options
+- Simple median (done) and mid-percentage merge (todo) options
 - More texture-preserving and noise-robust frame merging algorithm
+- Algorithms dedicated for STF synthesis
 - Vulkan processing support
 - Support for additional operating systems
 - CJK path support
@@ -122,7 +126,7 @@ The repository already vendors several dependencies under `3rdparty/`, including
 - `zlib`: `C:/MinGW/include` and `C:/MinGW/lib/libz.a`
 - `libtiff`: `3rdparty/libtiff/install/include` and `3rdparty/libtiff/install/lib/libtiff.dll.a`
 
-If your MinGW installation is not under `C:/MinGW`, update `local_config.cmake` before configuring the project.
+Still, you can modify the CMake configs to find the dependencies if you've alreadly configured them in your environment. 
 
 ### Build libtiff first
 

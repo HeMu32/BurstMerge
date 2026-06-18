@@ -533,9 +533,235 @@ static void test_module_params()
     std::cout << "  Module params OK" << std::endl;
 }
 
+static burstmerge::FloatImage make_float_image(uint32_t width, uint32_t height, uint32_t channels, float value = 0.0f)
+{
+    burstmerge::FloatImage img;
+    img.width = width;
+    img.height = height;
+    img.channels = channels;
+    img.data.assign(static_cast<size_t>(width) * height * channels, value);
+    return img;
+}
+
+// Regression: Wiener frequency merge must not create dark blocks or strong
+// color bias around clipped highlights when comparison exposure differs.
+static void test_frequency_wiener_highlights()
+{
+    std::cout << "[test] frequency wiener highlights..." << std::endl;
+
+    const uint32_t width = 16;
+    const uint32_t height = 16;
+    const uint32_t channels = 4;
+    const float black = 64.0f;
+    const float white = 1023.0f;
+
+    burstmerge::FloatImage reference = make_float_image(width, height, channels, black + 32.0f);
+    burstmerge::FloatImage comparison = make_float_image(width, height, channels, black + 32.0f);
+
+    for (uint32_t y = 0; y < height; ++y)
+    {
+        for (uint32_t x = 0; x < width; ++x)
+        {
+            const bool in_tube = (x >= 6 && x <= 9);
+            const bool near_tube = (x >= 5 && x <= 10);
+            for (uint32_t c = 0; c < channels; ++c)
+            {
+                float ref_v = black + 32.0f;
+                if (near_tube) ref_v = black + 220.0f;
+                if (in_tube) ref_v = white - 8.0f;
+                reference.At(x, y, c) = ref_v;
+
+                float comp_v = ref_v;
+                if (near_tube) comp_v = black + (ref_v - black) * 1.10f;
+                if (in_tube)
+                {
+                    // R/B clip harder than G to emulate purple highlight risk.
+                    static const float clip_vals[4] = {white, white - 96.0f, white - 88.0f, white};
+                    comp_v = clip_vals[c];
+                }
+                comparison.At(x, y, c) = std::min(comp_v, white);
+            }
+        }
+    }
+
+    const float exposure_scale = 1.0f / 1.23f; // comparison about +0.3 EV before normalization
+    for (float& v : comparison.data)
+    {
+        v = (v - black) * exposure_scale + black;
+    }
+
+    burstmerge::FrequencyMergeParams params{};
+    params.mode = burstmerge::FrequencyMode::WienerFftRobust;
+    params.noise_reduction = 13.0f;
+    params.white_level = white;
+    params.black_level = black;
+    params.num_scales = 1;
+    params.exposure_scales = &exposure_scale;
+
+    burstmerge::FloatImage out = burstmerge::FrequencyMerge(reference, {comparison}, params);
+
+    float min_edge = 1e9f;
+    float max_edge = -1e9f;
+    for (uint32_t y = 0; y < height; ++y)
+    {
+        for (uint32_t x = 5; x <= 10; ++x)
+        {
+            for (uint32_t c = 0; c < channels; ++c)
+            {
+                float v = out.At(x, y, c);
+                min_edge = std::min(min_edge, v);
+                max_edge = std::max(max_edge, v);
+            }
+        }
+    }
+
+    float center_vals[4];
+    for (uint32_t c = 0; c < channels; ++c)
+    {
+        center_vals[c] = out.At(7, 8, c);
+    }
+    float center_min = *std::min_element(center_vals, center_vals + 4);
+    float center_max = *std::max_element(center_vals, center_vals + 4);
+
+    CHECK(min_edge >= black + 80.0f,
+          "Wiener robust highlight edge avoids dark block (min=" + std::to_string((int)min_edge) + ")");
+    CHECK(center_min >= white * 0.80f,
+          "Wiener robust highlight center stays bright (min=" + std::to_string((int)center_min) + ")");
+    CHECK(center_max - center_min <= 140.0f,
+          "Wiener robust highlight center avoids strong magenta bias (spread=" + std::to_string((int)(center_max - center_min)) + ")");
+
+    std::cout << "  highlight edge min/max: " << (int)min_edge << "/" << (int)max_edge
+              << " center: " << (int)center_vals[0] << " " << (int)center_vals[1]
+              << " " << (int)center_vals[2] << " " << (int)center_vals[3] << std::endl;
+}
+
 // ============================================================
 // Main
 // ============================================================
+
+// TemporalMedian: per-pixel median across reference + comparisons.
+// Verifies odd/even count handling and outlier rejection.
+static void test_temporal_median()
+{
+    std::cout << "[test] temporal median..." << std::endl;
+
+    const uint32_t width = 4;
+    const uint32_t height = 4;
+    const uint32_t channels = 1;
+
+    // Build 5 frames with values 10, 20, 30, 40, 50 at every pixel
+    // (odd count).  Median should be 30.
+    burstmerge::FloatImage ref = make_float_image(width, height, channels, 10.0f);
+    std::vector<burstmerge::FloatImage> comps;
+    static const float odd_vals[4] = {20.0f, 30.0f, 40.0f, 50.0f};
+    for (float v : odd_vals) comps.push_back(make_float_image(width, height, channels, v));
+
+    burstmerge::TemporalDenoiseParams params{};
+    burstmerge::FloatImage out_odd = burstmerge::TemporalMedian(ref, comps, params);
+    bool odd_ok = true;
+    for (float v : out_odd.data) if (v != 30.0f) odd_ok = false;
+    CHECK(odd_ok, "TemporalMedian odd count returns middle value");
+
+    // Even count: drop the last comparison (4 frames: 10,20,30,40).
+    // Median = (20+30)/2 = 25.
+    std::vector<burstmerge::FloatImage> comps_even(comps.begin(), comps.begin() + 3);
+    burstmerge::FloatImage out_even = burstmerge::TemporalMedian(ref, comps_even, params);
+    bool even_ok = true;
+    for (float v : out_even.data) if (v != 25.0f) even_ok = false;
+    CHECK(even_ok, "TemporalMedian even count averages two middle values");
+
+    // Outlier rejection: introduce a huge spike in one comparison frame.
+    // With 5 frames total (10,20,30,40,5000), median is still 30.
+    comps[3].data[0] = 5000.0f;
+    burstmerge::FloatImage out_outlier = burstmerge::TemporalMedian(ref, comps, params);
+    CHECK(out_outlier.data[0] == 30.0f,
+          "TemporalMedian rejects outlier spike (got "
+          + std::to_string(out_outlier.data[0]) + ")");
+
+    // Single frame (no comparisons): output equals reference.
+    std::vector<burstmerge::FloatImage> empty;
+    burstmerge::FloatImage out_single = burstmerge::TemporalMedian(ref, empty, params);
+    bool single_ok = (out_single.data == ref.data);
+    CHECK(single_ok, "TemporalMedian with no comparisons returns reference");
+
+    // MergeAlgorithm enum coverage: TemporalMedian must be distinct.
+    burstmerge::Settings s{};
+    s.merge_algo = burstmerge::MergeAlgorithm::TemporalMedian;
+    CHECK(s.merge_algo != burstmerge::MergeAlgorithm::TemporalAverage,
+          "MergeAlgorithm::TemporalMedian distinct from TemporalAverage");
+    CHECK(s.merge_algo != burstmerge::MergeAlgorithm::Spatial,
+          "MergeAlgorithm::TemporalMedian distinct from Spatial");
+
+    // C ABI constants must map back to the enum.
+    CHECK(static_cast<burstmerge::MergeAlgorithm>(BM_ALGO_TEMPORAL_MEDIAN)
+            == burstmerge::MergeAlgorithm::TemporalMedian,
+          "BM_ALGO_TEMPORAL_MEDIAN maps to TemporalMedian");
+
+    std::cout << "  TemporalMedian OK" << std::endl;
+}
+
+// Clip detection + highlight bypass: comparisons with clipped values are
+// excluded from the median (prevents Frankenstein pixel color casts), and
+// reference values at/near clipping are preserved (keeps the signal for RAW
+// converter highlight recovery).
+static void test_temporal_median_clip()
+{
+    std::cout << "[test] temporal median clip + bypass..." << std::endl;
+
+    const uint32_t width = 4;
+    const uint32_t height = 4;
+    const uint32_t channels = 4;
+
+    burstmerge::FloatImage ref = make_float_image(width, height, channels, 100.0f);
+    ref.data[0] = 1010.0f;  // pixel 0, ch0: above clip_threshold for bypass test
+
+    burstmerge::FloatImage comp1 = make_float_image(width, height, channels, 120.0f);
+    burstmerge::FloatImage comp2 = make_float_image(width, height, channels, 120.0f);
+    comp2.data[0] = 1010.0f;  // clipped → should be rejected by clip detection
+    burstmerge::FloatImage comp3 = make_float_image(width, height, channels, 110.0f);
+
+    burstmerge::TemporalDenoiseParams params{};
+    params.white_level = 1023.0f;
+    params.black_level = 0.0f;
+    // clip_threshold = 1023 * 0.98 = 1002.5
+
+    std::vector<burstmerge::FloatImage> comps = {comp1, comp2, comp3};
+    burstmerge::FloatImage out = burstmerge::TemporalMedian(ref, comps, params);
+
+    // Pixel 0, ch0: ref=1010 ≥ threshold → bypass → output = 1010
+    CHECK(out.At(0, 0, 0) == 1010.0f,
+          "TemporalMedian bypasses clipped reference channel (got "
+          + std::to_string(out.At(0, 0, 0)) + ")");
+
+    // Pixel 0, ch1: ref=100, comp2 clipped (ch0=1010) → comp2 rejected.
+    // Remaining: [100(ref), 120(comp1), 110(comp3)] → median = 110
+    CHECK(out.At(0, 0, 1) == 110.0f,
+          "TemporalMedian rejects clipped comparison (ch1 got "
+          + std::to_string(out.At(0, 0, 1)) + ")");
+
+    // Pixel 1: no clipping. All 4 values [100, 120, 120, 110] → median = 115
+    CHECK(out.At(1, 0, 0) == 115.0f,
+          "TemporalMedian normal median at non-clipped pixel (got "
+          + std::to_string(out.At(1, 0, 0)) + ")");
+
+    // Bracketed: comp value moderate but /exposure_scale exceeds threshold.
+    burstmerge::FloatImage comp_br = make_float_image(width, height, channels, 600.0f);
+    float exp_scale = 0.5f;  // 600/0.5 = 1200 ≥ 1002.5 → clipped
+    params.num_scales = 1;
+    params.exposure_scales = &exp_scale;
+
+    std::vector<burstmerge::FloatImage> comps_br = {comp_br};
+    burstmerge::FloatImage out_br = burstmerge::TemporalMedian(ref, comps_br, params);
+    CHECK(out_br.At(0, 0, 0) == 1010.0f,
+          "TemporalMedian bypass still works with exposure_scale (got "
+          + std::to_string(out_br.At(0, 0, 0)) + ")");
+    CHECK(out_br.At(0, 0, 1) == 100.0f,
+          "TemporalMedian rejects exposure-scaled clipped comparison (got "
+          + std::to_string(out_br.At(0, 0, 1)) + ")");
+
+    std::cout << "  TemporalMedian clip + bypass OK" << std::endl;
+}
+
 int main()
 {
     test_types();
@@ -548,6 +774,9 @@ int main()
     test_edge_cases();
     test_subgraph();
     test_module_params();
+    test_frequency_wiener_highlights();
+    test_temporal_median();
+    test_temporal_median_clip();
 
     std::cout << "\n================================" << std::endl;
     std::cout << "Stage 0: " << g_tests << " checks, "

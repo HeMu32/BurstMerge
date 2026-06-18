@@ -24,4 +24,12 @@ FloatImage TemporalAverage(const FloatImage& reference,
                            const std::vector<FloatImage>& aligned_comparisons,
                            const TemporalDenoiseParams& params);
 
+// Per-pixel median across the reference and all aligned comparison frames.
+// Robust to outliers (e.g. residual misalignment, walking people, hot pixels);
+// noise_reduction and exposure_scales are accepted for API symmetry with
+// TemporalAverage but are not used by the median computation.
+FloatImage TemporalMedian(const FloatImage& reference,
+                          const std::vector<FloatImage>& aligned_comparisons,
+                          const TemporalDenoiseParams& params);
+
 } // namespace burstmerge

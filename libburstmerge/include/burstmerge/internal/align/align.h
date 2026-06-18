@@ -10,13 +10,15 @@ namespace burstmerge
 
 struct AlignConstants
 {
-    // --- Tile geometry ---------------------------------------------------
-    // Tile size in plane pixels (plane = Bayer separated by colour).
-    // Each tile covers 16×16 plane pixels = 32×32 Bayer pixels.
+    // --- Default tile geometry -------------------------------------------
+    // Default tile size in plane pixels (plane = Bayer separated by colour).
+    // Actual tile geometry is taken from AlignParams::tile_size.
+    // With the default value of 16, each tile covers 16x16 plane pixels
+    // (= 32x32 Bayer pixels); 
     // Tiles are arranged with 50 % overlap (stride = tile_size / 2 = 8).
     static constexpr int32_t kDefaultTileSize = 16;
 
-    // Minimum tile size (also used as step in the Standard SparseSad loop).
+    // Minimum tile size (lower policy bound for resolved tile geometry).
     static constexpr int32_t kMinTileSize = 16;
 
     // Per-tile search: number of integer-position candidates in each direction.
@@ -91,5 +93,14 @@ AlignmentResult EstimateFrequencyTileField(
     const AlignParams& params);
 
 FloatImage WarpAligned(const FloatImage& source, const AlignmentResult& alignment);
+
+// Resolve a requested alignment tile size into a valid geometry.
+// Tile sizes below kMinTileSize break sub-pixel matching fidelity; callers
+// should always pass user-supplied tile values through this before use.
+inline int32_t ResolveAlignTile(int32_t requested)
+{
+    if (requested < AlignConstants::kMinTileSize) return AlignConstants::kMinTileSize;
+    return requested;
+}
 
 } // namespace burstmerge

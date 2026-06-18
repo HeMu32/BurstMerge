@@ -13,7 +13,6 @@ struct FrequencyConstants
     static constexpr int32_t kFourierSearchGrid = 7;        // 7x7 search
     static constexpr double kFourierSearchRange = 0.5;       // +/-0.5 pixel
     static constexpr int32_t kWienerTileSize = 8;
-    static constexpr int32_t kMinTileSize = 16;
     static constexpr int32_t kWienerShiftPasses = 4;
     static constexpr double kRmsScale = 0.25;
     static constexpr double kRobustnessRevOffset = 26.5;

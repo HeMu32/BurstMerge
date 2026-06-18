@@ -192,7 +192,7 @@ AlignmentResult EstimateFrequencyTileField(
 
     AlignmentResult cur;
     cur.cfa_period = cfa;
-    cur.tile_size = AlignConstants::kDefaultTileSize;
+    cur.tile_size = ResolveAlignTile(params.tile_size);
     cur.tile_spacing = cur.tile_size;
     cur.tiles_x = 1;
     cur.tiles_y = 1;
@@ -210,7 +210,7 @@ AlignmentResult EstimateFrequencyTileField(
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
 
-        const uint32_t ts = AlignConstants::kDefaultTileSize;
+        const uint32_t ts = static_cast<uint32_t>(ResolveAlignTile(params.tile_size));
         const uint32_t half = ts / 2;
         const uint32_t fw = ts;
         const uint32_t fh = ts;
@@ -285,10 +285,31 @@ AlignmentResult EstimateFrequencyTileField(
                         int seed_x = ux[idx];
                         int seed_y = uy[idx];
 
+#if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                        double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
+                        for (int iy = -kTileSearchR; iy <= kTileSearchR; ++iy)
+                        {
+                            for (int ix = -kTileSearchR; ix <= kTileSearchR; ++ix)
+                            {
+                                int cand_x = seed_x + ix;
+                                int cand_y = seed_y + iy;
+                                float cost = TileSad(ref, cmp, x0, y0, tw, th,
+                                    cand_x, cand_y, 1);
+                                if (cost >= 0.0f)
+                                {
+                                    double w = 1.0 / (static_cast<double>(cost) * static_cast<double>(cost) + 1e-8);
+                                    sum_w += w;
+                                    sum_wx += w * cand_x;
+                                    sum_wy += w * cand_y;
+                                }
+                            }
+                        }
+                        int total_ix = static_cast<int>(std::lround(sum_wx / sum_w));
+                        int total_iy = static_cast<int>(std::lround(sum_wy / sum_w));
+#else
                         int best_int_x = seed_x;
                         int best_int_y = seed_y;
                         float best_int_cost = std::numeric_limits<float>::max();
-
                         for (int iy = -kTileSearchR; iy <= kTileSearchR; ++iy)
                         {
                             for (int ix = -kTileSearchR; ix <= kTileSearchR; ++ix)
@@ -305,14 +326,14 @@ AlignmentResult EstimateFrequencyTileField(
                                 }
                             }
                         }
-
                         int total_ix = best_int_x;
                         int total_iy = best_int_y;
+#endif
 
                         if (is_finest)
                         {
-                            int cmp_x0 = static_cast<int>(x0) + best_int_x;
-                            int cmp_y0 = static_cast<int>(y0) + best_int_y;
+                            int cmp_x0 = static_cast<int>(x0) + total_ix;
+                            int cmp_y0 = static_cast<int>(y0) + total_iy;
 
                             if (cmp_x0 >= 0 &&
                                 cmp_x0 + static_cast<int>(tw) <= static_cast<int>(cmp.width) &&
@@ -348,8 +369,8 @@ AlignmentResult EstimateFrequencyTileField(
 
                                 auto fs = FourierShiftSearch(ref_fft, cmp_fft, fw, fh);
 
-                                float total_x = static_cast<float>(best_int_x) + fs.dx;
-                                float total_y = static_cast<float>(best_int_y) + fs.dy;
+                                float total_x = static_cast<float>(total_ix) + fs.dx;
+                                float total_y = static_cast<float>(total_iy) + fs.dy;
                                 total_ix = static_cast<int>(std::lround(static_cast<double>(total_x)));
                                 total_iy = static_cast<int>(std::lround(static_cast<double>(total_y)));
                             }

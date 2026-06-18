@@ -18,6 +18,10 @@ struct PipelineConstants
     static constexpr float kNoiseFloorMin = 8.0f;
     static constexpr float kRobustnessDiv = 13.0f;
     static constexpr float kRobustnessMin = 0.2f;
+    // Lower bound for Settings::tile_size; the orchestrator clamps undersized
+    // user input so every downstream stage (alignment + merge) gets a geometry
+    // that preserves sub-pixel matching fidelity.
+    static constexpr int32_t kMinTileSize = 16;
     // NOTE: kTemporalNrThreshold (22.5) was removed; "frame average" is now selected
     // by --merge-algo, not by noise_reduction threshold.
     static constexpr float kBracketTransmissionFallbackEv = 1.0f;

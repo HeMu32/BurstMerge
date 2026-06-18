@@ -1,4 +1,5 @@
 #include "burstmerge/api.h"
+#include "burstmerge/internal/core/pipeline.h"
 #include "burstmerge/internal/io/dng_io.h"
 #include "cxxopts.hpp"
 
@@ -25,6 +26,8 @@ bool ParseMergeAlgorithm(const std::string& value, burstmerge::MergeAlgorithm& o
     if (v == "frequency" || v == "freq") { out = burstmerge::MergeAlgorithm::Frequency; return true; }
     if (v == "temporal" || v == "temporal-average" || v == "average" || v == "avg") {
         out = burstmerge::MergeAlgorithm::TemporalAverage; return true; }
+    if (v == "median" || v == "temporal-median") {
+        out = burstmerge::MergeAlgorithm::TemporalMedian; return true; }
     return false;
 }
 
@@ -33,6 +36,7 @@ const char* MergeAlgoName(burstmerge::MergeAlgorithm algo) {
         case burstmerge::MergeAlgorithm::Spatial: return "Spatial";
         case burstmerge::MergeAlgorithm::Frequency: return "Frequency";
         case burstmerge::MergeAlgorithm::TemporalAverage: return "TemporalAverage";
+        case burstmerge::MergeAlgorithm::TemporalMedian: return "TemporalMedian";
     }
     return "Unknown";
 }
@@ -128,8 +132,8 @@ int main(int argc, char* argv[]) {
         ("t,tile", "Tile size", cxxopts::value<int>()->default_value("32"))
         ("b,bit-depth", "Output bit depth (8, 10, 12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
         ("frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
-        ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal)", cxxopts::value<float>())
-        ("m,merge,merge-algo", "Merge algorithm: spatial, frequency, temporal", cxxopts::value<std::string>())
+        ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal/median)", cxxopts::value<float>())
+        ("m,merge,merge-algo", "Merge algorithm: spatial, frequency, temporal (average), median", cxxopts::value<std::string>())
         ("a,alignment", "Alignment mode: standard, dense, freq", cxxopts::value<std::string>()->default_value("standard"))
         ("spa-mode,spatial-mode", "Spatial merge mode: standard, linear", cxxopts::value<std::string>()->default_value("standard"))
         ("freq-mode,frequency-mode", "Frequency mode: laplacian, wiener, wiener-robust", cxxopts::value<std::string>()->default_value("laplacian"))
@@ -183,6 +187,16 @@ int main(int argc, char* argv[]) {
 
     burstmerge::Settings settings;
     settings.tile_size = args["tile"].as<int>();
+    {
+        const int lo = burstmerge::PipelineConstants::kMinTileSize;
+        if (settings.tile_size < lo)
+        {
+            std::cerr << "Warning: tile size " << settings.tile_size
+                      << " below minimum " << lo
+                      << "; clamping to " << lo << std::endl;
+            settings.tile_size = lo;
+        }
+    }
     int bit_depth = args["bit-depth"].as<int>();
     if (bit_depth != 8 && bit_depth != 10 && bit_depth != 12 && bit_depth != 14 && bit_depth != 16) {
         std::cerr << "Invalid bit depth: " << bit_depth << " (use 8, 10, 12, 14, or 16)" << std::endl;
@@ -192,7 +206,7 @@ int main(int argc, char* argv[]) {
     settings.merge_algo = burstmerge::MergeAlgorithm::Spatial;
     if (args.count("merge-algo") &&
         !ParseMergeAlgorithm(args["merge-algo"].as<std::string>(), settings.merge_algo)) {
-        std::cerr << "Invalid merge algorithm (use spatial, frequency, or temporal)" << std::endl;
+        std::cerr << "Invalid merge algorithm (use spatial, frequency, temporal, or median)" << std::endl;
         return 2;
     }
     // --frequency is a deprecated shorthand for --merge-algo frequency.
