@@ -357,6 +357,10 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                                                       i,
                                                       processed,
                                                       total));
+            // gray_inputs[i] was only needed for EstimateTranslation above;
+            // release it now to reduce peak memory for subsequent frames.
+            gray_inputs[i].data.clear();
+            gray_inputs[i].data.shrink_to_fit();
             ++processed;
         }
         return aligned;
