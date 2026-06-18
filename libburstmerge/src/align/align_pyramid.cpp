@@ -6,11 +6,7 @@
 namespace burstmerge
 {
 
-void BuildPyramid(const FloatImage& ref,
-                  const FloatImage& cmp,
-                  std::vector<FloatImage>& ref_pyr,
-                  std::vector<FloatImage>& cmp_pyr,
-                  int32_t tile_size)
+std::vector<FloatImage> BuildPyramidSingle(const FloatImage& img, int32_t tile_size)
 {
     const uint32_t half = static_cast<uint32_t>(ResolveAlignTile(tile_size)) / 2;
 
@@ -22,45 +18,50 @@ void BuildPyramid(const FloatImage& ref,
         return nx * ny;
     };
 
-    ref_pyr = {ref};
-    cmp_pyr = {cmp};
-
     const uint32_t kMinTiles = static_cast<uint32_t>(AlignConstants::kMinCoarseTiles);
     const uint32_t kMaxTiles = static_cast<uint32_t>(AlignConstants::kMaxCoarseTiles);
 
-    if (ref.width >= half * 2 && ref.height >= half * 2 &&
-        level_tiles(ref.width / 2, ref.height / 2) >= kMinTiles)
+    std::vector<FloatImage> pyr = {img};
+
+    if (img.width >= half * 2 && img.height >= half * 2 &&
+        level_tiles(img.width / 2, img.height / 2) >= kMinTiles)
     {
-        ref_pyr.push_back(Downsample2x(ref));
-        cmp_pyr.push_back(Downsample2x(cmp));
+        pyr.push_back(Downsample2x(img));
 
         FloatImage blur_tmp, blur_result, next;
 
         while (true)
         {
-            const auto& prev_ref = ref_pyr.back();
-            const auto& prev_cmp = cmp_pyr.back();
-            if (prev_ref.width < half * 2 || prev_ref.height < half * 2) break;
+            const auto& prev = pyr.back();
+            if (prev.width < half * 2 || prev.height < half * 2) break;
 
-            uint32_t nw = prev_ref.width / 2;
-            uint32_t nh = prev_ref.height / 2;
+            uint32_t nw = prev.width / 2;
+            uint32_t nh = prev.height / 2;
             if (nw < half || nh < half) break;
 
-            uint32_t cur_tiles = level_tiles(prev_ref.width, prev_ref.height);
+            uint32_t cur_tiles = level_tiles(prev.width, prev.height);
             if (cur_tiles <= kMaxTiles) break;
 
             uint32_t ntiles = level_tiles(nw, nh);
             if (ntiles < kMinTiles) break;
 
-            BinomialBlur5Tap(prev_ref, blur_result, blur_tmp);
+            BinomialBlur5Tap(prev, blur_result, blur_tmp);
             Downsample2x(blur_result, next);
-            ref_pyr.push_back(std::move(next));
-
-            BinomialBlur5Tap(prev_cmp, blur_result, blur_tmp);
-            Downsample2x(blur_result, next);
-            cmp_pyr.push_back(std::move(next));
+            pyr.push_back(std::move(next));
         }
     }
+
+    return pyr;
+}
+
+void BuildPyramid(const FloatImage& ref,
+                  const FloatImage& cmp,
+                  std::vector<FloatImage>& ref_pyr,
+                  std::vector<FloatImage>& cmp_pyr,
+                  int32_t tile_size)
+{
+    ref_pyr = BuildPyramidSingle(ref, tile_size);
+    cmp_pyr = BuildPyramidSingle(cmp, tile_size);
 }
 
 } // namespace burstmerge
