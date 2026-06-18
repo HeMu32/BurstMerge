@@ -232,7 +232,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
 
     AlignmentResult cur;
     cur.cfa_period = std::max<uint32_t>(1, params.cfa_period);
-    cur.tile_size = AlignConstants::kDefaultTileSize;
+    cur.tile_size = ResolveAlignTile(params.tile_size);
     cur.tile_spacing = cur.tile_size;
     cur.tiles_x = 1;
     cur.tiles_y = 1;
@@ -246,7 +246,7 @@ AlignmentResult EstimateDenseTileField(const std::vector<FloatImage>& ref_pyr,
     {
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
-        const uint32_t tile_size = AlignConstants::kDefaultTileSize;
+        const uint32_t tile_size = static_cast<uint32_t>(ResolveAlignTile(params.tile_size));
         const uint32_t half_tile = tile_size / 2;
         const uint32_t tiles_x = std::max<uint32_t>(1,
             static_cast<uint32_t>(std::ceil(static_cast<double>(ref.width) / static_cast<double>(half_tile))) - 1);

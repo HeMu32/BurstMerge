@@ -192,7 +192,7 @@ AlignmentResult EstimateFrequencyTileField(
 
     AlignmentResult cur;
     cur.cfa_period = cfa;
-    cur.tile_size = AlignConstants::kDefaultTileSize;
+    cur.tile_size = ResolveAlignTile(params.tile_size);
     cur.tile_spacing = cur.tile_size;
     cur.tiles_x = 1;
     cur.tiles_y = 1;
@@ -210,7 +210,7 @@ AlignmentResult EstimateFrequencyTileField(
         const FloatImage& ref = ref_pyr[static_cast<size_t>(level)];
         const FloatImage& cmp = cmp_pyr[static_cast<size_t>(level)];
 
-        const uint32_t ts = AlignConstants::kDefaultTileSize;
+        const uint32_t ts = static_cast<uint32_t>(ResolveAlignTile(params.tile_size));
         const uint32_t half = ts / 2;
         const uint32_t fw = ts;
         const uint32_t fh = ts;

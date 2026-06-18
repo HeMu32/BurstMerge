@@ -16,7 +16,7 @@ void RefineTileField(const FloatImage& reference,
                      const AlignParams& params,
                      AlignmentResult& result)
 {
-    const uint32_t tile_size = static_cast<uint32_t>(std::max(AlignConstants::kMinTileSize, params.tile_size));
+    const uint32_t tile_size = static_cast<uint32_t>(ResolveAlignTile(params.tile_size));
     result.tile_size = static_cast<int32_t>(tile_size);
     result.cfa_period = std::max<uint32_t>(1, params.cfa_period);
     result.tiles_x = (reference.width + tile_size - 1) / tile_size;

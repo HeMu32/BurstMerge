@@ -187,7 +187,12 @@ static std::vector<uint8_t> ReadFileToMemory(const std::string& path)
 
 PipelineOrchestrator::PipelineOrchestrator(BackendType backend, Settings settings)
     : backend_(backend), settings_(settings)
-{}
+{
+    if (settings_.tile_size < PipelineConstants::kMinTileSize)
+        settings_.tile_size = PipelineConstants::kMinTileSize;
+    else if (settings_.tile_size > PipelineConstants::kMaxTileSize)
+        settings_.tile_size = PipelineConstants::kMaxTileSize;
+}
 
 Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths,
                                      const std::string& output_path_or_dir,

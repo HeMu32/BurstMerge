@@ -9,9 +9,10 @@ namespace burstmerge
 void BuildPyramid(const FloatImage& ref,
                   const FloatImage& cmp,
                   std::vector<FloatImage>& ref_pyr,
-                  std::vector<FloatImage>& cmp_pyr)
+                  std::vector<FloatImage>& cmp_pyr,
+                  int32_t tile_size)
 {
-    const uint32_t half = static_cast<uint32_t>(AlignConstants::kDefaultTileSize) / 2;
+    const uint32_t half = static_cast<uint32_t>(ResolveAlignTile(tile_size)) / 2;
 
     auto level_tiles = [half](uint32_t w, uint32_t h) -> uint32_t
     {

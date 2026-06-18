@@ -28,7 +28,7 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
     // dispatch to the requested estimator.
     std::vector<FloatImage> ref_pyr;
     std::vector<FloatImage> cmp_pyr;
-    BuildPyramid(reference, comparison, ref_pyr, cmp_pyr);
+    BuildPyramid(reference, comparison, ref_pyr, cmp_pyr, params.tile_size);
 
     if (params.mode == AlignmentMode::DenseTile)
     {

@@ -1,4 +1,5 @@
 #include "burstmerge/api.h"
+#include "burstmerge/internal/core/pipeline.h"
 #include "burstmerge/internal/io/dng_io.h"
 #include "cxxopts.hpp"
 
@@ -186,6 +187,18 @@ int main(int argc, char* argv[]) {
 
     burstmerge::Settings settings;
     settings.tile_size = args["tile"].as<int>();
+    {
+        const int lo = burstmerge::PipelineConstants::kMinTileSize;
+        const int hi = burstmerge::PipelineConstants::kMaxTileSize;
+        if (settings.tile_size < lo || settings.tile_size > hi)
+        {
+            int clamped = std::max(lo, std::min(hi, settings.tile_size));
+            std::cerr << "Warning: tile size " << settings.tile_size
+                      << " out of range [" << lo << "," << hi
+                      << "]; clamping to " << clamped << std::endl;
+            settings.tile_size = clamped;
+        }
+    }
     int bit_depth = args["bit-depth"].as<int>();
     if (bit_depth != 8 && bit_depth != 10 && bit_depth != 12 && bit_depth != 14 && bit_depth != 16) {
         std::cerr << "Invalid bit depth: " << bit_depth << " (use 8, 10, 12, 14, or 16)" << std::endl;
