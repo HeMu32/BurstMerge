@@ -121,15 +121,38 @@ $fs.Close()
 $doc=[IO.File]::ReadAllBytes($DngFile);$opc=[IO.File]::ReadAllBytes($tmp)
 Remove-Item $tmp -Force
 
+# Helper: capture OpcodeList3 (tag 0xC74E) data-offset / count-field-offset / count-value
+# from a 12-byte IFD entry located at offset $ee. For UNDEFINED data > 4B the
+# value/offset field holds the absolute offset to the opcode bytes.
+function CaptureOpcodeList3($ee){
+  $do=[BitConverter]::ToUInt32($doc,($ee+8))
+  $co=$ee+4
+  $os=[BitConverter]::ToUInt32($doc,($ee+4))
+  return @($do,$co,$os)
+}
+# Scan the IFD chain (IFD0 -> IFD1 -> ...) and any SubIFDs (tag 0x014A).
+# BurstMerge linear DNGs put OpcodeList3 directly in IFD0; raw DNGs from
+# Adobe DNG Converter typically place it in a SubIFD. We must handle both.
 $found=$null;$io=[BitConverter]::ToUInt32($doc,4)
 while($io-gt0-and$io-lt$doc.Length){
   $nu=[BitConverter]::ToUInt16($doc,$io)
-  for($i=0;$i-lt$nu;$i++){$e=$io+2+$i*12;$tt=[BitConverter]::ToUInt16($doc,$e)
-    if($tt-eq0x014A){$ct=[BitConverter]::ToUInt32($doc,($e+4));$vl=[BitConverter]::ToUInt32($doc,($e+8));$so=$vl;if($ct-ne1){$so=[BitConverter]::ToUInt32($doc,$vl)}
+  for($i=0;$i-lt$nu;$i++){
+    $e=$io+2+$i*12;$tt=[BitConverter]::ToUInt16($doc,$e)
+    # Case A: OpcodeList3 in this top-level IFD directly (linear DNG layout)
+    if($tt-eq0xC74E -and -not $found){$found=CaptureOpcodeList3 $e}
+    # Case B: descend into SubIFDs (raw DNG layout); let SubIFD override top-level if both present
+    if($tt-eq0x014A){
+      $ct=[BitConverter]::ToUInt32($doc,($e+4));$vl=[BitConverter]::ToUInt32($doc,($e+8))
+      $so=$vl;if($ct-ne1){$so=[BitConverter]::ToUInt32($doc,$vl)}
       $sn=[BitConverter]::ToUInt16($doc,$so)
-      for($k=0;$k-lt$sn;$k++){$se=$so+2+$k*12;$st=[BitConverter]::ToUInt16($doc,$se)
-        if($st-eq0xC74E){$do=[BitConverter]::ToUInt32($doc,($se+8));$co=$se+4;$os=[BitConverter]::ToUInt32($doc,($se+4));$found=@($do,$co,$os)}}}}
-  $io=[BitConverter]::ToUInt32($doc,($io+2+$nu*12))}
+      for($k=0;$k-lt$sn;$k++){
+        $se=$so+2+$k*12;$st=[BitConverter]::ToUInt16($doc,$se)
+        if($st-eq0xC74E){$found=CaptureOpcodeList3 $se}
+      }
+    }
+  }
+  $io=[BitConverter]::ToUInt32($doc,($io+2+$nu*12))
+}
 if(!$found){throw "OpcodeList3 not found"}
 if($opc.Length-gt$found[2]){throw "Opcode $($opc.Length)B exceeds $($found[2])B"}
 for($j=0;$j-lt$opc.Length;$j++){$doc[$found[0]+$j]=$opc[$j]}
