@@ -606,9 +606,20 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             // Original path (bit_depth > 10): restore the mean black level so
             // that the DNG pixel values include the black offset.  The decoder
             // will subtract it later using the BlackLevel metadata tag.
+            //
+            // IMPORTANT: scaled_bl is rounded to the nearest integer here so
+            // that the BlackLevel tag stored in the output DNG is always a
+            // clean integer value.  When sensor_white does not divide evenly
+            // into target_white (e.g. 16383 -> 4095 for 14-bit to 12-bit),
+            // ref_bl * bit_scale can be fractional (e.g. 127.976).  Some RAW
+            // converters (ACR / Lightroom) render fractional BlackLevels
+            // incorrectly in deep shadows, producing a visible red colour
+            // cast after exposure boost.  Rounding to an integer avoids the
+            // issue while staying consistent with the lround quantisation
+            // applied later by FloatImageToUint16HostBuffer.
             if (ref_bl > 1.0f)
             {
-                float scaled_bl = ref_bl * bit_scale;
+                float scaled_bl = std::round(ref_bl * bit_scale);
                 if (bit_scale != 1.0f)
                 {
                     for (float& v : merged.data)
@@ -674,8 +685,15 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
             if (has_per_channel)
             {
+                // Round each per-channel delta to the nearest integer so the
+                // per-channel BlackLevels stored in the DNG are all integers
+                // (see the matching rounding applied to the mean scaled_bl and
+                // to output.metadata.black_level further below).
                 float delta[4];
-                for (int i = 0; i < 4; ++i) delta[i] = (bl_ch[i] - ref_bl) * bit_scale;
+                for (int i = 0; i < 4; ++i)
+                {
+                    delta[i] = std::round((bl_ch[i] - ref_bl) * bit_scale);
+                }
                 for (uint32_t y = 0; y < merged.height; ++y)
                 {
                     for (uint32_t x = 0; x < merged.width; ++x)
@@ -759,13 +777,22 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 // BlackLevel values by bit_scale so they match the rescaled
                 // pixel data.  The decoder subtracts these values to recover
                 // the linear light signal.
+                //
+                // Each value is rounded to the nearest integer so the
+                // BlackLevel tag stored in the DNG is always an integer.
+                // Fractional BlackLevels (e.g. 127.976 when scaling 512 by
+                // 4095/16383) trigger a shadow rendering bug in some RAW
+                // converters (ACR / Lightroom) that floods deep shadows with
+                // red after exposure boost.  See the matching rounding in the
+                // pixel-data restoration path above for details.
                 if (bit_scale != 1.0f && ref_bl > 1.0f)
                 {
                     for (int i = 0; i < 4; ++i)
                     {
                         if (output.metadata.black_level[i] > 0.0f)
                         {
-                            output.metadata.black_level[i] *= bit_scale;
+                            output.metadata.black_level[i] =
+                                std::round(output.metadata.black_level[i] * bit_scale);
                         }
                     }
                 }
