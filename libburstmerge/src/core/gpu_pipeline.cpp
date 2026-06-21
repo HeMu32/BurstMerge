@@ -524,6 +524,11 @@ bool GpuVulkanAvailable()
     return vk.Initialize();
 }
 
+std::vector<std::string> GpuEnumerateDevices()
+{
+    return VulkanBackend::EnumerateDevices();
+}
+
 AlignmentResult GpuEstimateTranslation(const FloatImage& ref_gray,
                                        const FloatImage& cmp_gray,
                                        const AlignParams& params)
@@ -900,7 +905,7 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
 {
     if (images.empty()) throw std::runtime_error("GPU pipeline: no images");
     VulkanBackend vk;
-    if (!vk.Initialize()) throw std::runtime_error("Vulkan init failed: " + vk.LastError());
+    if (!vk.Initialize(settings.gpu_device_index)) throw std::runtime_error("Vulkan init failed: " + vk.LastError());
 
     const uint32_t W = images[0].pixels.width;
     const uint32_t H = images[0].pixels.height;
@@ -964,7 +969,7 @@ FloatImage GpuRunBurstPipelineRgb(const std::vector<FloatImage>& images,
 {
     if (images.empty()) throw std::runtime_error("GPU pipeline: no images");
     VulkanBackend vk;
-    if (!vk.Initialize()) throw std::runtime_error("Vulkan init failed: " + vk.LastError());
+    if (!vk.Initialize(settings.gpu_device_index)) throw std::runtime_error("Vulkan init failed: " + vk.LastError());
 
     const int pw = int(images[0].width);
     const int ph = int(images[0].height);

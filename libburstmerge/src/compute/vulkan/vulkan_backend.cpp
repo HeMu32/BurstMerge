@@ -197,6 +197,47 @@ const std::string& VulkanBackend::LastError() const { return impl_->last_error; 
 
 bool VulkanBackend::Initialize()
 {
+    return Initialize(-1);
+}
+
+std::vector<std::string> VulkanBackend::EnumerateDevices()
+{
+    VkApplicationInfo app{};
+    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app.pApplicationName = "BurstMerge";
+    app.apiVersion = VK_API_VERSION_1_0;
+    VkInstanceCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ici.pApplicationInfo = &app;
+    VkInstance inst;
+    if (vkCreateInstance(&ici, nullptr, &inst) != VK_SUCCESS) return {};
+
+    uint32_t count = 0;
+    vkEnumeratePhysicalDevices(inst, &count, nullptr);
+    std::vector<VkPhysicalDevice> gpus(count);
+    if (count) vkEnumeratePhysicalDevices(inst, &count, gpus.data());
+
+    std::vector<std::string> names;
+    for (auto ph : gpus)
+    {
+        VkPhysicalDeviceProperties prop;
+        vkGetPhysicalDeviceProperties(ph, &prop);
+        uint32_t qfc = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(ph, &qfc, nullptr);
+        std::vector<VkQueueFamilyProperties> qfp(qfc);
+        vkGetPhysicalDeviceQueueFamilyProperties(ph, &qfc, qfp.data());
+        bool has_compute = false;
+        for (uint32_t i = 0; i < qfc; ++i)
+            if (qfp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { has_compute = true; break; }
+        if (has_compute)
+            names.push_back(prop.deviceName);
+    }
+    vkDestroyInstance(inst, nullptr);
+    return names;
+}
+
+bool VulkanBackend::Initialize(int device_index)
+{
     Impl& d = *impl_;
     if (d.initialized) return true;
 
@@ -241,34 +282,57 @@ bool VulkanBackend::Initialize()
     std::vector<VkPhysicalDevice> gpus(gpu_count);
     vkEnumeratePhysicalDevices(d.instance, &gpu_count, gpus.data());
 
-    int best_score = -1;
-    for (auto ph : gpus)
-    {
-        VkPhysicalDeviceProperties prop;
-        vkGetPhysicalDeviceProperties(ph, &prop);
+    // Helper: find the best compute queue family index on a physical device.
+    auto find_compute_queue = [](VkPhysicalDevice phd, int& qidx) {
         uint32_t qfc = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(ph, &qfc, nullptr);
+        vkGetPhysicalDeviceQueueFamilyProperties(phd, &qfc, nullptr);
         std::vector<VkQueueFamilyProperties> qfp(qfc);
-        vkGetPhysicalDeviceQueueFamilyProperties(ph, &qfc, qfp.data());
-        int qidx = -1;
+        vkGetPhysicalDeviceQueueFamilyProperties(phd, &qfc, qfp.data());
+        qidx = -1;
         for (uint32_t i = 0; i < qfc; ++i)
             if (qfp[i].queueFlags & VK_QUEUE_COMPUTE_BIT)
             {
                 qidx = int(i);
-                if (!(qfp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) break; // prefer compute-dedicated
+                if (!(qfp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) break;
             }
-        if (qidx < 0) continue;
-        int score = 0;
-        if (prop.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) score += 100;
-        else if (prop.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) score += 10;
-        score += int(prop.limits.maxComputeWorkGroupInvocations);
-        if (score > best_score)
+    };
+
+    if (device_index >= 0 && device_index < int(gpu_count))
+    {
+        // User-specified device.
+        int qidx = -1;
+        find_compute_queue(gpus[device_index], qidx);
+        if (qidx < 0) { impl_->last_error = "Selected GPU has no compute queue"; return false; }
+        VkPhysicalDeviceProperties prop;
+        vkGetPhysicalDeviceProperties(gpus[device_index], &prop);
+        d.physical = gpus[device_index];
+        d.queue_family = uint32_t(qidx);
+        d.info.device_name = prop.deviceName;
+        d.info.api_version = prop.apiVersion;
+    }
+    else
+    {
+        // Auto-select best device (discrete GPU preferred).
+        int best_score = -1;
+        for (auto ph : gpus)
         {
-            best_score = score;
-            d.physical = ph;
-            d.queue_family = uint32_t(qidx);
-            d.info.device_name = prop.deviceName;
-            d.info.api_version = prop.apiVersion;
+            VkPhysicalDeviceProperties prop;
+            vkGetPhysicalDeviceProperties(ph, &prop);
+            int qidx = -1;
+            find_compute_queue(ph, qidx);
+            if (qidx < 0) continue;
+            int score = 0;
+            if (prop.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) score += 100;
+            else if (prop.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) score += 10;
+            score += int(prop.limits.maxComputeWorkGroupInvocations);
+            if (score > best_score)
+            {
+                best_score = score;
+                d.physical = ph;
+                d.queue_family = uint32_t(qidx);
+                d.info.device_name = prop.deviceName;
+                d.info.api_version = prop.apiVersion;
+            }
         }
     }
     if (d.physical == VK_NULL_HANDLE) { impl_->last_error = "No compute-capable GPU"; return false; }

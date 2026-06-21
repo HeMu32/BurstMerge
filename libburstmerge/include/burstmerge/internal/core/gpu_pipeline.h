@@ -47,4 +47,7 @@ AlignmentResult GpuEstimateTranslation(const FloatImage& ref_gray,
 // orchestrator to fall back gracefully.
 bool GpuVulkanAvailable();
 
+// List available compute-capable Vulkan device names (for --list-gpus).
+std::vector<std::string> GpuEnumerateDevices();
+
 } // namespace burstmerge

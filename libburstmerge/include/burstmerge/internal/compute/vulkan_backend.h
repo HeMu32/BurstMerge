@@ -66,6 +66,12 @@ public:
     // Creates instance / physical-device / logical-device / queue. Returns
     // false and fills last_error_ on failure (e.g. no Vulkan ICD).
     bool Initialize();
+    // Initialize with a specific physical device (-1 = auto-select best).
+    bool Initialize(int device_index);
+    // Enumerate available compute-capable Vulkan devices by name, without
+    // creating a logical device. Index in the returned vector corresponds
+    // to device_index passed to Initialize().
+    static std::vector<std::string> EnumerateDevices();
     void Shutdown();
     bool IsInitialized() const;
 
