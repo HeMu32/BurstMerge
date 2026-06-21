@@ -1,0 +1,31 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// downsample2x: 2x2 box average. dst dims = (w/2, h/2), same channels.
+//   binding 0: src (float NHWC, pc.w x pc.h x pc.channels)
+//   binding 1: dst (float NHWC, pc.w2 x pc.h2 x pc.channels)
+// dispatch (ceil(dstW/8), ceil(dstH/8), channels)
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    int c = int(gl_GlobalInvocationID.z);
+    if (x >= pc.w2 || y >= pc.h2 || c >= pc.channels) return;
+
+    int sx = x * 2;
+    int sy = y * 2;
+    float sum = 0.0;
+    float n = 0.0;
+    for (int dy = 0; dy < 2 && (sy + dy) < pc.h; ++dy)
+        for (int dx = 0; dx < 2 && (sx + dx) < pc.w; ++dx)
+        {
+            sum += src[((sy + dy) * pc.w + (sx + dx)) * pc.channels + c];
+            n += 1.0;
+        }
+    dst[(y * pc.w2 + x) * pc.channels + c] = n > 0.0 ? sum / n : 0.0;
+}

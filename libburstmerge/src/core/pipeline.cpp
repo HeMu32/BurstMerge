@@ -1,6 +1,7 @@
-﻿#include "burstmerge/internal/core/pipeline.h"
+#include "burstmerge/internal/core/pipeline.h"
 
 #include "burstmerge/internal/core/float_image.h"
+#include "burstmerge/internal/core/gpu_pipeline.h"
 #include "burstmerge/internal/core/pipeline_align.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/pipeline_io.h"
@@ -202,10 +203,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
     {
         ResetProfiler();
         Report(progress, 0.0f, "Starting");
-        if (backend_ != BackendType::CPU)
+        if (backend_ != BackendType::CPU && backend_ != BackendType::Vulkan)
         {
             return
-            {false, "", "Stage 1 currently supports CPU backend only"};
+            {false, "", "Unsupported backend"};
         }
         if (input_paths.empty())
         {
@@ -323,7 +324,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 float estimated_noise = EstimateNoiseFloor(float_images[ref_idx], 1);
                 float formula_noise = std::max(PipelineConstants::kNoiseFloorMin,
                     settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
-                params.noise_floor = std::min(estimated_noise, formula_noise);
+            params.noise_floor = std::min(estimated_noise, formula_noise);
+
                 params.highlight_threshold = white_level * PipelineConstants::kHighlightFactor;
                 params.clip_threshold = white_level * PipelineConstants::kClipFactor;
                 params.guide_block_size = 2;
@@ -434,6 +436,15 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         size_t ref_idx = SelectExposureRefIndex(images);
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
 
+        FloatImage merged;
+        if (backend_ == BackendType::Vulkan)
+        {
+            // GPU-native pipeline: prepare / align / merge all on Vulkan compute.
+            // Falls through to the shared CPU tail (bit-depth / exposure / DNG).
+            merged = GpuRunBurstPipeline(images, ref_idx, settings_, progress);
+        }
+        else
+        {
         Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
         std::vector<FloatImage> float_images = BuildFloatImages(images);
         uint32_t hotpixel_period = (float_images.empty() || float_images[0].channels <= 1)
@@ -487,7 +498,6 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
         }
 
-        FloatImage merged;
         //
         // Merge algorithm selection: three mutually exclusive paths.
         // Exposure scales (for clipped-pixel detection / temporal weighting)
@@ -542,6 +552,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             // Dark reference frames (Bkt) can produce inflated noise floor,
             // which disables the robust weight formula and causes blur.
             params.noise_floor = std::min(estimated_noise, formula_noise);
+            std::fprintf(stderr, "[DBG] CPU spatial noise_floor est=%.4f formula=%.4f -> %.4f\n", estimated_noise, formula_noise, params.noise_floor);
             float avg_bl = MeanBlackLevel(images[ref_idx].metadata);
             params.highlight_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kHighlightFactor;
             params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kClipFactor;
@@ -551,6 +562,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.num_scales = static_cast<uint32_t>(exp_scales.size());
             params.exposure_scales = exp_scales.data();
             merged = SpatialMerge(float_images[ref_idx], aligned, params);
+        }
         }
 
 // Compute bit-depth rescaling factor (must happen in black-subtracted space)

@@ -1,0 +1,31 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// block_mean_guide: 1-channel guide = per-pixel mean of its block (channel 0).
+//   binding 0: src (NHWC pc.w x pc.h), binding 1: dst (1ch same dims)
+//   pc.i0 = block_size
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int bs = max(1, pc.i0);
+    int x0 = (x / bs) * bs;
+    int y0 = (y / bs) * bs;
+    int x1 = min(pc.w, x0 + bs);
+    int y1 = min(pc.h, y0 + bs);
+    float sum = 0.0;
+    int n = 0;
+    for (int yy = y0; yy < y1; ++yy)
+        for (int xx = x0; xx < x1; ++xx)
+        {
+            sum += src[(yy * pc.w + xx) * pc.channels + 0];
+            ++n;
+        }
+    dst[y * pc.w + x] = n > 0 ? sum / float(n) : 0.0;
+}

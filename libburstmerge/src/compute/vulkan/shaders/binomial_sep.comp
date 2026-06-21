@@ -1,0 +1,40 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// binomial_sep: separable binomial blur, one axis per dispatch (H then V).
+//   binding 0: src
+//   binding 1: dst
+//   binding 7: readonly storage buffer weights[ ] (index = |offset|, std430 float)
+//   pc.i0 = direction (0=horizontal, 1=vertical)
+//   pc.i1 = radius (1..5 typical; weights[0..radius] used)
+// Border handling: skip OOB samples, renormalize by accumulated weight
+// (matches CPU BinomialBlur / BinomialBlur5Tap behavior).
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+layout(std430, binding = 7) readonly buffer Weights { float wgt[]; } weights;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    int c = int(gl_GlobalInvocationID.z);
+    if (x >= pc.w || y >= pc.h || c >= pc.channels) return;
+    int r = pc.i1;
+    int horiz = pc.i0;
+    float sum = 0.0;
+    float weight = 0.0;
+    for (int d = -r; d <= r; ++d)
+    {
+        int coord = horiz == 0 ? (x + d) : (y + d);
+        if (coord < 0 || coord >= (horiz == 0 ? pc.w : pc.h)) continue;
+        float w = weights.wgt[abs(d)];
+        float v = (horiz == 0)
+            ? src[(y * pc.w + coord) * pc.channels + c]
+            : src[(coord * pc.w + x) * pc.channels + c];
+        sum += w * v;
+        weight += w;
+    }
+    dst[(y * pc.w + x) * pc.channels + c] = sum / max(1.0, weight);
+}

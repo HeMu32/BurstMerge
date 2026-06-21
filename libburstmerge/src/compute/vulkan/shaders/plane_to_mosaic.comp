@@ -1,0 +1,25 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// plane_to_mosaic: reverse Bayer deinterleave. plane (NHWC period^2) -> mosaic (1ch).
+//   binding 0: src plane (pc.w2 x pc.h2 x pc.channels2)
+//   binding 1: dst mosaic (pc.w x pc.h, 1ch)
+//   pc.i0 = cfa_period
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int period = pc.i0;
+    int px = x % period;
+    int py = y % period;
+    int sx = x / period;
+    int sy = y / period;
+    int c = py * period + px;
+    dst[y * pc.w + x] = src[(sy * pc.w2 + sx) * pc.channels2 + c];
+}

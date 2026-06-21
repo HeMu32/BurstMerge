@@ -1,0 +1,57 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// reduce_scalar: two-phase reduction over a flat float buffer.
+//   phase 0 (pc.i2==0): binding0 input[pc.i0] -> binding1 partials[numWG]
+//   phase 1 (pc.i2==1): binding0 partials[pc.i0] -> binding2 result[1]
+//   pc.i1 = op (0 = sum, 1 = max)
+//   pc.i3 = mean divisor (phase 1 only; >0 => result /= divisor)
+// dispatch: phase0 -> ceil(pc.i0/256) workgroups; phase1 -> 1 workgroup.
+layout(local_size_x = 256) in;
+layout(binding = 0) readonly buffer In { float inv[]; };
+layout(binding = 1) buffer Part { float part[]; };
+layout(binding = 2) buffer Out { float outv[]; };
+
+shared float sh[256];
+
+void main()
+{
+    int n = pc.i0;
+    int op = pc.i1;
+    int phase = pc.i2;
+    uint lid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint stride = gl_WorkGroupSize.x * gl_NumWorkGroups.x;  // grid-stride partition
+    float identity = (op == 0) ? 0.0 : -3.402823466e38;
+    float acc = identity;
+    for (int t = int(gid); t < n; t += int(stride))
+    {
+        float v = inv[t];
+        if (op == 0) acc += v; else acc = v > acc ? v : acc;
+    }
+    sh[lid] = acc;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1)
+    {
+        if (lid < s)
+        {
+            if (op == 0) sh[lid] += sh[lid + s];
+            else if (sh[lid + s] > sh[lid]) sh[lid] = sh[lid + s];
+        }
+        barrier();
+    }
+    if (lid == 0)
+    {
+        if (phase == 0)
+        {
+            part[gl_WorkGroupID.x] = sh[0];
+        }
+        else
+        {
+            float r = sh[0];
+            if (op == 0 && pc.i3 > 0) r /= float(pc.i3);
+            outv[0] = r;
+        }
+    }
+}

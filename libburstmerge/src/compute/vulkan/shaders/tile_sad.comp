@@ -1,0 +1,70 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// snap to CFA period (integer division toward zero).
+int snapPeriod(int v, int p)
+{
+    if (p <= 1) return v;
+    return v >= 0 ? (v / p) * p : -((-v) / p) * p;
+}
+
+// tile_sad: raw-sum SAD with out-of-bounds penalty for one (tile, candidate).
+//   binding 0: ref gray (pc.w x pc.h)
+//   binding 1: cmp gray (same dims)
+//   binding 2: result (int[2]: current global shift = seed)
+//   binding 3: candidates (float[tiles * num_cand]) output
+//   pc.i0 = tile_size, pc.i1 = local_radius, pc.i2 = cfa_period,
+//   pc.i3 = tiles_x, pc.i4 = num_cand
+// dispatch (tiles_x, tiles_y, num_cand), local (1,1,1)
+layout(binding = 0) readonly buffer Ref { float refp[]; };
+layout(binding = 1) readonly buffer Cmp { float cmpp[]; };
+layout(binding = 2) readonly buffer Result { int result[]; };
+layout(binding = 3) buffer Cand { float cand[]; };
+
+void main()
+{
+    int tx = int(gl_GlobalInvocationID.x);
+    int ty = int(gl_GlobalInvocationID.y);
+    int cb = int(gl_GlobalInvocationID.z);
+    int tiles_x = pc.i3;
+    int num_cand = pc.i4;
+    if (tx >= tiles_x) return;
+    int lr = pc.i1;
+    int side = 2 * lr + 1;
+    int ox = cb % side;
+    int oy = cb / side;
+    int gx = result[0] + (ox - lr);
+    int gy = result[1] + (oy - lr);
+    int period = pc.i2;
+    int dx = snapPeriod(gx, period);
+    int dy = snapPeriod(gy, period);
+
+    int ts = pc.i0;
+    int x0 = tx * ts;
+    int y0 = ty * ts;
+    int W = pc.w;
+    int H = pc.h;
+    int x1 = min(W, x0 + ts);
+    int y1 = min(H, y0 + ts);
+
+    const float OB = 65504.0;
+    float cost = 0.0;
+    for (int y = y0; y < y1; ++y)
+    {
+        int by = y - dy;
+        for (int x = x0; x < x1; ++x)
+        {
+            int bx = x - dx;
+            if (by < 0 || by >= H || bx < 0 || bx >= W)
+            {
+                cost += OB;
+                continue;
+            }
+            float d = refp[y * W + x] - cmpp[by * W + bx];
+            cost += d < 0.0 ? -d : d;
+        }
+    }
+    int tile_idx = ty * tiles_x + tx;
+    cand[tile_idx * num_cand + cb] = cost;
+}

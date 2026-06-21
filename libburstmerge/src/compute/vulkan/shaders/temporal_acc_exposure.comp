@@ -1,0 +1,50 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+float clamp01(float v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+
+// temporal_acc_exposure: per-CHANNEL exposure-weighted accumulate (matches CPU
+// TemporalAverage exactly: the loop is per-element i, so each channel gets its
+// own luminance/weight/weight_sum from comp_blur[i]).
+//   binding 0: acc (inout NHWC), binding 1: wsum (inout NHWC, per-element)
+//   binding 2: cmp (NHWC), binding 3: cmp_blur (NHWC)
+//   f0=black f1=range(=max(1,white-black)) f2=exposure_scale(this comp)
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) buffer Acc { float acc[]; };
+layout(binding = 1) buffer Wsum { float wsum[]; };
+layout(binding = 2) readonly buffer Cmp { float cmpp[]; };
+layout(binding = 3) readonly buffer CmpB { float cmpb[]; };
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int ch = pc.channels;
+    int base = (y * pc.w + x) * ch;
+    float black = pc.f0;
+    float range = pc.f1;
+    float scale = max(1e-6, pc.f2);
+    float exposure_factor = 1.0 / scale;
+
+    for (int c = 0; c < ch; ++c)
+    {
+        float lum_src = cmpb[base + c];                       // THIS channel
+        float luminance = clamp01((lum_src - black) / range);
+        float w = sqrt(exposure_factor);
+        if (luminance < 0.25)
+        {
+            w = exposure_factor;
+        }
+        else
+        {
+            float t = clamp01((luminance - 0.25) / 0.74);
+            w = exposure_factor * (1.0 - t) + 1.0 * t;
+        }
+        float highlight_w = clamp01(0.99 / 0.74 - luminance / 0.74);
+        w = max(1.0, w) * highlight_w;
+        acc[base + c]  += cmpp[base + c] * w;
+        wsum[base + c] += w;
+    }
+}

@@ -82,9 +82,21 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	- `IComputeBackend` (`compute/compute_backend.h`): 后端抽象接口, **当前无任何具体实现**. 
 
 ## 后端现状
-	- 唯一可用后端是 CPU (OpenMP). CLI 中后端被硬编码为 `BackendType::CPU` (`apps/cli/main.cpp:163`). 
-	- Vulkan (`BackendType::Vulkan`) 在 `pipeline.cpp:202` 被直接拒绝; `3rdparty/vulkan` 头/库已就位但未链接 (仅 `if(MSVC)` 时链接, 见 `libburstmerge/CMakeLists.txt:91`). 
-	- `SubGraph` / `IComputeBackend` 是为 Phase-2 Vulkan 预留的接口, 当前完全是 dead code. 
+	- **CPU (OpenMP)** 和 **Vulkan (GPU compute)** 双后端均可用. CLI 通过 `--backend cpu|vulkan` 选择 (默认 cpu, `apps/cli/main.cpp`). 
+	- **Vulkan 后端** (已实现): 见下方 "Vulkan GPU 后端" 章节. 在 RTX 3080 / 5060 Ti 上验证, 全部合并模式与 CPU 近像素级一致 (spatial/temporal/freq-laplacian/wiener-fft MAD < 0.02%; 包围曝光序列 < 0.25%). 对齐 standard+dense bit-identical (max 0px). **全单精度 float, 无 double**. 
+	- `pipeline.cpp` 的 RAW 分支在 `SelectExposureRefIndex` 之后按 `backend_` 分流: Vulkan 走 `GpuRunBurstPipeline` (prepare/align/merge 全在 GPU), CPU 走原有路径; 二者共用后续 bit-depth/exposure/DNG 写出尾部. 
+	- `SubGraph` / `IComputeBackend` 仍保留为接口, 当前未被 Vulkan 后端使用 (Vulkan 用 GPU-native 管线直接调度, 非通用节点图). 
+
+==============================
+Vulkan GPU 后端 (已实现)
+==============================
+	- 入口: `GpuRunBurstPipeline()` (`libburstmerge/src/core/gpu_pipeline.cpp`), 由 `pipeline.cpp` 在 `backend_==Vulkan` 时调用. 返回 merged plane `FloatImage` (与 CPU merge 阶段输出同构), 复用 CPU 尾部 (bit-depth/exposure/mosaic/DNG write). 
+	- 后端抽象: `burstmerge::vulkan::VulkanBackend` (`include/burstmerge/internal/compute/vulkan_backend.h` + `src/compute/vulkan/vulkan_backend.cpp`). 提供 buffer 创建/上传/下载/fill, UBO, dispatch (录制式 command buffer: `BeginFrame`/`Dispatch`/`FlushFrame`), 每个 dispatch 后插 compute→compute memory barrier. 仅在算法固有 SyncPoint (noise_floor reduce, mismatch mean) 才 FlushFrame 读回. 
+	- 数据布局: 所有 GPU 图像数据为 `std430` storage buffer 的 `float[]` (NHWC, 与 `FloatImage` 一致). 输入 uint16 mosaic 在上传时转 float, `prepare_texture` shader 一步完成 deinterleave+减黑电平+曝光缩放. 
+	- Shader 集 (33 个 `.comp`, `src/compute/vulkan/shaders/`): 覆盖全部算法 — texture ops (prepare/downsample/box_blur/binomial_sep/to_grayscale/block_mean_guide/plane_to_mosaic/copy/fill/scale/add), align (sad_global/select_min/upscale_seed/tile_sad/tile_select/tile_refine_diag/dense_level/warp_tilefield/warp_translate), spatial (spatial_acc_multi/spatial_acc_1ch/normalize_div), temporal (temporal_acc_exposure/temporal_median), frequency (freq_laplacian/freq_wiener_tile — 后者含直接 8×8 DFT + 7×7 相位搜索 + Wiener 收缩, 4-phase 非重叠 dispatch), exposure (exposure_curve_global/exposure_reinhard_local/max_to_gray), reductions (extract/reduce_scalar), format (float_to_uint16). 共用 push-constant 块 `ShaderPC` (14 int + 8 float = 88B, 见 `common.glsl`). **全部单精度 float, 无 double, shaderFloat64 不启用**.
+	- 对齐 (全 GPU, 零读回): 灰度金字塔 (2-then-4 模式) → 逐层 coarse-to-fine SAD 搜索 (sad_global 每 candidate 一个 workgroup, 256 线程 reduce; select_min 在 SSBO 内更新 seed, 无 CPU 读回; tie-breaking 匹配 CPU 字典序) → standard 路径 diagonal-wavefront tile 细化 (tile_refine_diag) 或 dense 路径逐层 propagate/correct/search (dense_level) → warp_tilefield 双线性混合 4 角 tile 位移. 
+	- Descriptor set: 统一 layout, binding 0..7 = STORAGE_BUFFER, binding 7 复用于 binomial 权重 (std430, 无 padding). Push constants 88B. Pipeline cache 按 shader 名懒创建. 
+	- 调试要点 (曾踩的坑): 每个 2D shader 必须声明 `layout(local_size_x=8,local_size_y=8)` 以匹配 `/8` 的 dispatch (否则只覆盖 1/64 像素); `FillFloat` 必须设 `pc.h=1` (否则 `n=w*h*ch=0` 不写入); binomial 权重必须用 std430 storage buffer 而非 std140 UBO (后者 float[] 步长 16B). 
 
 ==============================
 构建与依赖 (Build & Dependencies)
@@ -108,7 +120,8 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	- `pocketfft`: 单文件 `.c` + `.h`, MIT. 直接编进 `burstmerge` 静态库. 
 	- `cxxopts`: header-only, 仅 CLI 使用. 
 	- `libtiff`: 完整源码 + 预编译 install (`3rdparty/libtiff/install/`). 需要运行时 `libtiff.dll` 在 PATH (ctest 已为 `test_common_rgb_fmt` 配置). 
-	- `vulkan`: 头/库/dll 齐全, 当前未实际链接 (CPU-only). 
+	- `vulkan`: 头/库/dll 齐全. **已启用** — `libburstmerge/CMakeLists.txt` 对所有编译器 (GCC/MinGW + MSVC) 链接 `libvulkan-1.a` (PUBLIC, 传播给所有可执行目标). 原始 `.a` 是不完整子集 (573 符号), 已用 `dlltool` 从 `vulkan_core.h` 导出的 767 个函数名重新生成完整导入库 (`cmake` 无此步骤, `.a` 已在 `3rdparty/vulkan/Lib/` 落地). 运行时需 `vulkan-1.dll` (系统已装). 
+	- `glslang`: `3rdparty/glslang/glslangValidator.exe` (v7.8, GLSL 4.60). **configure-time** 由 `cmake/embed_shaders.ps1` 将 `src/compute/vulkan/shaders/*.comp` 编译为 SPIR-V 并嵌入到 `${CMAKE_BINARY_DIR}/generated/spirv_embedded.inl` (uint32 字节数组), `vulkan_backend.cpp` 直接 `#include`. 修改 shader 后需重新 `cmake configure`. 
 	- `openmp`: 当前 MinGW 静态链接 `libgomp.a`, 无需分发 DLL; 仅含 readme. 
 
 ## 运行时环境变量
@@ -146,13 +159,13 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 
 ## 硬编码路径与平台假设
 	- Adobe DNG Converter 路径硬编码: `C:\Program Files\Adobe\Adobe DNG Converter\Adobe DNG Converter.exe` (`dng_converter.cpp:23,29`). 
-	- `apps/cli/main.cpp:163`: 后端硬编码为 CPU. 
+	- `apps/cli/main.cpp`: 后端默认 CPU, 可通过 `--backend cpu|vulkan` 选择.
 	- `pipeline_align.cpp:244`: 调试 BMP dump 到硬编码 `R:\` (Windows 盘符), 由 `kEnableAlignmentGrayDump=false` 关闭. 
 	- 非显式 DNG 的 RAW 输入在非 Windows 平台会抛 `"Non-DNG RAW input requires pre-conversion on this platform"` (`pipeline_io.cpp:153`). 
 	- 根目录脚本大量硬编码本机路径: `SyncARWLensCorr.ps1` (`C:\MultiMediaTools\Bin\exiftool.exe`), `Scripts/benchmark_parallel.ps1` (`Z:\seq1/seq2`, 注意默认 CLI 路径用大写 `Build` 与实际不符), `_bench.ps1` (用 `NUL` 作输出, 传位置参数且用了未定义的 `--profiler`, **当前 CLI 下无法运行**). 
 
 ## 尚未实现 / 占位
-	- Vulkan 后端: 接口 (`IComputeBackend`/`SubGraph`) 已定义但无实现, 运行时被拒绝. 属于 `plan-dsv4.md` 的 Phase-2. 
+	- Vulkan 后端 **已实现** (见上方 "Vulkan GPU 后端" 章节). 全部合并模式 (spatial/linear/temporal/freq-laplacian/wiener-fft) 与 CPU 近像素级一致 (等曝光 MAD < 0.02%; 包围曝光 < 0.25%); 对齐 standard+dense bit-identical (max 0px). **全单精度 float, shaderFloat64 不启用**. WienerFftRobust 在 GPU 路径未实现 (会抛异常拒绝); hot-pixel repair 尚未在 GPU 路径实现 (当前跳过). `IComputeBackend`/`SubGraph` 通用节点图接口保留但未被 Vulkan 后端使用.
 	- X-Trans CFA 支持: `float_image.h:46` 与 `float_image.cpp:349` 各有一条 `TODO(X-Trans)`, 当前非 Bayer 走通道平均 fallback, 可能不保色相位. 
 	- `tools/dump_dng.cpp` 不在 CMake 构建中; 其头注释 (列 `x,y,r,g,b`) 与实际输出 (`x,y,raw_value`) 不一致, 且有未使用变量 `search_rows`. 
 
@@ -163,7 +176,7 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	- `frequency.cpp:766` 去卷积权重 `cw[8] = {0.00,0.02,0.04,0.08,0.04,0.08,0.04,0.02}` 等魔法数无注释. 
 	- `temporal.cpp:93-94` 热像素阈值/强度实为常量 (`2.0f`/`1.0f`); `cfa_period` 为 0/1 时被 `max(2, ...)` 提升到 2. 
 	- `task_executor.h:13` `kRowGrainMinPixels = 1<<18` 注释自承 "a magic number for CPU processing". 
-	- `align_common.h:8` 编译期开关 `BURSTMERGE_ALIGN_WEIGHTED_AVG` (默认 1=加权平均, 注释承认 "NOT noise-robust"; 设 0 走 argmin). 
+	- `align_common.h` 编译期开关 `BURSTMERGE_ALIGN_WEIGHTED_AVG` (**默认 0=argmin 最佳值候选**, 这是生产/规范行为; 加权平均 `1/(score²)` 是不稳定的测试变体, 需 `-DBURSTMERGE_ALIGN_WEIGHTED_AVG=1` 显式开启). CPU 与 GPU (Vulkan) 均走 argmin.
 	- `CompilerFlags.cmake:5` 使用 `-ffast-math -march=native`: 前者会影响浮点精度 (使 `compare_dng_pixels.cpp:43` 的精确浮点相等比较变得脆弱), 后者产生不可移植二进制. 
 
 ## 复核遗留风险 (来自 `docs/reviews/26-5-23-0-21.md` 最终复核)

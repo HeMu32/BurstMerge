@@ -1,0 +1,37 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// prepare_texture: raw uint16 mosaic (uploaded as float) -> float plane image.
+// Combines ConvertMosaicToPlaneImage + black-level subtract + exposure scale.
+//   binding 0: src  (float, 1ch, dims pc.w x pc.h)
+//   binding 1: dst  (float, NHWC pc.channels2, dims pc.w2 x pc.h2)
+//   pc.i0 = cfa_period
+//   pc.f0 = mean black level
+//   pc.f1 = exposure scale (1.0 for reference frame)
+// dispatch: (ceil(pw/?) , ceil(ph/?), period*period) with local 8x8x(period^2)
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int ox = int(gl_GlobalInvocationID.x);
+    int oy = int(gl_GlobalInvocationID.y);
+    int c  = int(gl_GlobalInvocationID.z);
+    int period = pc.i0;
+    int totalC = period * period;
+    if (c >= totalC) return;
+    if (ox >= pc.w2 || oy >= pc.h2) return;
+
+    int px = c % period;
+    int py = c / period;
+    int x = ox * period + px;
+    int y = oy * period + py;
+
+    float v = 0.0;
+    if (x < pc.w && y < pc.h) v = src[y * pc.w + x];
+    v -= pc.f0;
+    v *= pc.f1;
+    dst[(oy * pc.w2 + ox) * pc.channels2 + c] = v;
+}

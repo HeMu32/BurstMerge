@@ -33,6 +33,9 @@ add_burstmerge_test(test_common_rgb_fmt)
 target_sources(test_common_rgb_fmt PRIVATE test_aux.cpp)
 set_tests_properties(test_common_rgb_fmt PROPERTIES TIMEOUT 600)
 
+add_burstmerge_test(test_align_gpu)
+set_tests_properties(test_align_gpu PROPERTIES TIMEOUT 600)
+
 set(TEST_COMMON_RGB_FMT_LD_PATH "${PROJECT_SOURCE_DIR}/3rdparty/libtiff/install/bin")
 # Seprator for PATH environment variable: ";" on Windows, ":" on Unix
 if (WIN32)

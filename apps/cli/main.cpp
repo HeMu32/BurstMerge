@@ -143,6 +143,7 @@ int main(int argc, char* argv[]) {
         ("align-gamma", "Gamma correction for alignment grayscale (default 1.0=off). Value < 1.0 will boost darkness", cxxopts::value<float>()->default_value("1.0"))
         ("smooth-tile-field", "Enable median smoothing of alignment tile fields", cxxopts::value<bool>()->default_value("false"))
         ("output-format", "Output format: auto, png, jpg, bmp, tiff, dng", cxxopts::value<std::string>()->default_value("auto"))
+        ("backend", "Compute backend: cpu, vulkan", cxxopts::value<std::string>()->default_value("cpu"))
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -164,7 +165,15 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+    burstmerge::BackendType backend = burstmerge::BackendType::CPU;
+    if (args.count("backend")) {
+        std::string bstr = args["backend"].as<std::string>();
+        if (bstr == "vulkan" || bstr == "gpu") backend = burstmerge::BackendType::Vulkan;
+        else if (bstr == "cpu") backend = burstmerge::BackendType::CPU;
+        else { std::cerr << "Unknown backend: " << bstr << std::endl; return 2; }
+    }
+    burstmerge::BurstMerge bm(backend);
+    std::cout << "Backend: " << (backend == burstmerge::BackendType::Vulkan ? "Vulkan" : "CPU") << std::endl;
     std::vector<std::string> inputs;
     if (args.count("input")) {
         auto direct_inputs = args["input"].as<std::vector<std::string>>();
@@ -252,7 +261,6 @@ int main(int argc, char* argv[]) {
     const std::string output_target = args["output"].as<std::string>();
 
     std::cout << "BurstMerge CLI" << std::endl;
-    std::cout << "Backend: CPU" << std::endl;
     std::cout << "Merge: " << MergeAlgoName(settings.merge_algo) << std::endl;
     std::cout << "Tile size: " << settings.tile_size << std::endl;
     std::cout << "Noise reduction: " << settings.noise_reduction << std::endl;
