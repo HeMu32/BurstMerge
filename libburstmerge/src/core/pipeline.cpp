@@ -278,10 +278,20 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
 
             Report(progress, PipelineConstants::kProgressAlignStart, "Aligning frames (RGB)");
+
+            FloatImage merged;
+            if (backend_ == BackendType::Vulkan)
+            {
+                // GPU pipeline for RGB: upload float data directly (no CFA),
+                // share the same align / merge / download tail as RAW.
+                Report(progress, PipelineConstants::kProgressMerge, "GPU: RGB pipeline");
+                merged = GpuRunBurstPipelineRgb(float_images, ref_idx, white_level, settings_, progress);
+            }
+            else
+            {
             std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
                 settings_, cfa_period, progress);
 
-            FloatImage merged;
             if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
             {
                 Report(progress, PipelineConstants::kProgressMerge, "Merging frames (temporal average)");
@@ -333,6 +343,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.exposure_scales = nullptr;
                 merged = SpatialMerge(float_images[ref_idx], aligned, params);
             }
+            } // else (CPU RGB path)
 
             // Resolve output format (never Auto at this point).
             OutputFormat eff_fmt;

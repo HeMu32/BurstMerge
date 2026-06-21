@@ -23,6 +23,16 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
                                const Settings& settings,
                                const PipelineOrchestrator::ProgressFn& progress);
 
+// GPU pipeline for pre-demosaiced RGB images (e.g. TIFF/JPEG/PNG input).
+// Uploads float data directly as plane buffers (no CFA deinterleave), then
+// shares the same align / merge / download tail as GpuRunBurstPipeline.
+// white_level / black_level come from the decoded image metadata.
+FloatImage GpuRunBurstPipelineRgb(const std::vector<FloatImage>& images,
+                                  size_t ref_idx,
+                                  float white_level,
+                                  const Settings& settings,
+                                  const PipelineOrchestrator::ProgressFn& progress);
+
 // GPU alignment unit: mirrors CPU EstimateTranslation. Takes the reference and
 // comparison GRAYSCALE plane images (single-channel, plane resolution), runs the
 // full GPU alignment (pyramid + global search + tile refine, mode per

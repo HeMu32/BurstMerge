@@ -98,6 +98,10 @@ public:
     // Number of floats the buffer was created to hold.
     uint32_t BufferFloatCount(uint64_t handle) const;
     void DestroyBuffer(uint64_t handle);
+    // Queue a buffer for destruction at the next FlushFrame(). Safe to call
+    // between BeginFrame/FlushFrame — the actual vkDestroyBuffer happens
+    // after the GPU finishes the current frame. Does NOT add a sync point.
+    void DeferredDestroy(uint64_t handle);
 
     // ---- Compute dispatch ----
     // Recording model: BeginFrame() starts a command buffer; Dispatch() records

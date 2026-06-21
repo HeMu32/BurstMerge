@@ -76,6 +76,20 @@ struct VulkanBackend::Impl
     std::unordered_map<uint64_t, Buffer> buffers;
     uint64_t next_handle = 1;
 
+    // Deferred destruction queue: DeferredDestroy() appends handles here;
+    // FlushFrame() drains the queue after vkQueueWaitIdle, so the GPU is
+    // guaranteed idle when the actual vkDestroyBuffer runs. This lets
+    // callers queue frees between BeginFrame/FlushFrame pairs without
+    // inserting extra sync points.
+    std::vector<uint64_t> pending_deferred;
+
+    // VRAM tracking: current live bytes and peak (high-water mark).
+    // Updated in alloc_buffer and all destroy paths.
+    VkDeviceSize vram_live = 0;
+    VkDeviceSize vram_peak = 0;
+    uint64_t vram_live_count = 0;  // number of live buffers
+    uint64_t vram_peak_count = 0;
+
     struct StagingBuffer
     {
         VkBuffer buf = VK_NULL_HANDLE;
@@ -371,6 +385,10 @@ void VulkanBackend::Shutdown()
 
     for (auto& kv : d.buffers)
     {
+        std::fprintf(stderr, "[VRAM]   leak: handle=%llu size=%.1fMB floats=%u host=%d\n",
+            static_cast<unsigned long long>(kv.first),
+            static_cast<double>(kv.second.size)/(1024.0*1024.0),
+            kv.second.float_count, kv.second.host_visible ? 1 : 0);
         if (kv.second.mapped) vkUnmapMemory(d.device, kv.second.mem);
         if (kv.second.buf) vkDestroyBuffer(d.device, kv.second.buf, nullptr);
         if (kv.second.mem) vkFreeMemory(d.device, kv.second.mem, nullptr);
@@ -384,6 +402,11 @@ void VulkanBackend::Shutdown()
     if (d.cmd_pool) vkDestroyCommandPool(d.device, d.cmd_pool, nullptr);
     if (d.device) vkDestroyDevice(d.device, nullptr);
     if (d.instance) vkDestroyInstance(d.instance, nullptr);
+    std::fprintf(stderr, "[VRAM] peak: %.1f MB (%llu buffers), leaked: %.1f MB (%llu buffers)\n",
+        static_cast<double>(d.vram_peak) / (1024.0*1024.0),
+        static_cast<unsigned long long>(d.vram_peak_count),
+        static_cast<double>(d.vram_live) / (1024.0*1024.0),
+        static_cast<unsigned long long>(d.vram_live_count));
     d.initialized = false;
 }
 
@@ -434,6 +457,8 @@ uint64_t VulkanBackend::CreateBuffer(uint32_t float_count)
     b.float_count = float_count;
     uint64_t h = d.next_handle++;
     d.buffers[h] = b;
+    d.vram_live += b.size; d.vram_live_count += 1;
+    if (d.vram_live > d.vram_peak) { d.vram_peak = d.vram_live; d.vram_peak_count = d.vram_live_count; }
     return h;
 }
 
@@ -448,6 +473,8 @@ uint64_t VulkanBackend::CreateHostBuffer(uint32_t float_count)
     b.float_count = float_count;
     uint64_t h = d.next_handle++;
     d.buffers[h] = b;
+    d.vram_live += b.size; d.vram_live_count += 1;
+    if (d.vram_live > d.vram_peak) { d.vram_peak = d.vram_live; d.vram_peak_count = d.vram_live_count; }
     return h;
 }
 
@@ -486,6 +513,8 @@ uint64_t VulkanBackend::CreateUbo(const void* data, uint32_t bytes)
     b.float_count = 0;
     uint64_t h = d.next_handle++;
     d.buffers[h] = b;
+    d.vram_live += b.size; d.vram_live_count += 1;
+    if (d.vram_live > d.vram_peak) { d.vram_peak = d.vram_live; d.vram_peak_count = d.vram_live_count; }
     return h;
 }
 
@@ -643,10 +672,17 @@ void VulkanBackend::DestroyBuffer(uint64_t handle)
     auto it = d.buffers.find(handle);
     if (it == d.buffers.end()) return;
     if (d.recording) FlushFrame();
+    d.vram_live -= it->second.size;
+    d.vram_live_count -= 1;
     if (it->second.mapped) vkUnmapMemory(d.device, it->second.mem);
     if (it->second.buf) vkDestroyBuffer(d.device, it->second.buf, nullptr);
     if (it->second.mem) vkFreeMemory(d.device, it->second.mem, nullptr);
     d.buffers.erase(it);
+}
+
+void VulkanBackend::DeferredDestroy(uint64_t handle)
+{
+    impl_->pending_deferred.push_back(handle);
 }
 
 void VulkanBackend::BeginFrame()
@@ -676,6 +712,25 @@ void VulkanBackend::FlushFrame()
     vkResetCommandBuffer(d.frame_cb, 0);
     d.recording = false;
     d.frame_dispatches = 0;
+
+    // GPU is now idle — safe to process deferred destructions.
+    // This is the only place pending_deferred is drained, so callers
+    // can queue frees at any time without worrying about sync.
+    if (!d.pending_deferred.empty())
+    {
+        for (uint64_t h : d.pending_deferred)
+        {
+            auto it = d.buffers.find(h);
+            if (it == d.buffers.end()) continue;
+            d.vram_live -= it->second.size;
+            d.vram_live_count -= 1;
+            if (it->second.mapped) vkUnmapMemory(d.device, it->second.mem);
+            if (it->second.buf) vkDestroyBuffer(d.device, it->second.buf, nullptr);
+            if (it->second.mem) vkFreeMemory(d.device, it->second.mem, nullptr);
+            d.buffers.erase(it);
+        }
+        d.pending_deferred.clear();
+    }
 }
 
 void VulkanBackend::Synchronize()
