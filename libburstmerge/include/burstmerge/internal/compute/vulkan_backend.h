@@ -93,6 +93,8 @@ public:
     void DownloadUints(uint64_t handle, uint32_t* out, uint32_t uint_count);
     // Fill an entire buffer with a constant float value.
     void FillFloat(uint64_t handle, float value);
+    // Copy float_count floats from src to dst+dst_offset_floats (recorded into current frame).
+    void CopyBufferRegion(uint64_t dst, uint32_t dst_offset_floats, uint64_t src, uint32_t float_count);
     // Number of floats the buffer was created to hold.
     uint32_t BufferFloatCount(uint64_t handle) const;
     void DestroyBuffer(uint64_t handle);

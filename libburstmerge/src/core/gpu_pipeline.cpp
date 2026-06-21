@@ -4,6 +4,7 @@
 #include "burstmerge/internal/compute/vulkan_backend.h"
 #include "burstmerge/internal/core/pipeline.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
+#include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/merge/frequency.h"
 #include "burstmerge/internal/merge/spatial.h"
 
@@ -51,17 +52,18 @@ std::vector<PyrLevel> BuildGrayPyramid(VulkanBackend& vk, uint64_t gray_h, int g
     {
         int w1 = std::max(1, gw / 2), h1 = std::max(1, gh / 2);
         uint64_t l1 = vk.CreateBuffer(w1 * h1);
+        float wgt[16] = {6.0f, 4.0f, 1.0f, 0,0,0,0,0,0,0,0,0,0,0,0,0};
+        uint64_t ubo = vk.CreateBufferFromFloats(wgt, 16);
+
+        vk.BeginFrame();
         {
             ShaderPC pc{}; pc.w = gw; pc.h = gh; pc.channels = 1; pc.w2 = w1; pc.h2 = h1; pc.channels2 = 1;
             Binding b[2] = {{0, gray_h, 0}, {1, l1, 0}};
-            vk.BeginFrame();
             vk.Dispatch("downsample2x", pc, (w1 + 7) / 8, (h1 + 7) / 8, 1, b, 2);
-            vk.FlushFrame();
         }
         pyr.push_back({l1, w1, h1});
 
-        float wgt[16] = {6.0f, 4.0f, 1.0f, 0,0,0,0,0,0,0,0,0,0,0,0,0};
-        uint64_t ubo = vk.CreateBufferFromFloats(wgt, 16);
+        std::vector<uint64_t> scratch;
         while (true)
         {
             PyrLevel prev = pyr.back();
@@ -73,7 +75,6 @@ std::vector<PyrLevel> BuildGrayPyramid(VulkanBackend& vk, uint64_t gray_h, int g
             uint64_t tmp = vk.CreateBuffer(prev.w * prev.h);
             uint64_t blur = vk.CreateBuffer(prev.w * prev.h);
             uint64_t next = vk.CreateBuffer(nw * nh);
-            vk.BeginFrame();
             {
                 ShaderPC pc{}; pc.w = prev.w; pc.h = prev.h; pc.channels = 1; pc.i0 = 0; pc.i1 = 2;
                 Binding b[3] = {{0, prev.handle, 0}, {1, tmp, 0}, {7, ubo, 0}};
@@ -89,10 +90,12 @@ std::vector<PyrLevel> BuildGrayPyramid(VulkanBackend& vk, uint64_t gray_h, int g
                 Binding b[2] = {{0, blur, 0}, {1, next, 0}};
                 vk.Dispatch("downsample2x", pc, (nw + 7) / 8, (nh + 7) / 8, 1, b, 2);
             }
-            vk.FlushFrame();
-            vk.DestroyBuffer(tmp); vk.DestroyBuffer(blur);
+            scratch.push_back(tmp);
+            scratch.push_back(blur);
             pyr.push_back({next, nw, nh});
         }
+        vk.FlushFrame();
+        for (auto h : scratch) vk.DestroyBuffer(h);
         vk.DestroyBuffer(ubo);
     }
     return pyr;
@@ -367,44 +370,34 @@ uint64_t FrequencyMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
     {
         int blur_radius = std::max(1, settings.tile_size / FrequencyConstants::kLaplacianBlurDiv);
         uint64_t ref_low = vk.CreateBuffer(ff);
+        uint64_t cmps = vk.CreateBuffer(ff * aligned.size());
+        uint64_t cmpsl = vk.CreateBuffer(ff * aligned.size());
+        std::vector<uint64_t> cmp_lows(aligned.size());
         vk.BeginFrame();
         BoxBlurGPU(vk, ref_plane, ref_low, pw, ph, ch, blur_radius);
-        vk.FlushFrame();
-        // pack comparisons + lows
-        std::vector<float> cmp_host(ff * aligned.size());
-        std::vector<float> cmpl_host(ff * aligned.size());
         for (size_t k = 0; k < aligned.size(); ++k)
         {
-            uint64_t cl = vk.CreateBuffer(ff);
-            vk.BeginFrame(); BoxBlurGPU(vk, aligned[k], cl, pw, ph, ch, blur_radius); vk.FlushFrame();
-            vk.DownloadFloats(aligned[k], cmp_host.data() + k * ff, uint32_t(ff));
-            vk.DownloadFloats(cl, cmpl_host.data() + k * ff, uint32_t(ff));
-            vk.DestroyBuffer(cl);
+            cmp_lows[k] = vk.CreateBuffer(ff);
+            BoxBlurGPU(vk, aligned[k], cmp_lows[k], pw, ph, ch, blur_radius);
+            vk.CopyBufferRegion(cmps, uint32_t(k * ff), aligned[k], uint32_t(ff));
+            vk.CopyBufferRegion(cmpsl, uint32_t(k * ff), cmp_lows[k], uint32_t(ff));
         }
-        vk.DestroyBuffer(ref_low);
-        // re-upload ref_low (we overwrote via destroy); recompute host-side
-        std::vector<float> refl_host(ff);
-        // Need ref_low again; recompute quickly on host via the blurred buffer.
-        // Simpler: keep ref_low on device and pass directly; only cmps need packing.
-        uint64_t ref_low2 = vk.CreateBuffer(ff);
-        vk.BeginFrame(); BoxBlurGPU(vk, ref_plane, ref_low2, pw, ph, ch, blur_radius); vk.FlushFrame();
-        uint64_t cmps = vk.CreateBufferFromFloats(cmp_host.data(), uint32_t(ff * aligned.size()));
-        uint64_t cmpsl = vk.CreateBufferFromFloats(cmpl_host.data(), uint32_t(ff * aligned.size()));
         ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch;
         pc.i0 = int(aligned.size()); pc.i1 = int(ff);
-        Binding b[5] = {{0, ref_plane, 0}, {1, ref_low2, 0}, {2, cmps, 0}, {3, cmpsl, 0}, {4, merged_out, 0}};
-        vk.BeginFrame();
+        Binding b[5] = {{0, ref_plane, 0}, {1, ref_low, 0}, {2, cmps, 0}, {3, cmpsl, 0}, {4, merged_out, 0}};
         vk.Dispatch("freq_laplacian", pc, (uint32_t(ff) + 255) / 256, 1, 1, b, 5);
         vk.FlushFrame();
-        vk.DestroyBuffer(ref_low2); vk.DestroyBuffer(cmps); vk.DestroyBuffer(cmpsl);
+        for (auto cl : cmp_lows) vk.DestroyBuffer(cl);
+        vk.DestroyBuffer(ref_low); vk.DestroyBuffer(cmps); vk.DestroyBuffer(cmpsl);
         return merged_out;
     }
 
-    // Wiener (standard) per-tile. Pack comparisons once.
-    std::vector<float> cmp_host(ff * aligned.size());
+    // Wiener (standard) per-tile. Pack comparisons on GPU.
+    uint64_t cmps = vk.CreateBuffer(ff * aligned.size());
+    vk.BeginFrame();
     for (size_t k = 0; k < aligned.size(); ++k)
-        vk.DownloadFloats(aligned[k], cmp_host.data() + k * ff, uint32_t(ff));
-    uint64_t cmps = vk.CreateBufferFromFloats(cmp_host.data(), uint32_t(ff * aligned.size()));
+        vk.CopyBufferRegion(cmps, uint32_t(k * ff), aligned[k], uint32_t(ff));
+    vk.FlushFrame();
 
     float nr = settings.noise_reduction;
     double robustness_rev = 0.5 * (FrequencyConstants::kRobustnessRevOffset - double(int(nr + 0.5f)));
@@ -686,26 +679,30 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
     Report(progress, 0.55f, "GPU: preparing textures");
     std::vector<uint64_t> plane(N);
     std::vector<float> mean_bl(N);
+    std::vector<uint64_t> gray(N);
+    { ProfileScope _ps("time.gpu.prepare");
+    std::vector<uint64_t> rawbufs;
+    rawbufs.reserve(N);
+    vk.BeginFrame();
     for (size_t i = 0; i < N; ++i)
     {
         mean_bl[i] = MeanBlack(images[i].metadata);
         const uint16_t* raw = reinterpret_cast<const uint16_t*>(images[i].pixels.data);
         std::vector<float> fraw(size_t(W) * H);
         for (size_t j = 0; j < fraw.size(); ++j) fraw[j] = float(raw[j]);
-        uint64_t rawbuf = vk.CreateBufferFromFloats(fraw.data(), uint32_t(fraw.size()));
+        rawbufs.push_back(vk.CreateBufferFromFloats(fraw.data(), uint32_t(fraw.size())));
         plane[i] = vk.CreateBuffer(pw * ph * ch);
         ShaderPC pc{};
         pc.w = int(W); pc.h = int(H); pc.channels = 1;
         pc.w2 = pw; pc.h2 = ph; pc.channels2 = int(ch);
         pc.i0 = int(period); pc.f0 = mean_bl[i]; pc.f1 = (i == ref_idx) ? 1.0f : comp_scale[std::find(comp_orig.begin(), comp_orig.end(), i) - comp_orig.begin()];
-        Binding b[2] = {{0, rawbuf, 0}, {1, plane[i], 0}};
-        vk.BeginFrame();
+        Binding b[2] = {{0, rawbufs.back(), 0}, {1, plane[i], 0}};
         vk.Dispatch("prepare_texture", pc, (pw + 7) / 8, (ph + 7) / 8, int(ch), b, 2);
-        vk.FlushFrame();
-        vk.DestroyBuffer(rawbuf);
     }
+    vk.FlushFrame();
+    for (auto r : rawbufs) vk.DestroyBuffer(r);
 
-    std::vector<uint64_t> gray(N);
+    vk.BeginFrame();
     for (size_t i = 0; i < N; ++i)
     {
         gray[i] = vk.CreateBuffer(pw * ph);
@@ -713,12 +710,13 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
         pc.f0 = settings.align_gamma;
         pc.f1 = float(images[ref_idx].metadata.white_level);
         Binding b[2] = {{0, plane[i], 0}, {1, gray[i], 0}};
-        vk.BeginFrame();
         vk.Dispatch("to_grayscale", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 2);
-        vk.FlushFrame();
     }
+    vk.FlushFrame();
+    } // prepare
 
-    Report(progress, 0.58f, "GPU: building reference pyramid");
+    std::vector<uint64_t> aligned;
+    { ProfileScope _ps("time.gpu.align");
     int tile_size = std::max(16, int(settings.tile_size));
     auto ref_pyr = BuildGrayPyramid(vk, gray[ref_idx], pw, ph, tile_size);
 
@@ -745,7 +743,6 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
     uint64_t tsx = vk.CreateBuffer(std::max<size_t>(1, size_t(align_tiles_x) * align_tiles_y));
     uint64_t tsy = vk.CreateBuffer(std::max<size_t>(1, size_t(align_tiles_x) * align_tiles_y));
 
-    std::vector<uint64_t> aligned;
     aligned.reserve(N > 0 ? N - 1 : 0);
     int pyr_n = int(ref_pyr.size());
 
@@ -826,13 +823,14 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
 
     }
 
-    for (auto& lvl : ref_pyr) if (lvl.handle != gray[ref_idx]) vk.DestroyBuffer(lvl.handle);
     vk.DestroyBuffer(align_state); vk.DestroyBuffer(global_shift);
     vk.DestroyBuffer(cand_global); vk.DestroyBuffer(tsx); vk.DestroyBuffer(tsy);
     for (size_t i = 0; i < N; ++i) vk.DestroyBuffer(gray[i]);
+    } // align
 
     Report(progress, PipelineConstants::kProgressMerge, "GPU: merging");
     uint64_t merged = 0;
+    { ProfileScope _ps("time.gpu.merge");
     if (settings.merge_algo == MergeAlgorithm::TemporalAverage)
     {
         merged = vk.CreateBuffer(pw * ph * ch);
@@ -913,14 +911,17 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
     }
 
     for (size_t i = 0; i < N; ++i) vk.DestroyBuffer(plane[i]);
+    } // merge
 
     FloatImage out;
+    { ProfileScope _ps("time.gpu.download");
     out.width = uint32_t(pw);
     out.height = uint32_t(ph);
     out.channels = ch;
     out.data.resize(size_t(pw) * ph * ch);
     vk.DownloadFloats(merged, out.data.data(), uint32_t(out.data.size()));
     vk.DestroyBuffer(merged);
+    } // download
 
     Report(progress, PipelineConstants::kProgressExposure, "GPU: merge complete");
     return out;

@@ -1,6 +1,7 @@
 #include "burstmerge/internal/compute/vulkan_backend.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -74,6 +75,15 @@ struct VulkanBackend::Impl
     };
     std::unordered_map<uint64_t, Buffer> buffers;
     uint64_t next_handle = 1;
+
+    struct StagingBuffer
+    {
+        VkBuffer buf = VK_NULL_HANDLE;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        VkDeviceSize capacity = 0;
+        void* mapped = nullptr;
+    };
+    StagingBuffer download_staging;
 
     std::unordered_map<std::string, VkPipeline> pipelines;
     std::vector<std::string> created_pipelines; // for destruction order
@@ -520,18 +530,59 @@ void VulkanBackend::DownloadFloats(uint64_t handle, float* out, uint32_t float_c
         return;
     }
     VkDeviceSize sz = VkDeviceSize(float_count) * 4;
-    Impl::Buffer staging = alloc_buffer(d, sz,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        true, false);
+
+    if (d.download_staging.capacity < sz)
+    {
+        // On NVIDIA GPUs (tested RTX 3080, driver 560+), there are multiple
+        // HOST_VISIBLE memory types. The DEVICE_LOCAL|HOST_VISIBLE type (PCIe
+        // BAR) is uncached — CPU reads top out at ~100 MB/s. The HOST_CACHED
+        // type (system RAM) gives ~15 GB/s. We MUST prefer HOST_CACHED to
+        // avoid a 50x slowdown on the final merged-plane readback (measured:
+        // 586ms -> 3ms for 56MB). If no HOST_CACHED type exists (some AMD/
+        // Intel IGP setups), fallback accepts any HOST_VISIBLE type.
+        if (d.download_staging.mapped) vkUnmapMemory(d.device, d.download_staging.mem);
+        if (d.download_staging.buf) vkDestroyBuffer(d.device, d.download_staging.buf, nullptr);
+        if (d.download_staging.mem) vkFreeMemory(d.device, d.download_staging.mem, nullptr);
+        d.download_staging = {};
+        VkDeviceSize cap = sz;
+        if (cap < 1024 * 1024) cap = 1024 * 1024;
+        d.download_staging.capacity = cap;
+        VkBufferCreateInfo bci{};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = cap;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCreateBuffer(d.device, &bci, nullptr, &d.download_staging.buf);
+        VkMemoryRequirements mrq;
+        vkGetBufferMemoryRequirements(d.device, d.download_staging.buf, &mrq);
+        uint32_t memType = UINT32_MAX;
+        for (uint32_t pass = 0; pass < 2; ++pass)
+        {
+            for (uint32_t i = 0; i < d.mem_props.memoryTypeCount; ++i)
+            {
+                if (!(mrq.memoryTypeBits & (1u << i))) continue;
+                auto fl = d.mem_props.memoryTypes[i].propertyFlags;
+                if (!(fl & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) continue;
+                if (pass == 0 && !(fl & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) continue;
+                memType = i;
+                break;
+            }
+            if (memType != UINT32_MAX) break;
+        }
+        VkMemoryAllocateInfo mai{};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = mrq.size;
+        mai.memoryTypeIndex = memType;
+        vkAllocateMemory(d.device, &mai, nullptr, &d.download_staging.mem);
+        vkBindBufferMemory(d.device, d.download_staging.buf, d.download_staging.mem, 0);
+        vkMapMemory(d.device, d.download_staging.mem, 0, cap, 0, &d.download_staging.mapped);
+    }
+
     VkCommandBuffer cb = d.one_shot_begin();
     VkBufferCopy reg{}; reg.size = sz;
-    vkCmdCopyBuffer(cb, b.buf, staging.buf, 1, &reg);
+    vkCmdCopyBuffer(cb, b.buf, d.download_staging.buf, 1, &reg);
     d.one_shot_end_wait(cb);
-    std::memcpy(out, staging.mapped, size_t(sz));
-    if (staging.mapped) vkUnmapMemory(d.device, staging.mem);
-    vkDestroyBuffer(d.device, staging.buf, nullptr);
-    vkFreeMemory(d.device, staging.mem, nullptr);
+    std::memcpy(out, d.download_staging.mapped, size_t(sz));
 }
 
 void VulkanBackend::DownloadUints(uint64_t handle, uint32_t* out, uint32_t uint_count)
@@ -555,6 +606,29 @@ void VulkanBackend::FillFloat(uint64_t handle, float value)
     BeginFrame();
     Dispatch("fill", pc, (uint32_t(b.float_count) + 255u) / 256u, 1, 1, &bind, 1);
     FlushFrame();
+}
+
+void VulkanBackend::CopyBufferRegion(uint64_t dst, uint32_t dst_offset_floats,
+                                     uint64_t src, uint32_t float_count)
+{
+    Impl& d = *impl_;
+    auto itd = d.buffers.find(dst);
+    auto its = d.buffers.find(src);
+    if (itd == d.buffers.end() || its == d.buffers.end()) return;
+    if (!d.recording) BeginFrame();
+    VkBufferCopy reg{};
+    reg.srcOffset = 0;
+    reg.dstOffset = VkDeviceSize(dst_offset_floats) * 4;
+    reg.size = VkDeviceSize(float_count) * 4;
+    vkCmdCopyBuffer(d.frame_cb, its->second.buf, itd->second.buf, 1, &reg);
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(d.frame_cb,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
 uint32_t VulkanBackend::BufferFloatCount(uint64_t handle) const

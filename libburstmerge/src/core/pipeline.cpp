@@ -388,7 +388,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         std::string convert_ctx = output_path_or_dir.empty() ? "." : output_path_or_dir;
         Report(progress, 0.02f, "Preparing inputs");
         convert_dir_.clear();
-        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
+        std::vector<std::string> dng_paths;
+        { ProfileScope _ps("time.pipeline.prepare_dng_inputs");
+        dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
+        }
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
 // DNG read Phase 1: read all DNG files into memory (sequential I/O)
@@ -411,6 +414,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         Report(progress, kDecodeStart, "Decoding DNG files");
         std::vector<RawImage> images(dng_paths.size());
         {
+        ProfileScope _ps("time.pipeline.decode_dng");
             std::atomic<int> decoded_count{0};
             std::mutex pm;
             ParallelFor(dng_paths.size(), 1, [&](size_t begin, size_t end)
@@ -435,7 +439,6 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
         size_t ref_idx = SelectExposureRefIndex(images);
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
-
         FloatImage merged;
         if (backend_ == BackendType::Vulkan)
         {
