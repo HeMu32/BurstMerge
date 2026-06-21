@@ -83,6 +83,10 @@ struct VulkanBackend::Impl
     // inserting extra sync points.
     std::vector<uint64_t> pending_deferred;
 
+    // Staging buffers created during RecordUpload — freed after FlushFrame
+    // completes (GPU idle). Each entry: {buffer, memory, mapped_ptr}.
+    std::vector<std::tuple<VkBuffer, VkDeviceMemory, void*>> pending_staging;
+
     // VRAM tracking: current live bytes and peak (high-water mark).
     // Updated in alloc_buffer and all destroy paths.
     VkDeviceSize vram_live = 0;
@@ -565,6 +569,32 @@ uint64_t VulkanBackend::CreateBufferFromFloats(const float* data, uint32_t float
     return h;
 }
 
+uint64_t VulkanBackend::CreateBufferFromU16(const uint16_t* data, uint32_t count)
+{
+    // Upload raw uint16 data without CPU-side float conversion.
+    // Buffer sized in uint16 units; expressed as float_count = ceil(count*2/4)
+    // for CreateBuffer (which works in 4-byte slots).
+    Impl& d = *impl_;
+    VkDeviceSize byte_size = VkDeviceSize(count) * 2;
+    uint32_t float_count = uint32_t((byte_size + 3) / 4);
+    uint64_t h = CreateBuffer(float_count);
+    if (!data || count == 0) return h;
+    Impl::Buffer& b = d.buffers[h];
+    Impl::Buffer staging = alloc_buffer(d, b.size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        true, false);
+    std::memcpy(staging.mapped, data, size_t(byte_size));
+    VkCommandBuffer cb = d.one_shot_begin();
+    VkBufferCopy reg{}; reg.size = byte_size;
+    vkCmdCopyBuffer(cb, staging.buf, b.buf, 1, &reg);
+    d.one_shot_end_wait(cb);
+    if (staging.mapped) vkUnmapMemory(d.device, staging.mem);
+    vkDestroyBuffer(d.device, staging.buf, nullptr);
+    vkFreeMemory(d.device, staging.mem, nullptr);
+    return h;
+}
+
 uint64_t VulkanBackend::CreateUbo(const void* data, uint32_t bytes)
 {
     Impl& d = *impl_;
@@ -611,6 +641,31 @@ void VulkanBackend::UploadFloats(uint64_t handle, const float* data, uint32_t fl
     vkFreeMemory(d.device, staging.mem, nullptr);
 }
 
+void VulkanBackend::RecordUpload(uint64_t dst, const void* data, uint32_t byte_count)
+{
+    Impl& d = *impl_;
+    auto it = d.buffers.find(dst);
+    if (it == d.buffers.end()) return;
+    if (!d.recording) BeginFrame();
+    Impl::Buffer staging = alloc_buffer(d, byte_count,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        true, false);
+    std::memcpy(staging.mapped, data, byte_count);
+    VkBufferCopy reg{}; reg.size = byte_count;
+    vkCmdCopyBuffer(d.frame_cb, staging.buf, it->second.buf, 1, &reg);
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(d.frame_cb,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &mb, 0, nullptr, 0, nullptr);
+    // Can't free staging now — command buffer is pending. Queue for cleanup
+    // at the next FlushFrame (after GPU idle).
+    d.pending_staging.push_back({staging.buf, staging.mem, staging.mapped});
+}
 void VulkanBackend::DownloadFloats(uint64_t handle, float* out, uint32_t float_count)
 {
     Impl& d = *impl_;
@@ -794,6 +849,18 @@ void VulkanBackend::FlushFrame()
             d.buffers.erase(it);
         }
         d.pending_deferred.clear();
+    }
+
+    // Free staging buffers from RecordUpload calls made during this frame.
+    if (!d.pending_staging.empty())
+    {
+        for (auto& [buf, mem, mapped] : d.pending_staging)
+        {
+            if (mapped) vkUnmapMemory(d.device, mem);
+            if (buf) vkDestroyBuffer(d.device, buf, nullptr);
+            if (mem) vkFreeMemory(d.device, mem, nullptr);
+        }
+        d.pending_staging.clear();
     }
 }
 

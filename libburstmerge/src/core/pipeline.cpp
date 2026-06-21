@@ -276,6 +276,12 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 ri.metadata.mosaic_pattern_width = 0;
                 raw_wrappers.push_back(std::move(ri));
             }
+            // decoded[i].pixels (float, ~95 MB/frame for 3840x2160x3ch) are
+            // never read again — metadata has been extracted into raw_wrappers,
+            // and float_images has its own copies (uploaded to GPU). Release
+            // system RAM before the GPU pipeline begins.
+            for (auto& d : decoded) d.pixels.clear();
+            decoded.shrink_to_fit();
 
             Report(progress, PipelineConstants::kProgressAlignStart, "Aligning frames (RGB)");
 
@@ -284,6 +290,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             {
                 // GPU pipeline for RGB: upload float data directly (no CFA),
                 // share the same align / merge / download tail as RAW.
+                // GpuRunBurstPipelineRgb releases float_images[i].data after
+                // uploading each frame to GPU.
                 Report(progress, PipelineConstants::kProgressMerge, "GPU: RGB pipeline");
                 merged = GpuRunBurstPipelineRgb(float_images, ref_idx, white_level, settings_, progress);
             }
@@ -447,6 +455,12 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 }
             }, "decode_dng" /* named tag for profiler */);
         }
+        // DNG file bytes are no longer needed — decoded images hold their own
+        // copies. Release ~30-50 MB per frame of system RAM before the GPU
+        // pipeline begins.
+        file_buffers.clear();
+        file_buffers.shrink_to_fit();
+
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
         size_t ref_idx = SelectExposureRefIndex(images);
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));

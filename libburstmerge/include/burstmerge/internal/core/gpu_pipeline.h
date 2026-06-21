@@ -18,7 +18,9 @@ namespace burstmerge
 // black-subtracted) exactly like the CPU merge stage output, so the existing
 // CPU tail (bit-depth scaling / exposure / mosaic convert / DNG write) can run
 // unchanged. Throws std::runtime_error on GPU failure.
-FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
+// Non-const images: the function releases pixel data and DNG SDK objects
+// for comparison frames after uploading to GPU, to reduce peak system RAM.
+FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
                                size_t ref_idx,
                                const Settings& settings,
                                const PipelineOrchestrator::ProgressFn& progress);
@@ -27,7 +29,8 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
 // Uploads float data directly as plane buffers (no CFA deinterleave), then
 // shares the same align / merge / download tail as GpuRunBurstPipeline.
 // white_level / black_level come from the decoded image metadata.
-FloatImage GpuRunBurstPipelineRgb(const std::vector<FloatImage>& images,
+// Non-const images: float data is released per-frame after GPU upload.
+FloatImage GpuRunBurstPipelineRgb(std::vector<FloatImage>& images,
                                   size_t ref_idx,
                                   float white_level,
                                   const Settings& settings,

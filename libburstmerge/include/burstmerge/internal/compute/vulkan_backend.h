@@ -87,6 +87,9 @@ public:
     // Allocate a device-local buffer and initialize it with host data
     // (synchronous staging upload).
     uint64_t CreateBufferFromFloats(const float* data, uint32_t float_count);
+    // Upload raw uint16 data to a device-local buffer (no CPU-side float
+    // conversion). Used by prepare_texture which reads uint16 on GPU.
+    uint64_t CreateBufferFromU16(const uint16_t* data, uint32_t count);
     // Allocate a uniform buffer initialized with `bytes` of data.
     uint64_t CreateUbo(const void* data, uint32_t bytes);
     // Replace contents of an existing uniform buffer (created via CreateUbo).
@@ -101,6 +104,9 @@ public:
     void FillFloat(uint64_t handle, float value);
     // Copy float_count floats from src to dst+dst_offset_floats (recorded into current frame).
     void CopyBufferRegion(uint64_t dst, uint32_t dst_offset_floats, uint64_t src, uint32_t float_count);
+    // Upload host data to a device buffer, recording the copy into the current
+    // frame (no one-shot submit). Staging buffer is freed at next FlushFrame.
+    void RecordUpload(uint64_t dst, const void* data, uint32_t byte_count);
     // Number of floats the buffer was created to hold.
     uint32_t BufferFloatCount(uint64_t handle) const;
     void DestroyBuffer(uint64_t handle);

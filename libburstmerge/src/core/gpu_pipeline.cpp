@@ -271,8 +271,12 @@ uint64_t SpatialMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
     float clip_threshold = (wl - mean_bl) * PipelineConstants::kClipFactor;
     float min_cmp_w = linear ? SpatialConstants::kLinearMinComparisonWeight : SpatialConstants::kStandardMinComparisonWeight;
 
+    // Guide maps are only used by spatial_acc_1ch (ch==1 path). For ch>1
+    // (e.g. Bayer RAW with 4 channels), spatial_acc_multi uses ref_blur /
+    // cmp_blur directly and never reads the guide maps ? skip the allocation
+    // and block_mean_guide dispatch entirely to save ~124 MB VRAM at peak.
     uint64_t ref_guide_map = 0;
-    if (!linear)
+    if (!linear && ch == 1)
     {
         ref_guide_map = vk.CreateBuffer(pw * ph);
         ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch; pc.i0 = int(guide_block);
@@ -296,7 +300,8 @@ uint64_t SpatialMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
         {
             BoxBlurGPU(vk, aligned[k], cmp_blur, pw, ph, ch, 2);
         }
-        if (!linear)
+        // Guide maps only needed for ch==1 (see comment above).
+        if (!linear && ch == 1)
         {
             cmp_guide = vk.CreateBuffer(pw * ph);
             ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch; pc.i0 = int(guide_block);
@@ -325,6 +330,12 @@ uint64_t SpatialMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
         vk.FlushFrame();
         vk.DestroyBuffer(cmp_blur);
         if (cmp_guide && cmp_guide != cmp_blur) vk.DestroyBuffer(cmp_guide);
+        // aligned[k] has been fully consumed (blur + guide + accumulation).
+        // Free it now to release VRAM before the next comparison frame,
+        // rather than holding all aligned[] buffers until the merge ends.
+        // Safe: GPU is idle (just flushed), caller's later DestroyBuffer
+        // calls become no-ops on already-freed handles.
+        vk.DestroyBuffer(aligned[k]);
     }
     if (ref_guide_map) vk.DestroyBuffer(ref_guide_map);
     vk.DestroyBuffer(ref_blur);
@@ -830,6 +841,8 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
             }
             vk.FlushFrame();
             vk.DestroyBuffer(cmp_blur);
+            // aligned[k] fully consumed (blur + accumulation). Free now.
+            vk.DestroyBuffer(aligned[k]);
         }
         vk.BeginFrame();
         {
@@ -898,7 +911,7 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
     return out;
 }
 
-FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
+FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
                                size_t ref_idx,
                                const Settings& settings,
                                const ProgressFn& progress)
@@ -936,20 +949,42 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
     { ProfileScope _ps("time.gpu.prepare");
     std::vector<uint64_t> rawbufs;
     rawbufs.reserve(N);
+    // === Input format selection ===
+    // Default: GPU-side uint16?float conversion (pc.i9=0). Uploads raw
+    // uint16 data via CreateBufferFromU16; the prepare_texture shader
+    // converts on GPU. This eliminates the CPU loop (65M+ iterations/frame)
+    // that was the main CPU bottleneck during prepare (20-33% CPU usage).
+    //
+    // To switch to CPU-side conversion: set use_cpu_fp32_convert=true below.
+    // The CPU loop converts uint16?float, uploads via CreateBufferFromFloats,
+    // and the shader reads float32 input (pc.i9=1).
+    const bool use_cpu_fp32_convert = false;
     vk.BeginFrame();
     for (size_t i = 0; i < N; ++i)
     {
         mean_bl[i] = MeanBlack(images[i].metadata);
         const uint16_t* raw = reinterpret_cast<const uint16_t*>(images[i].pixels.data);
-        std::vector<float> fraw(size_t(W) * H);
-        for (size_t j = 0; j < fraw.size(); ++j) fraw[j] = float(raw[j]);
-        rawbufs.push_back(vk.CreateBufferFromFloats(fraw.data(), uint32_t(fraw.size())));
+        uint32_t pixel_count = uint32_t(size_t(W) * H);
+        if (use_cpu_fp32_convert)
+        {
+            // CPU path: convert uint16?float on host, upload as float32.
+            std::vector<float> fraw(size_t(pixel_count), 0.0f);
+            for (size_t j = 0; j < fraw.size(); ++j) fraw[j] = float(raw[j]);
+            rawbufs.push_back(vk.CreateBufferFromFloats(fraw.data(), pixel_count));
+        }
+        else
+        {
+            // GPU path: upload raw uint16, shader converts on device.
+            rawbufs.push_back(vk.CreateBufferFromU16(raw, pixel_count));
+        }
         plane[i] = vk.CreateBuffer(size_t(pw) * ph * ch);
         ShaderPC pc{};
         pc.w = int(W); pc.h = int(H); pc.channels = 1;
         pc.w2 = pw; pc.h2 = ph; pc.channels2 = int(ch);
-        pc.i0 = int(period); pc.f0 = mean_bl[i];
-        pc.f1 = (i == ref_idx) ? 1.0f : comp_scale[std::find(comp_orig.begin(), comp_orig.end(), i) - comp_orig.begin()];
+        pc.i0 = int(period);
+        pc.f1 = mean_bl[i];
+        pc.f2 = (i == ref_idx) ? 1.0f : comp_scale[std::find(comp_orig.begin(), comp_orig.end(), i) - comp_orig.begin()];
+        pc.i9 = use_cpu_fp32_convert ? 1 : 0;  // 0=uint16 input, 1=float32 input
         Binding b[2] = {{0, rawbufs.back(), 0}, {1, plane[i], 0}};
         vk.Dispatch("prepare_texture", pc, (pw + 7) / 8, (ph + 7) / 8, int(ch), b, 2);
     }
@@ -957,11 +992,26 @@ FloatImage GpuRunBurstPipeline(const std::vector<RawImage>& images,
     for (auto r : rawbufs) vk.DestroyBuffer(r);
     }
 
+    // All pixel data is now on GPU (uploaded via CreateBufferFromU16 above).
+    // All metadata (ev_value, black_level, etc.) has been read into mean_bl[]
+    // and comp_scale[]. GpuPipelineCore only reads raw_meta[ref_idx].metadata.
+    // Release comparison frames' system RAM: pixel data (~123 MB/frame for
+    // 65MP) and DNG SDK holders (~123 MB+/frame). The reference frame is
+    // preserved — its dng_negative is needed for DNG write at the CPU tail.
+    // RawMetadata move-assignment triggers DestroyNegativeHolder on the old
+    // value, so this is a safe release (no leak, no double-free).
+    for (size_t i = 0; i < N; ++i)
+    {
+        if (i == ref_idx) continue;
+        images[i].pixels = HostBuffer{};
+        images[i].metadata = RawMetadata{};
+    }
+
     return GpuPipelineCore(vk, plane, images, ref_idx, pw, ph, int(ch),
                            settings, progress, mean_bl, comp_orig, comp_scale);
 }
 
-FloatImage GpuRunBurstPipelineRgb(const std::vector<FloatImage>& images,
+FloatImage GpuRunBurstPipelineRgb(std::vector<FloatImage>& images,
                                   size_t ref_idx,
                                   float white_level,
                                   const Settings& settings,
@@ -997,12 +1047,28 @@ FloatImage GpuRunBurstPipelineRgb(const std::vector<FloatImage>& images,
         comp_scale.push_back(1.0f);
     }
 
-    // RGB prepare: direct float upload (no CFA deinterleave, no black level).
+    // RGB prepare: batch-upload all frames in a single BeginFrame/FlushFrame
+    // to avoid N separate one-shot submit+wait calls (each ~5-10ms overhead).
+    // RecordUpload creates per-frame staging + records vkCmdCopyBuffer into
+    // the current frame; staging is freed automatically at FlushFrame.
     std::vector<uint64_t> plane(N);
     std::vector<float> mean_bl(N, 0.0f);
     { ProfileScope _ps("time.gpu.prepare");
     for (size_t i = 0; i < N; ++i)
-        plane[i] = vk.CreateBufferFromFloats(images[i].data.data(), uint32_t(images[i].data.size()));
+        plane[i] = vk.CreateBuffer(uint32_t(images[i].data.size()));
+    vk.BeginFrame();
+    for (size_t i = 0; i < N; ++i)
+        vk.RecordUpload(plane[i], images[i].data.data(), uint32_t(images[i].data.size()) * 4);
+    vk.FlushFrame();
+    }
+
+    // All float data is now on GPU. Release system RAM (~95 MB/frame for
+    // 3840x2160x3ch). RecordUpload already memcpy'd to staging, so the
+    // source vectors are safe to clear.
+    for (size_t i = 0; i < N; ++i)
+    {
+        images[i].data.clear();
+        images[i].data.shrink_to_fit();
     }
 
     return GpuPipelineCore(vk, plane, raw_meta, ref_idx, pw, ph, ch,
