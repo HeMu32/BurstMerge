@@ -1,0 +1,116 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+float clamp01(float v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+
+// Robust weight helper shared by both spatial accumulate shaders.
+// f-params: robustness=f0, noise_floor=f1, highlight_threshold=f2,
+//           clip_threshold=f3, min_cmp_weight=f4
+float highlightWeight(int linear_mode, float diff, float robust, float nf, float minw)
+{
+    const float relaxed = 2.5;
+    if (linear_mode != 0)
+    {
+        float base = max(1.0, nf / max(0.001, robust));
+        float thr = relaxed * base;
+        return diff >= thr ? 0.0 : clamp01(1.0 - diff / thr);
+    }
+    float ratio = diff / max(1.0, nf * relaxed);
+    float w = 1.0 / (1.0 + ratio * ratio * robust);
+    return w < minw ? minw : w;
+}
+
+float planeBiasVeto(float chroma_shift, float nf, float minw)
+{
+    float thr = max(2.0, nf * 0.35);
+    if (chroma_shift <= thr) return 1.0;
+    float t = clamp01((chroma_shift - thr) / max(1.0, thr));
+    float w = 1.0 - t;
+    return w < minw ? minw : w;
+}
+
+// spatial_acc_multi: accumulate ONE comparison into (acc, wsum) for NHWC images.
+//   binding 0: acc (inout NHWC)         binding 1: wsum (inout 1ch)
+//   binding 2: ref      (NHWC)          binding 3: ref_blur (NHWC)
+//   binding 4: cmp      (NHWC)          binding 5: cmp_blur (NHWC)
+//   pc.i4 = linear_mode(0/1)
+//   pc.f0=robustness f1=noise_floor f2=highlight_threshold
+//   pc.f3=clip_threshold f4=min_cmp_weight f5=this comparison's exposure_scale
+layout(binding = 0) buffer Acc { float acc[]; };
+layout(binding = 1) buffer Wsum { float wsum[]; };
+layout(binding = 2) readonly buffer Ref { float refp[]; };
+layout(binding = 3) readonly buffer RefB { float refb[]; };
+layout(binding = 4) readonly buffer Cmp { float cmpp[]; };
+layout(binding = 5) readonly buffer CmpB { float cmpb[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int ch = pc.channels;
+    int base = (y * pc.w + x) * ch;
+
+    float ref_raw_guide = 0.0;
+    float cmp_raw_max = 0.0;
+    float cmp_max_diff = 0.0;
+    for (int c = 0; c < ch; ++c)
+    {
+        float rv = refp[base + c];
+        if (c == 0 || rv > ref_raw_guide) ref_raw_guide = rv;
+        float cv = cmpp[base + c];
+        if (c == 0 || cv > cmp_raw_max) cmp_raw_max = cv;
+        float d = cmpb[base + c] - refb[base + c];
+        d = d < 0.0 ? -d : d;
+        if (c == 0 || d > cmp_max_diff) cmp_max_diff = d;
+    }
+
+    int linear_mode = pc.i4;
+    float robust = pc.f0;
+    float nf = pc.f1;
+    float hl = pc.f2;
+    float clip = pc.f3;
+    float minw = pc.f4;
+    float scale = pc.f5;
+
+    float w;
+    bool cmp_clipped = (clip > 0.0 && scale > 0.0 && (cmp_raw_max / scale) >= clip);
+    if (cmp_clipped)
+    {
+        w = 0.0;
+    }
+    else if (ref_raw_guide >= hl || cmp_raw_max >= hl)
+    {
+        w = highlightWeight(linear_mode, cmp_max_diff, robust, nf, minw);
+    }
+    else
+    {
+        if (linear_mode != 0)
+        {
+            float thr = max(1.0, nf / max(0.001, robust));
+            w = (cmp_max_diff >= thr) ? 0.0 : clamp01(1.0 - cmp_max_diff / thr);
+        }
+        else
+        {
+            float ratio = cmp_max_diff / nf;
+            w = 1.0 / (1.0 + ratio * ratio * robust);
+            w = w < minw ? minw : w;
+        }
+    }
+
+    if (ch >= 4 && w > 0.0)
+    {
+        float ref_rb = 0.5 * (refb[base + 0] + refb[base + 3]);
+        float ref_g  = 0.5 * (refb[base + 1] + refb[base + 2]);
+        float cmp_rb = 0.5 * (cmpb[base + 0] + cmpb[base + 3]);
+        float cmp_g  = 0.5 * (cmpb[base + 1] + cmpb[base + 2]);
+        float chroma_shift = abs((cmp_rb - cmp_g) - (ref_rb - ref_g));
+        w *= planeBiasVeto(chroma_shift, nf, minw);
+    }
+
+    for (int c = 0; c < ch; ++c)
+        acc[base + c] += cmpp[base + c] * w;
+    wsum[y * pc.w + x] += w;
+}

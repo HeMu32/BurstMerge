@@ -1,0 +1,31 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// box_blur: direct 2D box with edge clamp (matches CPU BoxBlur exactly).
+//   binding 0: src (NHWC pc.w x pc.h x pc.channels)
+//   binding 1: dst (same dims)
+//   pc.i0 = radius, dispatch (ceil(w/8), ceil(h/8), channels)
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    int c = int(gl_GlobalInvocationID.z);
+    if (x >= pc.w || y >= pc.h || c >= pc.channels) return;
+    int r = pc.i0;
+    float sum = 0.0;
+    float n = 0.0;
+    for (int dy = -r; dy <= r; ++dy)
+        for (int dx = -r; dx <= r; ++dx)
+        {
+            int sx = clampi(x + dx, 0, pc.w - 1);
+            int sy = clampi(y + dy, 0, pc.h - 1);
+            sum += src[(sy * pc.w + sx) * pc.channels + c];
+            n += 1.0;
+        }
+    dst[(y * pc.w + x) * pc.channels + c] = sum / n;
+}

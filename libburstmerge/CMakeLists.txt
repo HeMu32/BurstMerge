@@ -6,10 +6,12 @@ add_library(burstmerge STATIC
     src/core/profiler.cpp
     src/core/fft_util.cpp
     src/core/pipeline.cpp
+    src/core/gpu_pipeline.cpp
     src/core/task_executor.cpp
     src/core/pipeline_io.cpp
     src/core/pipeline_frame.cpp
     src/core/pipeline_align.cpp
+    src/compute/vulkan/vulkan_backend.cpp
     src/align/align.cpp
     src/align/align_common.cpp
     src/align/align_pyramid.cpp
@@ -32,6 +34,27 @@ add_library(burstmerge STATIC
     src/io/bmp_writer.cpp
     ${PROJECT_SOURCE_DIR}/3rdparty/pocketfft/pocketfft.c
 )
+
+# ---- Vulkan compute shaders -> embedded SPIR-V header (configure time) ----
+# Compiles every src/compute/vulkan/shaders/*.comp with glslangValidator and
+# emits a single generated header included by vulkan_backend.cpp.
+set(BURSTMERGE_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/compute/vulkan/shaders")
+set(BURSTMERGE_GLSLANG "${PROJECT_SOURCE_DIR}/3rdparty/glslang/glslangValidator.exe")
+set(BURSTMERGE_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${BURSTMERGE_GENERATED_DIR}")
+set(BURSTMERGE_SPIRV_INL "${BURSTMERGE_GENERATED_DIR}/spirv_embedded.inl")
+execute_process(
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/cmake/embed_shaders.ps1"
+            -Validator "${BURSTMERGE_GLSLANG}"
+            -ShaderDir "${BURSTMERGE_SHADER_DIR}"
+            -OutFile "${BURSTMERGE_SPIRV_INL}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    RESULT_VARIABLE _spv_result
+)
+if(NOT _spv_result EQUAL 0)
+    message(WARNING "Shader embedding failed (code ${_spv_result}); Vulkan backend will not compile.")
+endif()
 
 # ---- 条件编译解码器 ----
 # libjpeg-turbo
@@ -77,6 +100,7 @@ target_include_directories(burstmerge
             ${POCKETFFT_INCLUDE}
             ${CXXOPTS_INCLUDE}
             ${VULKAN_INCLUDE}
+            ${BURSTMERGE_GENERATED_DIR}
 )
 
 target_compile_definitions(burstmerge PRIVATE
@@ -88,6 +112,9 @@ target_link_libraries(burstmerge
     PRIVATE OpenMP::OpenMP_CXX
 )
 
-if(MSVC)
-    target_link_libraries(burstmerge PRIVATE ${VULKAN_LIBRARY})
+# Link Vulkan loader for all compilers (GCC + MSVC). libvulkan-1.a is MinGW.
+# PUBLIC: the static library's vulkan_backend.cpp.obj is pulled into consumers,
+# so executables linking libburstmerge must also resolve Vulkan symbols.
+if(WIN32)
+    target_link_libraries(burstmerge PUBLIC ${VULKAN_LIBRARY})
 endif()

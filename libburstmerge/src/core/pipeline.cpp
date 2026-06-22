@@ -1,6 +1,7 @@
-﻿#include "burstmerge/internal/core/pipeline.h"
+#include "burstmerge/internal/core/pipeline.h"
 
 #include "burstmerge/internal/core/float_image.h"
+#include "burstmerge/internal/core/gpu_pipeline.h"
 #include "burstmerge/internal/core/pipeline_align.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/pipeline_io.h"
@@ -202,10 +203,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
     {
         ResetProfiler();
         Report(progress, 0.0f, "Starting");
-        if (backend_ != BackendType::CPU)
+        if (backend_ != BackendType::CPU && backend_ != BackendType::Vulkan)
         {
             return
-            {false, "", "Stage 1 currently supports CPU backend only"};
+            {false, "", "Unsupported backend"};
         }
         if (input_paths.empty())
         {
@@ -275,8 +276,27 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 ri.metadata.mosaic_pattern_width = 0;
                 raw_wrappers.push_back(std::move(ri));
             }
+            // decoded[i].pixels (float, ~95 MB/frame for 3840x2160x3ch) are
+            // never read again — metadata has been extracted into raw_wrappers,
+            // and float_images has its own copies (uploaded to GPU). Release
+            // system RAM before the GPU pipeline begins.
+            for (auto& d : decoded) d.pixels.clear();
+            decoded.shrink_to_fit();
 
             Report(progress, PipelineConstants::kProgressAlignStart, "Aligning frames (RGB)");
+
+            FloatImage merged;
+            if (backend_ == BackendType::Vulkan)
+            {
+                // GPU pipeline for RGB: upload float data directly (no CFA),
+                // share the same align / merge / download tail as RAW.
+                // GpuRunBurstPipelineRgb releases float_images[i].data after
+                // uploading each frame to GPU.
+                Report(progress, PipelineConstants::kProgressMerge, "GPU: RGB pipeline");
+                merged = GpuRunBurstPipelineRgb(float_images, ref_idx, white_level, settings_, progress);
+            }
+            else
+            {
             std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
                 settings_, cfa_period, progress);
 
@@ -330,7 +350,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 float estimated_noise = EstimateNoiseFloor(ref_image, 1);
                 float formula_noise = std::max(PipelineConstants::kNoiseFloorMin,
                     settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
-                params.noise_floor = std::min(estimated_noise, formula_noise);
+            params.noise_floor = std::min(estimated_noise, formula_noise);
+
                 params.highlight_threshold = white_level * PipelineConstants::kHighlightFactor;
                 params.clip_threshold = white_level * PipelineConstants::kClipFactor;
                 params.guide_block_size = 2;
@@ -338,6 +359,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.exposure_scales = nullptr;
                 merged = SpatialMerge(ref_image, aligned, params);
             }
+            } // else (CPU RGB path)
 
             // Resolve output format (never Auto at this point).
             OutputFormat eff_fmt;
@@ -393,7 +415,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         std::string convert_ctx = output_path_or_dir.empty() ? "." : output_path_or_dir;
         Report(progress, 0.02f, "Preparing inputs");
         convert_dir_.clear();
-        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
+        std::vector<std::string> dng_paths;
+        { ProfileScope _ps("time.pipeline.prepare_dng_inputs");
+        dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
+        }
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
 // DNG read Phase 1: read all DNG files into memory (sequential I/O)
@@ -416,6 +441,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         Report(progress, kDecodeStart, "Decoding DNG files");
         std::vector<RawImage> images(dng_paths.size());
         {
+        ProfileScope _ps("time.pipeline.decode_dng");
             std::atomic<int> decoded_count{0};
             std::mutex pm;
             ParallelFor(dng_paths.size(), 1, [&](size_t begin, size_t end)
@@ -437,10 +463,24 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 }
             }, "decode_dng" /* named tag for profiler */);
         }
+        // DNG file bytes are no longer needed — decoded images hold their own
+        // copies. Release ~30-50 MB per frame of system RAM before the GPU
+        // pipeline begins.
+        file_buffers.clear();
+        file_buffers.shrink_to_fit();
+
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
         size_t ref_idx = SelectExposureRefIndex(images);
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
-
+        FloatImage merged;
+        if (backend_ == BackendType::Vulkan)
+        {
+            // GPU-native pipeline: prepare / align / merge all on Vulkan compute.
+            // Falls through to the shared CPU tail (bit-depth / exposure / DNG).
+            merged = GpuRunBurstPipeline(images, ref_idx, settings_, progress);
+        }
+        else
+        {
         Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
         std::vector<FloatImage> float_images = BuildFloatImages(images);
         uint32_t hotpixel_period = (float_images.empty() || float_images[0].channels <= 1)
@@ -502,7 +542,6 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
         }
 
-        FloatImage merged;
         //
         // Merge algorithm selection: three mutually exclusive paths.
         // Exposure scales (for clipped-pixel detection / temporal weighting)
@@ -557,6 +596,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             // Dark reference frames (Bkt) can produce inflated noise floor,
             // which disables the robust weight formula and causes blur.
             params.noise_floor = std::min(estimated_noise, formula_noise);
+            std::fprintf(stderr, "[DBG] CPU spatial noise_floor est=%.4f formula=%.4f -> %.4f\n", estimated_noise, formula_noise, params.noise_floor);
             float avg_bl = MeanBlackLevel(images[ref_idx].metadata);
             params.highlight_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kHighlightFactor;
             params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kClipFactor;
@@ -566,6 +606,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.num_scales = static_cast<uint32_t>(exp_scales.size());
             params.exposure_scales = exp_scales.data();
             merged = SpatialMerge(ref_image, aligned, params);
+        }
         }
 
 // Compute bit-depth rescaling factor (must happen in black-subtracted space)

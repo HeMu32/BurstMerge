@@ -1,0 +1,90 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+int snapPeriod(int v, int p)
+{
+    if (p <= 1) return v;
+    return v >= 0 ? (v / p) * p : -((-v) / p) * p;
+}
+
+// warp_tilefield: per-pixel bilinear-over-tile-shift warp.
+//   binding 0: src (NHWC pc.w x pc.h x pc.channels)
+//   binding 1: dst (same dims)
+//   binding 2: tile_shift_x (int[tiles])
+//   binding 3: tile_shift_y (int[tiles])
+//   pc.i0=tile_size, pc.i1=tiles_x, pc.i2=tiles_y, pc.i3=tile_spacing, pc.i4=cfa_period
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+layout(binding = 2) readonly buffer TSX { int tsx[]; };
+layout(binding = 3) readonly buffer TSY { int tsy[]; };
+
+int sampShift(int ix, int iy, int tiles_x, int tiles_y, int period, int fld)
+{
+    ix = clampi(ix, 0, tiles_x - 1);
+    iy = clampi(iy, 0, tiles_y - 1);
+    int raw = (fld == 0) ? tsx[iy * tiles_x + ix] : tsy[iy * tiles_x + ix];
+    return snapPeriod(raw, period);
+}
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int ts = pc.i0;
+    int tiles_x = pc.i1;
+    int tiles_y = pc.i2;
+    int period = pc.i4;
+    float spacing = float(pc.i3 > 0 ? pc.i3 : ts);
+
+    float fx = (float(x) + 0.5) / spacing - 1.0;
+    float fy = (float(y) + 0.5) / spacing - 1.0;
+    int gx0 = int(floor(fx));
+    int gy0 = int(floor(fy));
+    float ttx = fx - float(gx0);
+    float tty = fy - float(gy0);
+
+    int dxs[4], dys[4];
+    dxs[0] = sampShift(gx0,     gy0,     tiles_x, tiles_y, period, 0);
+    dxs[1] = sampShift(gx0 + 1, gy0,     tiles_x, tiles_y, period, 0);
+    dxs[2] = sampShift(gx0,     gy0 + 1, tiles_x, tiles_y, period, 0);
+    dxs[3] = sampShift(gx0 + 1, gy0 + 1, tiles_x, tiles_y, period, 0);
+    dys[0] = sampShift(gx0,     gy0,     tiles_x, tiles_y, period, 1);
+    dys[1] = sampShift(gx0 + 1, gy0,     tiles_x, tiles_y, period, 1);
+    dys[2] = sampShift(gx0,     gy0 + 1, tiles_x, tiles_y, period, 1);
+    dys[3] = sampShift(gx0 + 1, gy0 + 1, tiles_x, tiles_y, period, 1);
+
+    float w0 = (1.0 - ttx) * (1.0 - tty);
+    float w1 = ttx * (1.0 - tty);
+    float w2 = (1.0 - ttx) * tty;
+    float w3 = ttx * tty;
+
+    for (int c = 0; c < pc.channels; ++c)
+    {
+        float acc = 0.0;
+        // corner 0
+        {
+            int sx = clampi(x - dxs[0], 0, pc.w - 1);
+            int sy = clampi(y - dys[0], 0, pc.h - 1);
+            acc += w0 * src[(sy * pc.w + sx) * pc.channels + c];
+        }
+        {
+            int sx = clampi(x - dxs[1], 0, pc.w - 1);
+            int sy = clampi(y - dys[1], 0, pc.h - 1);
+            acc += w1 * src[(sy * pc.w + sx) * pc.channels + c];
+        }
+        {
+            int sx = clampi(x - dxs[2], 0, pc.w - 1);
+            int sy = clampi(y - dys[2], 0, pc.h - 1);
+            acc += w2 * src[(sy * pc.w + sx) * pc.channels + c];
+        }
+        {
+            int sx = clampi(x - dxs[3], 0, pc.w - 1);
+            int sy = clampi(y - dys[3], 0, pc.h - 1);
+            acc += w3 * src[(sy * pc.w + sx) * pc.channels + c];
+        }
+        dst[(y * pc.w + x) * pc.channels + c] = acc;
+    }
+}

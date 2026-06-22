@@ -1,0 +1,61 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// select_min: reduce candidates[(2r+1)^2] to the minimum, write the chosen
+// (dx,dy) back into seed[0..1] for the next level, and into result[0..1].
+//   binding 0: candidates (float[(2r+1)^2])
+//   binding 1: seed       (int[2], read current center, overwritten with best)
+//   binding 2: result     (int[2], global best shift accumulator)
+//   pc.i0 = radius r ; dispatch 1 workgroup of 256 threads.
+layout(local_size_x = 256) in;
+layout(binding = 0) readonly buffer Cand { float cand[]; };
+layout(binding = 1) buffer Seed { int seed[]; };
+layout(binding = 2) buffer Result { int result[]; };
+
+shared float sh_val[256];
+shared int sh_idx[256];
+
+void main()
+{
+    int r = pc.i0;
+    int side = 2 * r + 1;
+    int n = side * side;
+    uint lid = gl_LocalInvocationID.x;
+    float best_val = 3.402823466e+38;
+    int center_off = r * side + r;
+    int best_off = center_off;
+    for (int t = int(lid); t < n; t += 256)
+    {
+        float v = cand[t];
+        if (v < best_val || (v == best_val && t < best_off)) { best_val = v; best_off = t; }
+    }
+    sh_val[lid] = best_val;
+    sh_idx[lid] = best_off;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1)
+    {
+        if (lid < s)
+        {
+            if (sh_val[lid + s] < sh_val[lid] ||
+                (sh_val[lid + s] == sh_val[lid] && sh_idx[lid + s] < sh_idx[lid]))
+            {
+                sh_val[lid] = sh_val[lid + s];
+                sh_idx[lid] = sh_idx[lid + s];
+            }
+        }
+        barrier();
+    }
+    if (lid == 0)
+    {
+        int off = sh_idx[0];
+        int ox = off % side;
+        int oy = off / side;
+        int cx = seed[0] + (ox - r);
+        int cy = seed[1] + (oy - r);
+        seed[0] = cx;
+        seed[1] = cy;
+        result[0] = cx;
+        result[1] = cy;
+    }
+}

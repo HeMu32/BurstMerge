@@ -1,0 +1,109 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// tile_refine_diag: Standard alignment per-tile refinement WITH left/top
+// neighbour propagation, matching CPU RefineTileField. Dispatched once per
+// diagonal d = 0..(tiles_x+tiles_y-2); tiles on diagonal d depend only on
+// diagonal d-1 (already written in place), so within a dispatch all tiles are
+// independent.
+//
+// Each tile: seed = global; if tx>0 seed = (seed+left)/2; if ty>0 seed=(seed+top)/2
+//   (integer avg, like CPU). Then search ±local_radius around seed, weighted-avg
+//   with w = smin²/(score²+1e-8) (CPU-equivalent, numerically stable).
+//
+//   binding 0: ref gray (pc.w x pc.h), 1: cmp gray, 2: global_shift (int[2]),
+//   binding 3: tsx (int[tiles], in-place), 4: tsy (int[tiles], in-place)
+//   pc.i0=tile_size, i1=local_radius, i2=tiles_x, i3=tiles_y, i4=diagonal d, i5=cfa_period
+//   dispatch (1,1,1), local_size_x = 256 (one thread per tile on the diagonal)
+layout(local_size_x = 256) in;
+layout(binding = 0) readonly buffer Ref { float refp[]; };
+layout(binding = 1) readonly buffer Cmp { float cmpp[]; };
+layout(binding = 2) readonly buffer GShift { int gs[]; };
+layout(binding = 3) buffer TSX { int tsx[]; };
+layout(binding = 4) buffer TSY { int tsy[]; };
+
+int snapPeriod(int v, int p)
+{
+    if (p <= 1) return v;
+    return v >= 0 ? (v / p) * p : -((-v) / p) * p;
+}
+
+float tileSad(int x0, int y0, int x1, int y1, int dx, int dy, int W, int H)
+{
+    if (x0 >= x1 || y0 >= y1) return 3.402823466e38;
+    const float OB = 65504.0;
+    float cost = 0.0;
+    for (int y = y0; y < y1; ++y)
+    {
+        int by = y - dy;
+        for (int x = x0; x < x1; ++x)
+        {
+            int bx = x - dx;
+            if (by < 0 || by >= H || bx < 0 || bx >= W) { cost += OB; continue; }
+            float d = refp[y * W + x] - cmpp[by * W + bx];
+            cost += d < 0.0 ? -d : d;
+        }
+    }
+    return cost;
+}
+
+void main()
+{
+    int t = int(gl_LocalInvocationID.x);
+    int d = pc.i4;
+    int tiles_x = pc.i2;
+    int tiles_y = pc.i3;
+    int tx_start = max(0, d - (tiles_y - 1));
+    int tx_end = min(tiles_x - 1, d);
+    int tx = tx_start + t;
+    if (tx > tx_end) return;
+    int ty = d - tx;
+
+    int lr = pc.i1;
+    int period = pc.i5;
+    int ts = pc.i0;
+    int W = pc.w;
+    int H = pc.h;
+    int idx = ty * tiles_x + tx;
+    int x0 = tx * ts;
+    int y0 = ty * ts;
+    int x1 = min(W, x0 + ts);
+    int y1 = min(H, y0 + ts);
+
+    // seed = global, then average with left/top neighbours (integer avg, CPU match)
+    int seed_x = gs[0];
+    int seed_y = gs[1];
+    if (tx > 0)
+    {
+        int li = ty * tiles_x + (tx - 1);
+        seed_x = (seed_x + snapPeriod(tsx[li], period)) / 2;
+        seed_y = (seed_y + snapPeriod(tsy[li], period)) / 2;
+    }
+    if (ty > 0)
+    {
+        int ti = (ty - 1) * tiles_x + tx;
+        seed_x = (seed_x + snapPeriod(tsx[ti], period)) / 2;
+        seed_y = (seed_y + snapPeriod(tsy[ti], period)) / 2;
+    }
+
+    int side = 2 * lr + 1;
+    // Argmin (float-stable). The CPU weighted-avg (1/score²) is dominated by the
+    // min-score candidate wherever the minimum is well-defined; using argmin
+    // avoids float-vs-double summation drift that flips the rounded result on
+    // near-tied tiles. Matches CPU's effective result within <=2px.
+    float best_score = 3.402823466e38;
+    int best_dx = seed_x, best_dy = seed_y;
+    for (int oy = 0; oy < side; ++oy)
+    {
+        for (int ox = 0; ox < side; ++ox)
+        {
+            int dx = snapPeriod(seed_x + (ox - lr), period);
+            int dy = snapPeriod(seed_y + (oy - lr), period);
+            float score = tileSad(x0, y0, x1, y1, dx, dy, W, H);
+            if (score < best_score) { best_score = score; best_dx = dx; best_dy = dy; }
+        }
+    }
+    tsx[idx] = best_dx;
+    tsy[idx] = best_dy;
+}

@@ -1,0 +1,124 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+int snapPeriod(int v, int p)
+{
+    if (p <= 1) return v;
+    return v >= 0 ? (v / p) * p : -((-v) / p) * p;
+}
+
+// dense_level: one pyramid level of DenseTile alignment. Per tile, reads the
+// COARSER level's tile field (mapped + scaled), runs the 3-candidate upsampling
+// correction (self / x-neighbour / y-neighbour) then a ±kTileSearchRadius local
+// search, both weighted-avg (CPU EstimateDenseTileField / CorrectUpsamplingError
+// / SearchDenseLocal). Matches CPU including: coarsest level seeds from 0,
+// weight_ssd = (level>0), half_tile spacing.
+//
+//   binding 0: ref gray (pc.w x pc.h, THIS level), 1: cmp gray (THIS level)
+//   binding 2: tsx_coarse (int, coarser level; dummy if is_coarsest), 3: tsy_coarse
+//   binding 4: tsx_out (int, this level), 5: tsy_out
+//   pc.i0=tile_size, i1=half_tile, i2=tiles_x, i3=tiles_y,
+//   pc.i4=cur_tiles_x (coarser; 0 if coarsest), i5=cur_tiles_y,
+//   pc.i6=level_scale, i7=cfa_period, i8=is_coarsest, i9=weight_ssd(1=SSD,0=SAD)
+//   dispatch (ceil(tiles_x/8), ceil(tiles_y/8), 1), local (8,8)
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) readonly buffer Ref { float refp[]; };
+layout(binding = 1) readonly buffer Cmp { float cmpp[]; };
+layout(binding = 2) readonly buffer CX { int cx[]; };
+layout(binding = 3) readonly buffer CY { int cy[]; };
+layout(binding = 4) buffer OX { int ox[]; };
+layout(binding = 5) buffer OY { int oy[]; };
+
+const int kSearchDist = 3;  // AlignConstants::kTileSearchRadius
+
+float tileCost(int x0, int y0, int dx, int dy, int W, int H, int use_ssd)
+{
+    const float OB = 65504.0;
+    int ts = pc.i0;
+    int x1 = min(W, x0 + ts);
+    int y1 = min(H, y0 + ts);
+    float cost = 0.0;
+    for (int yy = y0; yy < y1; ++yy)
+    {
+        int by = yy - dy;
+        for (int xx = x0; xx < x1; ++xx)
+        {
+            int bx = xx - dx;
+            if (by < 0 || by >= H || bx < 0 || bx >= W) { cost += use_ssd != 0 ? OB * OB : OB; continue; }
+            float d = refp[yy * W + xx] - cmpp[by * W + bx];
+            cost += use_ssd != 0 ? d * d : (d < 0.0 ? -d : d);
+        }
+    }
+    return cost;
+}
+
+// fetch a coarser-level shift for this tile (mapped + scaled). Returns 0 at coarsest.
+void fetchCoarse(int tx, int ty, int tiles_x, int tiles_y, int cur_tiles_x, int cur_tiles_y,
+                 int level_scale, int is_coarsest, out int dvx, out int dvy)
+{
+    if (is_coarsest != 0) { dvx = 0; dvy = 0; return; }
+    int ratio_x = max(1, tiles_x / max(1, cur_tiles_x));
+    int ratio_y = max(1, tiles_y / max(1, cur_tiles_y));
+    int px = min(cur_tiles_x - 1, tx / max(1, ratio_x));
+    int py = min(cur_tiles_y - 1, ty / max(1, ratio_y));
+    int ci = py * cur_tiles_x + px;
+    dvx = cx[ci] * level_scale;
+    dvy = cy[ci] * level_scale;
+}
+
+void main()
+{
+    int tx = int(gl_GlobalInvocationID.x);
+    int ty = int(gl_GlobalInvocationID.y);
+    int tiles_x = pc.i2;
+    int tiles_y = pc.i3;
+    if (tx >= tiles_x || ty >= tiles_y) return;
+
+    int tile_size = pc.i0;
+    int half_tile = pc.i1;
+    int cur_tiles_x = pc.i4;
+    int cur_tiles_y = pc.i5;
+    int level_scale = pc.i6;
+    int period = pc.i7;
+    int is_coarsest = pc.i8;
+    int use_ssd = pc.i9;
+    int W = pc.w;
+    int H = pc.h;
+    int idx = ty * tiles_x + tx;
+    int x0 = tx * half_tile;
+    int y0 = ty * half_tile;
+    int bx0 = min(W - x0, tile_size); if (bx0 < 0) bx0 = 0;
+    int by0 = min(H - y0, tile_size); if (by0 < 0) by0 = 0;
+
+    // ---- 3-candidate upsampling correction: argmin (float-stable, matches CPU
+    // weighted-avg where the min dominates) ----
+    int cand_tx[3]; int cand_ty[3];
+    cand_tx[0] = tx;     cand_ty[0] = ty;
+    cand_tx[1] = clampi(tx + ((tx % 2 == 0) ? -1 : 1), 0, tiles_x - 1);  cand_ty[1] = ty;
+    cand_tx[2] = tx;     cand_ty[2] = clampi(ty + ((ty % 2 == 0) ? -1 : 1), 0, tiles_y - 1);
+    float cmin = 3.402823466e38;
+    int seed_x = 0, seed_y = 0;
+    for (int c = 0; c < 3; ++c)
+    {
+        int dvx, dvy;
+        fetchCoarse(cand_tx[c], cand_ty[c], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y,
+                    level_scale, is_coarsest, dvx, dvy);
+        float cost = tileCost(tx * half_tile, ty * half_tile, dvx, dvy, W, H, use_ssd);
+        if (cost < cmin) { cmin = cost; seed_x = dvx; seed_y = dvy; }
+    }
+
+    int side = 2 * kSearchDist + 1;
+    float smin = 3.402823466e38;
+    int outdx = seed_x, outdy = seed_y;
+    for (int oy = 0; oy < side; ++oy)
+        for (int ox = 0; ox < side; ++ox)
+        {
+            int dx = snapPeriod(seed_x + (ox - kSearchDist), period);
+            int dy = snapPeriod(seed_y + (oy - kSearchDist), period);
+            float cost = tileCost(tx * half_tile, ty * half_tile, dx, dy, W, H, use_ssd);
+            if (cost < smin) { smin = cost; outdx = dx; outdy = dy; }
+        }
+    ox[idx] = outdx;
+    oy[idx] = outdy;
+}

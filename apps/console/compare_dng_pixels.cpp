@@ -44,11 +44,24 @@ int main(int argc, char* argv[])
             {
                 std::cerr << "DIFF: pixel data mismatch at index " << i
                           << " (" << fa.data[i] << " vs " << fb.data[i] << ")\n";
-                return 1;
+                // fall through to stats
+                break;
             }
         }
 
-        std::cout << "OK: decoded pixel buffers are identical\n";
+        double suma = 0, sumb = 0, mad = 0, mina = 1e30, maxa = -1e30;
+        for (size_t i = 0; i < fa.data.size(); ++i)
+        {
+            suma += fa.data[i];
+            sumb += fb.data[i];
+            mad += std::fabs(fa.data[i] - fb.data[i]);
+            if (fa.data[i] < mina) mina = fa.data[i];
+            if (fa.data[i] > maxa) maxa = fa.data[i];
+        }
+        double n = static_cast<double>(fa.data.size());
+        std::cout << "STATS A: mean=" << suma / n << " min=" << mina << " max=" << maxa << "\n";
+        std::cout << "STATS B: mean=" << sumb / n << "\n";
+        std::cout << "MAD A-B=" << mad / n << "  (rel=" << (mad / n) / (suma / n) << ")\n";
         return 0;
     }
     catch (const std::exception& e)

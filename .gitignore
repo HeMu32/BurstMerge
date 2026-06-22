@@ -44,6 +44,15 @@ Thumbs.db
 # Others
 .vscode/
 
+**/*.ARW
+**/*.DNG
+**/*.TIF
+**/*.PNG
+**/*.JPG
+**/*.XYZ
+
+/3rdparty/libtiff/*
+
 /3rdparty/dng_sdk/*
 !/3rdparty/dng_sdk/readme.txt
 !/3rdparty/dng_sdk/CMakeLists.txt

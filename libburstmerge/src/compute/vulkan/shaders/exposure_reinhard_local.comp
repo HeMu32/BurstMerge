@@ -1,0 +1,50 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+float clamp01(float v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+
+// exposure_reinhard_local: local Reinhard tone map using a precomputed blurred
+// luminance guide.  Mirrors CPU ApplyLocalReinhard (multichannel / black_mean
+// path, which is the RAW plane case).
+//   binding 0: img (inout NHWC), binding 1: luminance_guide (1ch, blurred max-c)
+//   f0=rescale f1=linear_gain f2=gain0 f3=gain1 f4=gain_stops
+//   f5=color_factor_mean f6=white f7=black_mean
+layout(binding = 0) buffer Img { float img[]; };
+layout(binding = 1) readonly buffer Lum { float lum[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int ch = pc.channels;
+    int base = (y * pc.w + x) * ch;
+    float rescale = pc.f0;
+    float lg = pc.f1;
+    float g0 = pc.f2;
+    float g1 = pc.f3;
+    float gain_stops = pc.f4;
+    float cfm = max(1e-6, pc.f5);
+    float white = pc.f6;
+    float black_mean = pc.f7;
+
+    float lum_raw = lum[y * pc.w + x];
+    float luminance = clamp01((lum_raw - black_mean) / (rescale * cfm));
+    luminance = max(1e-12, luminance);
+
+    float la0 = lg * g0 * luminance;
+    float la1 = lg * g1 * luminance;
+    la0 = la0 * (1.0 + la0 / (g0 * g0)) / (1.0 + la0);
+    float lum_max = g1 * (0.4 + g1 / (g1 * g1)) / (0.4 + g1);
+    la1 = la1 * (0.4 + la1 / (g1 * g1)) / ((0.4 + la1) * max(1e-6, lum_max));
+    float weight = clamp01(gain_stops * 0.25);
+    float scale = ((1.0 - weight) * la0 + weight * la1) / luminance;
+
+    for (int c = 0; c < ch; ++c)
+    {
+        float pixel = clamp01((img[base + c] - black_mean) / rescale);
+        img[base + c] = clampf(pixel * scale * rescale + black_mean, 0.0, white);
+    }
+}

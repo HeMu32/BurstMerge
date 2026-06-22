@@ -1,0 +1,71 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// extract: materialize a per-position scalar into a compact scratch buffer.
+//   binding 0: image (NHWC pc.w x pc.h x pc.channels)
+//   binding 1: image2 (NHWC, second operand; e.g. blurred)
+//   binding 2: out (float[pc.i3])  (pc.i3 = gw*gh)
+//   pc.i0 = mode:
+//           0 = sum_c (img - img2)^2 per sampled pixel   (rms noise)
+//           1 = sum_c |img - img2|     per sampled pixel (linear noise)
+//           2 = max_c |img|            per pixel          (texture max)
+//           3 = sum_c img              per pixel          (plain mean)
+//   pc.i1 = step, pc.i3 = gw*gh
+// dispatch (gw=ceil(w/step), gh=ceil(h/step), 1)
+layout(binding = 0) readonly buffer Img { float img[]; };
+layout(binding = 1) readonly buffer Img2 { float img2[]; };
+layout(binding = 2) buffer Out { float outv[]; };
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x);
+    int gy = int(gl_GlobalInvocationID.y);
+    int step = max(1, pc.i1);
+    int W = pc.w;
+    int H = pc.h;
+    int gw = (W + step - 1) / step;
+    int gh = (H + step - 1) / step;
+    if (gx >= gw || gy >= gh) return;
+    int x = gx * step;
+    int y = gy * step;
+    if (x >= W || y >= H) return;
+    int ch = max(1, pc.channels);
+    int mode = pc.i0;
+    int base = (y * W + x) * ch;
+    float val;
+    if (mode == 0)
+    {
+        val = 0.0;
+        for (int c = 0; c < ch; ++c)
+        {
+            float d = img[base + c] - img2[base + c];
+            val += d * d;
+        }
+    }
+    else if (mode == 1)
+    {
+        val = 0.0;
+        for (int c = 0; c < ch; ++c)
+        {
+            float d = img[base + c] - img2[base + c];
+            val += d < 0.0 ? -d : d;
+        }
+    }
+    else if (mode == 2)
+    {
+        val = 0.0;
+        for (int c = 0; c < ch; ++c)
+        {
+            float a = img[base + c];
+            float av = a < 0.0 ? -a : a;
+            if (av > val) val = av;
+        }
+    }
+    else
+    {
+        val = 0.0;
+        for (int c = 0; c < ch; ++c) val += img[base + c];
+    }
+    outv[gy * gw + gx] = val;
+}

@@ -1,0 +1,31 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// normalize_div: out = acc / wsum.
+//   pc.i6 = wsum_mode: 0 = wsum is 1-channel per-pixel (spatial, shared weight),
+//                      1 = wsum is NHWC per-element (temporal, per-channel weight).
+//   binding 0: acc (inout NHWC), binding 1: wsum (readonly)
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) buffer Acc { float acc[]; };
+layout(binding = 1) readonly buffer Wsum { float wsum[]; };
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int ch = pc.channels;
+    int base = (y * pc.w + x) * ch;
+    if (pc.i6 != 0)
+    {
+        for (int c = 0; c < ch; ++c)
+            acc[base + c] /= max(1e-6, wsum[base + c]);
+    }
+    else
+    {
+        float ws = max(1e-6, wsum[y * pc.w + x]);
+        for (int c = 0; c < ch; ++c)
+            acc[base + c] /= ws;
+    }
+}
