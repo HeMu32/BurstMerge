@@ -6,6 +6,7 @@
 // Usage: no arguments — auto-discovers samples in libburstmerge/test/samples/.
 
 #include "burstmerge/api.h"
+#include "burstmerge/internal/compute/vulkan_backend.h"
 #include "burstmerge/internal/core/gpu_pipeline.h"
 #include "burstmerge/internal/io/dng_io.h"
 
@@ -136,6 +137,18 @@ static void TestConsistency(const std::string& tag,
     CHECK(!out_gpu.empty(), tag + " GPU succeeded");
     if (out_cpu.empty() || out_gpu.empty()) return;
 
+    // VRAM leak check: GPU backend was just destroyed inside RunBackend.
+    // VulkanBackend::LastLeakedBuffers() should be 0 if all GPU buffers
+    // were properly freed by the pipeline.
+    auto leaked_bufs = burstmerge::vulkan::VulkanBackend::LastLeakedBuffers();
+    auto leaked_bytes = burstmerge::vulkan::VulkanBackend::LastLeakedBytes();
+    CHECK(leaked_bufs == 0,
+          tag + " no VRAM leak (got " + std::to_string(leaked_bufs) +
+          " buffers, " + std::to_string(leaked_bytes) + " bytes)");
+    if (leaked_bufs > 0)
+        std::cerr << "  WARNING: leaked " << leaked_bytes << " bytes in "
+                  << leaked_bufs << " buffers" << std::endl;
+
     auto cmp = CompareDngOutputs(out_cpu, out_gpu);
     CHECK(cmp.rel >= 0.0, tag + " dimensions match");
     if (cmp.rel < 0.0) return;
@@ -208,6 +221,38 @@ int main()
         s.merge_algo = burstmerge::MergeAlgorithm::Spatial;
         s.frequency_mode = burstmerge::FrequencyMode::Laplacian;
         TestConsistency("bkt1 spatial-dense", bkt1, s, 0.01f);  // 1.0%
+    }
+
+    // --- Spatial-linear mode (uses different blur/noise path) ---
+    {
+        burstmerge::Settings sl = s;
+        sl.merge_algo = burstmerge::MergeAlgorithm::Spatial;
+        sl.spatial_mode = burstmerge::SpatialMergeMode::Linear;
+        sl.frequency_mode = burstmerge::FrequencyMode::Laplacian;
+        TestConsistency("seq1 spatial-linear-dense", seq1, sl, 0.002f);
+    }
+
+    // --- Standard alignment (legacy) for completeness ---
+    {
+        burstmerge::Settings ss = s;
+        ss.merge_algo = burstmerge::MergeAlgorithm::Spatial;
+        ss.alignment_mode = burstmerge::AlignmentMode::Standard;
+        ss.frequency_mode = burstmerge::FrequencyMode::Laplacian;
+        TestConsistency("seq1 spatial-standard", seq1, ss, 0.002f);
+    }
+
+    // --- VRAM stress: repeat GPU run 3x, verify no accumulation ---
+    std::cout << "\n--- VRAM stress (3x repeat) ---" << std::endl;
+    for (int rep = 1; rep <= 3; ++rep)
+    {
+        std::string out = RunBackend(burstmerge::BackendType::Vulkan, seq1, s,
+                                     fs::temp_directory_path().string() + "/test_stage3_stress.dng");
+        CHECK(!out.empty(), "stress run " + std::to_string(rep) + " succeeded");
+        auto leaked = burstmerge::vulkan::VulkanBackend::LastLeakedBuffers();
+        CHECK(leaked == 0,
+              "stress run " + std::to_string(rep) + " no VRAM leak (" +
+              std::to_string(leaked) + " buffers leaked)");
+        fs::remove(out);
     }
 
     std::cout << "\n" << g_checks << " checks, " << g_failed << " failed" << std::endl;

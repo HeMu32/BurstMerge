@@ -17,6 +17,13 @@ namespace burstmerge
 namespace vulkan
 {
 
+// File-scope leak tracking: updated by Shutdown(), read by LastLeaked*().
+static uint64_t g_last_leaked_bytes = 0;
+static uint64_t g_last_leaked_buffers = 0;
+
+uint64_t VulkanBackend::LastLeakedBytes() { return g_last_leaked_bytes; }
+uint64_t VulkanBackend::LastLeakedBuffers() { return g_last_leaked_buffers; }
+
 namespace
 {
 constexpr uint32_t kPushConstantBytes = sizeof(ShaderPC);
@@ -475,6 +482,9 @@ void VulkanBackend::Shutdown()
         static_cast<unsigned long long>(d.vram_peak_count),
         static_cast<double>(d.vram_live) / (1024.0*1024.0),
         static_cast<unsigned long long>(d.vram_live_count));
+    // Record for programmatic leak checks (tests query after destruction).
+    g_last_leaked_bytes = d.vram_live;
+    g_last_leaked_buffers = d.vram_live_count;
     d.initialized = false;
 }
 

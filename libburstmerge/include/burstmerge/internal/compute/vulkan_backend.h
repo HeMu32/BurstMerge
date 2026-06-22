@@ -129,6 +129,12 @@ public:
     // Hard wait on the compute queue.
     void Synchronize();
 
+    // After a VulkanBackend is destroyed, these hold the VRAM leak
+    // statistics from the most recent instance. Used by tests to verify
+    // that all GPU buffers were properly freed.
+    static uint64_t LastLeakedBytes();
+    static uint64_t LastLeakedBuffers();
+
     struct Impl;  // forward-declared publicly so the .cpp helpers can name it
 private:
     Impl* impl_ = nullptr;
