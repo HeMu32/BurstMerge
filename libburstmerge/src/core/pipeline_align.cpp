@@ -2,6 +2,7 @@
 
 #include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/align/align_common.h"
+#include "burstmerge/internal/align/align_pyramid.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"
@@ -283,6 +284,13 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         ApplyGammaGray(gray_inputs.back(), wl, settings.align_gamma);
     }
 
+    // Lazily-built reference pyramid: constructed once on first use in the
+    // fixed-reference path, then reused for all subsequent frames. In the
+    // chained-alignment path the reference changes per frame, so this stays
+    // unset and EstimateTranslation builds per-call pyramids as before.
+    std::vector<FloatImage> ref_pyr_cache;
+    bool ref_pyr_built = false;
+
     auto align_and_warp_pregrays = [&](const FloatImage& gray_ref,
                                        const FloatImage& gray_src,
                                        const FloatImage& source,
@@ -294,7 +302,24 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange *
                    static_cast<float>(progress_idx) / static_cast<float>(std::max<size_t>(1, total_count)),
                "Aligning frame " + std::to_string(progress_idx + 1) + "/" + std::to_string(total_count));
-        AlignmentResult ar = EstimateTranslation(gray_ref, gray_src, params);
+
+        // Reuse cached reference pyramid when aligning against the fixed
+        // reference; fall back to per-call pyramid for chained alignment.
+        AlignmentResult ar;
+        if (&gray_ref == &gray_ref_full)
+        {
+            if (!ref_pyr_built)
+            {
+                ProfileScope pyr_scope("time.align.build_ref_pyramid");
+                ref_pyr_cache = BuildPyramidSingle(gray_ref_full, params.tile_size);
+                ref_pyr_built = true;
+            }
+            ar = EstimateTranslation(ref_pyr_cache, gray_ref, gray_src, params);
+        }
+        else
+        {
+            ar = EstimateTranslation(gray_ref, gray_src, params);
+        }
 
         DumpWarpedGrayBmp(gray_src, ar, float_images.size(), source_idx, AlignmentModeTag(params.mode), false, wl);
 
@@ -357,6 +382,10 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                                                       i,
                                                       processed,
                                                       total));
+            // gray_inputs[i] was only needed for EstimateTranslation above;
+            // release it now to reduce peak memory for subsequent frames.
+            gray_inputs[i].data.clear();
+            gray_inputs[i].data.shrink_to_fit();
             ++processed;
         }
         return aligned;
