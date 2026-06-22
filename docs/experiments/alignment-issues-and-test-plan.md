@@ -93,7 +93,7 @@ PASS if max_dx <= 2 && max_dy <= 2
 - 把 GPU 对齐从 `GpuRunBurstPipeline` 内联代码**抽取成独立函数**
   `GpuEstimateTranslation(vk, ref_gray_h, cmp_gray_h, gw, gh, params) -> AlignmentResult`,
   下载并返回 tile 位移场 (与 CPU `AlignmentResult` 同结构).
-- 新增测试程序 `test_align_gpu` (或加入 ctest), 对 Standard / Dense 各跑若干样本对,
+- 新增测试程序 `test_stage2` (已加入 ctest), 对 Standard / Dense 各跑若干样本对,
   打印 max/mean/超阈占比, 退出码反映 max≤2px.
 
 ### 当前状态

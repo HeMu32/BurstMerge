@@ -1,0 +1,215 @@
+// test_stage3: CPU vs GPU dual-path consistency test.
+// For each merge mode, runs both backends on the same burst and compares
+// the output DNG pixel data. Acceptance: relative MAD below per-mode threshold.
+//
+// Requires: Adobe DNG Converter (for ARW samples) + Vulkan GPU.
+// Usage: no arguments — auto-discovers samples in libburstmerge/test/samples/.
+
+#include "burstmerge/api.h"
+#include "burstmerge/internal/core/gpu_pipeline.h"
+#include "burstmerge/internal/io/dng_io.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstdint>
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace fs = std::filesystem;
+
+static int g_checks = 0;
+static int g_failed = 0;
+
+#define CHECK(cond, msg) do { \
+    ++g_checks; \
+    if (!(cond)) \
+    { \
+        std::cerr << "  FAIL [" << __LINE__ << "]: " << msg << std::endl; \
+        ++g_failed; \
+    } \
+} while (0)
+
+static bool ConverterAvailable()
+{
+#ifdef _WIN32
+    DWORD attr = GetFileAttributesA(
+        "C:\\Program Files\\Adobe\\Adobe DNG Converter\\Adobe DNG Converter.exe");
+    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    return false;
+#endif
+}
+
+static std::vector<std::string> FindSamples(const fs::path& dir, const std::string& ext, int max_count)
+{
+    std::vector<std::string> files;
+    if (!fs::exists(dir)) return files;
+    for (const auto& entry : fs::directory_iterator(dir))
+    {
+        if (!entry.is_regular_file()) continue;
+        std::string e = entry.path().extension().string();
+        for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (e == ext) files.push_back(entry.path().string());
+    }
+    std::sort(files.begin(), files.end());
+    if (int(files.size()) > max_count)
+        files.resize(max_count);
+    return files;
+}
+
+// Run BurstMerge on the given backend and return the output DNG path.
+// Returns empty string on failure.
+static std::string RunBackend(burstmerge::BackendType backend,
+                              const std::vector<std::string>& inputs,
+                              const burstmerge::Settings& settings,
+                              const std::string& output_path)
+{
+    fs::remove(output_path);
+    burstmerge::BurstMerge bm(backend);
+    bm.Configure(settings);
+    for (const auto& f : inputs) bm.AddImage(f);
+    auto result = bm.Process(output_path);
+    if (!result.success)
+    {
+        std::cerr << "  backend " << (backend == burstmerge::BackendType::Vulkan ? "GPU" : "CPU")
+                  << " failed: " << result.error_msg << std::endl;
+        return "";
+    }
+    return result.output_path;
+}
+
+// Compute mean absolute difference between two decoded DNG images.
+// Returns {mad, max_value} or {-1, 0} on error.
+struct CompareResult { double mad; double max_val; double rel; };
+static CompareResult CompareDngOutputs(const std::string& path_a, const std::string& path_b)
+{
+    burstmerge::DngReader ra(path_a.c_str());
+    auto img_a = ra.Read();
+    burstmerge::DngReader rb(path_b.c_str());
+    auto img_b = rb.Read();
+
+    if (img_a.pixels.width != img_b.pixels.width ||
+        img_a.pixels.height != img_b.pixels.height)
+        return {-1.0, 0.0, -1.0};
+
+    uint64_t count = uint64_t(img_a.pixels.width) * img_a.pixels.height;
+    const uint16_t* pa = reinterpret_cast<const uint16_t*>(img_a.pixels.data);
+    const uint16_t* pb = reinterpret_cast<const uint16_t*>(img_b.pixels.data);
+
+    double sum_abs = 0.0;
+    uint32_t max_val = 0;
+    for (uint64_t i = 0; i < count; ++i)
+    {
+        int diff = int(pa[i]) - int(pb[i]);
+        if (diff < 0) diff = -diff;
+        sum_abs += double(diff);
+        if (pa[i] > max_val) max_val = pa[i];
+    }
+    double mad = sum_abs / double(count);
+    double rel = max_val > 0 ? mad / double(max_val) : 0.0;
+    return {mad, double(max_val), rel};
+}
+
+// Test one configuration: run CPU + GPU, compare outputs.
+static void TestConsistency(const std::string& tag,
+                            const std::vector<std::string>& inputs,
+                            const burstmerge::Settings& settings,
+                            float threshold_rel)
+{
+    std::cout << "\n--- " << tag << " ---" << std::endl;
+    std::string dir = fs::temp_directory_path().string();
+
+    std::string out_cpu = RunBackend(burstmerge::BackendType::CPU, inputs, settings,
+                                     dir + "/test_stage3_cpu.dng");
+    std::string out_gpu = RunBackend(burstmerge::BackendType::Vulkan, inputs, settings,
+                                     dir + "/test_stage3_gpu.dng");
+
+    CHECK(!out_cpu.empty(), tag + " CPU succeeded");
+    CHECK(!out_gpu.empty(), tag + " GPU succeeded");
+    if (out_cpu.empty() || out_gpu.empty()) return;
+
+    auto cmp = CompareDngOutputs(out_cpu, out_gpu);
+    CHECK(cmp.rel >= 0.0, tag + " dimensions match");
+    if (cmp.rel < 0.0) return;
+
+    std::cout << "  MAD=" << cmp.mad << "  max=" << cmp.max_val
+              << "  rel=" << (cmp.rel * 100.0) << "%" << std::endl;
+
+    CHECK(cmp.rel < double(threshold_rel),
+          tag + " relative MAD " + std::to_string(cmp.rel * 100.0) + "% < " +
+          std::to_string(double(threshold_rel) * 100.0) + "%");
+
+    fs::remove(out_cpu);
+    fs::remove(out_gpu);
+}
+
+int main()
+{
+    std::cout << "test_stage3: CPU vs GPU dual-path consistency" << std::endl;
+
+    // Prerequisites
+    fs::path samples_dir = fs::path(TEST_DATA_DIR) / "libburstmerge" / "test" / "samples";
+    auto seq1 = FindSamples(samples_dir / "Seq1", ".arw", 3);
+    auto bkt1 = FindSamples(samples_dir / "Bkt1", ".arw", 3);
+
+    if (seq1.size() < 2)
+    {
+        std::cout << "SKIP: need >=2 ARW samples in Seq1 (found " << seq1.size() << ")" << std::endl;
+        std::cout << g_checks << " checks, " << g_failed << " failed" << std::endl;
+        return 0;
+    }
+    if (!ConverterAvailable())
+    {
+        std::cout << "SKIP: Adobe DNG Converter not found" << std::endl;
+        std::cout << g_checks << " checks, " << g_failed << " failed" << std::endl;
+        return 0;
+    }
+    if (!burstmerge::GpuVulkanAvailable())
+    {
+        std::cout << "SKIP: no Vulkan GPU available" << std::endl;
+        std::cout << g_checks << " checks, " << g_failed << " failed" << std::endl;
+        return 0;
+    }
+
+    std::cout << "Samples: " << seq1.size() << " ARW from Seq1";
+    if (bkt1.size() >= 2) std::cout << ", " << bkt1.size() << " ARW from Bkt1";
+    std::cout << std::endl;
+
+    // --- Constant-exposure burst: spatial, temporal, freq-laplacian, freq-wiener ---
+    burstmerge::Settings s;
+    s.tile_size = 32;
+    s.noise_reduction = 13.0f;
+    s.alignment_mode = burstmerge::AlignmentMode::DenseTile;
+
+    s.merge_algo = burstmerge::MergeAlgorithm::Spatial;
+    TestConsistency("seq1 spatial-dense", seq1, s, 0.002f);  // 0.2%
+
+    s.merge_algo = burstmerge::MergeAlgorithm::TemporalAverage;
+    TestConsistency("seq1 temporal-dense", seq1, s, 0.002f);
+
+    s.merge_algo = burstmerge::MergeAlgorithm::Frequency;
+    s.frequency_mode = burstmerge::FrequencyMode::Laplacian;
+    TestConsistency("seq1 freq-laplacian-dense", seq1, s, 0.003f);  // 0.3%
+
+    s.frequency_mode = burstmerge::FrequencyMode::WienerFft;
+    TestConsistency("seq1 freq-wiener-dense", seq1, s, 0.002f);
+
+    // --- Bracketed exposure burst (higher threshold due to EV scaling) ---
+    if (bkt1.size() >= 2)
+    {
+        s.merge_algo = burstmerge::MergeAlgorithm::Spatial;
+        s.frequency_mode = burstmerge::FrequencyMode::Laplacian;
+        TestConsistency("bkt1 spatial-dense", bkt1, s, 0.01f);  // 1.0%
+    }
+
+    std::cout << "\n" << g_checks << " checks, " << g_failed << " failed" << std::endl;
+    return g_failed > 0 ? 1 : 0;
+}

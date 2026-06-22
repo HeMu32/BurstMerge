@@ -1,9 +1,10 @@
-// test_align_gpu: unit test comparing CPU vs GPU alignment TILE MOTION directly
-// (not image output). For each alignment mode, runs EstimateTranslation (CPU) and
-// GpuEstimateTranslation (GPU) on the same grayscale plane images and reports the
-// per-tile shift difference. Acceptance: max |dx|, |dy| <= 2 px on every tile.
+// test_stage2: GPU pipeline unit tests.
+// Currently: CPU vs GPU alignment tile-motion field comparison.
+// Runs EstimateTranslation (CPU) and GpuEstimateTranslation (GPU) on the
+// same grayscale plane images and reports the per-tile shift difference.
+// Acceptance: max |dx|, |dy| <= 2 px on every tile.
 //
-// Usage: test_align_gpu <img0> <img1> [img2 ...]   (RAW/DNG; >=2 frames)
+// Usage: test_stage2 <img0> <img1> [img2 ...]   (RAW/DNG; >=2 frames)
 // Decodes the first two frames, builds gray plane images, compares alignment.
 
 #include "burstmerge/api.h"
