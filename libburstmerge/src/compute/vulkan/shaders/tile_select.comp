@@ -1,0 +1,71 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+int snapPeriod(int v, int p)
+{
+    if (p <= 1) return v;
+    return v >= 0 ? (v / p) * p : -((-v) / p) * p;
+}
+
+// tile_select: per tile, weighted-average of candidate (dx,dy) with weights
+//   w = 1/(score²). Equivalent to CPU RefineTileField (BURSTMERGE_ALIGN_WEIGHTED_AVG).
+//   To stay numerically stable in float32, scores are normalised by the minimum
+//   score first: w_i = 1/((score_i/smin)² + eps). The (1/smin²) factor cancels in
+//   Σw·d / Σw, so the result is identical to the CPU's 1/(score²+1e-8) weighted avg.
+//   binding 0: candidates (float[tiles*num_cand])
+//   binding 1: result (int[2]: global shift = base for candidate offsets)
+//   binding 2: tile_shift_x (int[tiles])
+//   binding 3: tile_shift_y (int[tiles])
+//   pc.i0 = local_radius, pc.i1 = cfa_period, pc.i2 = tiles_x, pc.i3 = num_cand
+layout(binding = 0) readonly buffer Cand { float cand[]; };
+layout(binding = 1) readonly buffer Result { int result[]; };
+layout(binding = 2) buffer TSX { int tsx[]; };
+layout(binding = 3) buffer TSY { int tsy[]; };
+
+void main()
+{
+    int tx = int(gl_GlobalInvocationID.x);
+    int ty = int(gl_GlobalInvocationID.y);
+    int tiles_x = pc.i2;
+    if (tx >= tiles_x) return;
+    int lr = pc.i0;
+    int side = 2 * lr + 1;
+    int num_cand = pc.i3;
+    int base_x = result[0];
+    int base_y = result[1];
+    int period = pc.i1;
+    int idx = ty * tiles_x + tx;
+
+    // pass 1: find min score (for normalisation)
+    float smin = 3.402823466e38;
+    for (int cb = 0; cb < num_cand; ++cb)
+    {
+        float s = cand[idx * num_cand + cb];
+        if (s < smin) smin = s;
+    }
+    float smin2 = smin * smin;
+    if (!(smin2 > 0.0)) smin2 = 1.0;   // guard against NaN/0
+
+    // pass 2: weighted average. w_i = smin²/(score_i²+1e-8). The smin² factor
+    // cancels in Σw·d/Σw, so this is identical to the CPU's 1/(score²+1e-8), but
+    // every weight is a finite O(1) value (no underflow, no divide-by-zero: the
+    // +1e-8 handles score==0 exactly like the CPU).
+    float sw = 0.0, swx = 0.0, swy = 0.0;
+    for (int cb = 0; cb < num_cand; ++cb)
+    {
+        int ox = cb % side;
+        int oy = cb / side;
+        int gx = base_x + (ox - lr);
+        int gy = base_y + (oy - lr);
+        int dx = snapPeriod(gx, period);
+        int dy = snapPeriod(gy, period);
+        float s = cand[idx * num_cand + cb];
+        float w = smin2 / (s * s + 1e-8);
+        sw  += w;
+        swx += w * float(dx);
+        swy += w * float(dy);
+    }
+    tsx[idx] = int(round(swx / sw));
+    tsy[idx] = int(round(swy / sw));
+}

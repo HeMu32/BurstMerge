@@ -1,0 +1,33 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// to_grayscale: average all channels into a 1-channel image, then optional gamma.
+//   binding 0: src (NHWC pc.w x pc.h x pc.channels)
+//   binding 1: dst (1ch, pc.w2 x pc.h2)
+//   pc.f0 = align_gamma (1.0 = off), pc.f1 = white_level
+// dispatch (ceil(w/8), ceil(h/8), 1)
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w2 || y >= pc.h2) return;
+    float sum = 0.0;
+    for (int c = 0; c < pc.channels; ++c)
+        sum += src[(y * pc.w + x) * pc.channels + c];
+    float gray = sum / float(max(1, pc.channels));
+    float gamma = pc.f0;
+    float wl = pc.f1;
+    if (wl > 0.0 && abs(gamma - 1.0) > 0.001)
+    {
+        float scale = pow(wl, 1.0 - gamma);
+        if (gray <= 0.0) gray = 0.0;
+        else if (gray >= wl) gray = wl;
+        else gray = scale * pow(gray, gamma);
+    }
+    dst[y * pc.w2 + x] = gray;
+}

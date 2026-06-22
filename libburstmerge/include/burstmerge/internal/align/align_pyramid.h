@@ -19,4 +19,9 @@ void BuildPyramid(const FloatImage& ref,
                   std::vector<FloatImage>& cmp_pyr,
                   int32_t tile_size);
 
+// Build a single-image alignment pyramid. Extracted from BuildPyramid so the
+// reference pyramid can be built once and reused across all comparison frames
+// in the fixed-reference alignment path, avoiding redundant rebuilds.
+std::vector<FloatImage> BuildPyramidSingle(const FloatImage& img, int32_t tile_size);
+
 } // namespace burstmerge

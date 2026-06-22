@@ -27,18 +27,15 @@ namespace
 // per-tile RefineTileField (local_radius search) cannot recover it.
 constexpr int kGlobalSadStepBase = 16;
 
-} // namespace
-
-AlignmentResult EstimateTranslation(const FloatImage& reference,
-                                    const FloatImage& comparison,
-                                    const AlignParams& params)
+// Core alignment logic shared by both EstimateTranslation entry points.
+// Receives a pre-built reference pyramid; builds only the comparison pyramid.
+AlignmentResult EstimateTranslationImpl(
+    const std::vector<FloatImage>& ref_pyr,
+    const FloatImage& reference,
+    const FloatImage& comparison,
+    const AlignParams& params)
 {
-    ProfileScope scope("time.align.estimate_translation_total");
-    // Thin front door for alignment: build the common pyramid once, then
-    // dispatch to the requested estimator.
-    std::vector<FloatImage> ref_pyr;
-    std::vector<FloatImage> cmp_pyr;
-    BuildPyramid(reference, comparison, ref_pyr, cmp_pyr, params.tile_size);
+    std::vector<FloatImage> cmp_pyr = BuildPyramidSingle(comparison, params.tile_size);
 
     if (params.mode == AlignmentMode::DenseTile)
     {
@@ -121,6 +118,26 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
     out.confidence = 1.0f / (1.0f + best_score);
     RefineTileField(reference, comparison, params, out);
     return out;
+}
+
+} // namespace
+
+AlignmentResult EstimateTranslation(const FloatImage& reference,
+                                    const FloatImage& comparison,
+                                    const AlignParams& params)
+{
+    ProfileScope scope("time.align.estimate_translation_total");
+    std::vector<FloatImage> ref_pyr = BuildPyramidSingle(reference, params.tile_size);
+    return EstimateTranslationImpl(ref_pyr, reference, comparison, params);
+}
+
+AlignmentResult EstimateTranslation(const std::vector<FloatImage>& ref_pyr,
+                                    const FloatImage& reference,
+                                    const FloatImage& comparison,
+                                    const AlignParams& params)
+{
+    ProfileScope scope("time.align.estimate_translation_total");
+    return EstimateTranslationImpl(ref_pyr, reference, comparison, params);
 }
 
 } // namespace burstmerge

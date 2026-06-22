@@ -1,0 +1,81 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// sad_global: compute mean SAD (subsampled) for ONE candidate shift.
+//   binding 0: ref   (1ch gray, pc.w x pc.h)
+//   binding 1: cmp   (1ch gray, same dims)
+//   binding 2: seed  (int[2]: center_x, center_y) - persistent across levels
+//   binding 3: candidates (float[(2r+1)^2]) - output scores, indexed by wg id
+//   pc.i0 = radius r, pc.i1 = step, pc.i2 = cfa_period
+// dispatch: (2r+1)^2 workgroups, each 256 threads.
+layout(local_size_x = 256) in;
+layout(binding = 0) readonly buffer Ref { float refp[]; };
+layout(binding = 1) readonly buffer Cmp { float cmpp[]; };
+layout(binding = 2) readonly buffer Seed { int seed[]; };
+layout(binding = 3) buffer Cand { float cand[]; };
+
+shared float sh_sum[256];
+shared float sh_cnt[256];
+
+void main()
+{
+    int wid = int(gl_WorkGroupID.x);
+    int r = pc.i0;
+    int side = 2 * r + 1;
+    int ox = wid % side;
+    int oy = wid / side;
+    int cx = seed[0] + (ox - r);
+    int cy = seed[1] + (oy - r);
+
+    int margin_x = abs(cx);
+    int margin_y = abs(cy);
+    int step = max(1, pc.i1);
+    int W = pc.w;
+    int H = pc.h;
+
+    float sad = 0.0;
+    float cnt = 0.0;
+    if (W > 2 * margin_x && H > 2 * margin_y)
+    {
+        // linear pixel index over the valid region (row-major)
+        int x0 = margin_x;
+        int x1 = W - margin_x;
+        int y0 = margin_y;
+        int y1 = H - margin_y;
+        int rowLen = ((x1 - x0 + step - 1) / step);
+        int totalRows = ((y1 - y0 + step - 1) / step);
+        int total = rowLen * totalRows;
+        for (int t = int(gl_LocalInvocationID.x); t < total; t += 256)
+        {
+            int ry = t / rowLen;
+            int rx = t - ry * rowLen;
+            int x = x0 + rx * step;
+            int y = y0 + ry * step;
+            int bx = x - cx;
+            int by = y - cy;
+            float d = refp[y * W + x] - cmpp[by * W + bx];
+            sad += d < 0.0 ? -d : d;
+            cnt += 1.0;
+        }
+    }
+
+    // workgroup reduction
+    uint lid = gl_LocalInvocationID.x;
+    sh_sum[lid] = sad;
+    sh_cnt[lid] = cnt;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1)
+    {
+        if (lid < s)
+        {
+            sh_sum[lid] += sh_sum[lid + s];
+            sh_cnt[lid] += sh_cnt[lid + s];
+        }
+        barrier();
+    }
+    if (lid == 0)
+    {
+        cand[wid] = (sh_cnt[0] > 0.5) ? sh_sum[0] / sh_cnt[0] : 3.402823466e38;
+    }
+}

@@ -1,0 +1,15 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// upscale_seed: seed[0..1] *= pc.i0 (scale between pyramid levels, usually 2).
+//   binding 0: seed (int[2])
+layout(local_size_x = 1) in;
+layout(binding = 0) buffer Seed { int seed[]; };
+
+void main()
+{
+    int s = pc.i0;
+    seed[0] *= s;
+    seed[1] *= s;
+}

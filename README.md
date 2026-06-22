@@ -39,6 +39,8 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 
 - CPU processing support
 - Multi-threaded RAW decoding
+- Vulkan GPU compute backend
+    - GPU device selection (`--gpu N`, `--list-gpus`)
 - Basic CPU performance optimizations for:
     - DNG decoding
     - picture alignment
@@ -66,7 +68,6 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Simple median (done) and mid-percentage merge (todo) options
 - More texture-preserving and noise-robust frame merging algorithm
 - Algorithms dedicated for STF synthesis
-- Vulkan processing support
 - Support for additional operating systems
 - CJK path support
 - User-configurable cache folder path
@@ -206,7 +207,8 @@ Some tests read sample files from `libburstmerge/test/samples/`. The `test_commo
 
 - Proprietary camera RAW input support depends on the Windows-only DNG conversion path used by `src/io/dng_converter.cpp`.
 - The repository contains the Adobe DNG SDK source under `3rdparty/dng_sdk` and builds it as an internal static library.
-- Vulkan headers are referenced by the core library include path, but Vulkan is not required for the current GNU/CPU build path.
+- Vulkan is linked into every build (`libvulkan-1.a` PUBLIC, SPIR-V embedded at configure-time). At runtime, `vulkan-1.dll` must be present (installed with GPU drivers). Use `--backend cpu` to skip GPU entirely.
+- Shader changes require a CMake configure re-run (SPIR-V is compiled by `3rdparty/glslang/glslangValidator.exe` and embedded into `spirv_embedded.inl`).
 
 ## Note
 

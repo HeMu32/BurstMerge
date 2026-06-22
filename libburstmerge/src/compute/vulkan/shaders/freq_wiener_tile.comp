@@ -1,0 +1,298 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// freq_wiener_tile: one workgroup per tile origin. Standard Wiener merge
+// (FrequencyMode::WienerFft). Direct 8x8 (or partial) 2D DFT in shared memory,
+// 7x7 phase sub-shift search, Wiener shrink, inverse DFT, raised-cosine
+// windowed accumulate into out/norm.
+//
+// Convention (matches PocketFFT Fft2D):
+//   forward: X[k] = sum_n x[n] exp(-2pi i k n / N)   (no normalization)
+//   inverse: x[n] = (1/N) sum_k X[k] exp(+2pi i k n / N)
+//
+// PC: w,h,channels = image; i0=stride i1=phase_x i2=phase_y i3=num_comp
+//     i4=stack_size i5=tile(8) i6=frame_stride(w*h*ch)
+//     f0=robustness_norm f1=read_noise
+// Dispatched in 4 phases (phase_x,phase_y)∈{0,1}² so that within each
+// dispatch workgroups are spaced 2*stride = tile apart (non-overlapping).
+// Barriers between dispatches make the out/norm accumulation safe.
+// binding 0: ref(NHWC) 1: cmps(packed NHWC) 2: out(NHWC) 3: norm(1ch)
+layout(local_size_x = 64) in;
+layout(binding = 0) readonly buffer Ref { float refp[]; };
+layout(binding = 1) readonly buffer Cmps { float cmps[]; };
+layout(binding = 2) buffer Out { float outv[]; };
+layout(binding = 3) buffer Norm { float normv[]; };
+
+const float kPi = 3.14159265358979323846;
+
+shared vec2 ref_sp[256];     // [c*64 + k]
+shared vec2 comp_sp[256];
+shared vec2 merged_sp[256];
+shared float sh_win[64];
+shared float sh_diff[64];
+
+float raisedCosine(int i, int n)
+{
+    if (n <= 1) return 1.0;
+    return float(0.5 - 0.5 * cos(2.0 * kPi * (float(i) + 0.5) / float(n)));
+}
+
+void main()
+{
+    int stride = pc.i0;
+    int pass_x = pc.i1;
+    int pass_y = pc.i2;
+    int num_comp = pc.i3;
+    int stack = pc.i4;
+    int tile = pc.i5;
+    int ff = pc.i6;
+    int ch = pc.channels;
+    int W = pc.w;
+    int H = pc.h;
+    int x0 = (int(gl_WorkGroupID.x) * 2 + pass_x) * stride;
+    int y0 = (int(gl_WorkGroupID.y) * 2 + pass_y) * stride;
+    if (x0 >= W || y0 >= H) return;
+    int tw = min(tile, W - x0);
+    int th = min(tile, H - y0);
+    uint tid = gl_LocalInvocationID.x;
+
+    // window
+    for (int yy = int(tid); yy < 64; yy += 64)
+    {
+        int wy = yy / tile;
+        int wx = yy % tile;
+        if (wy < th && wx < tw)
+            sh_win[yy] = raisedCosine(wy, th) * raisedCosine(wx, tw);
+        else
+            sh_win[yy] = 0.0;
+    }
+
+    // load ref (windowed) -> ref_sp (real, imag=0)
+    for (int c = 0; c < ch; ++c)
+    {
+        for (int yy = 0; yy < th; ++yy)
+        {
+            for (int xx = 0; xx < tw; ++xx)
+            {
+                int k = yy * tile + xx;
+                if (int(tid) == k)
+                {
+                    float v = refp[((y0 + yy) * W + (x0 + xx)) * ch + c] * sh_win[k];
+                    ref_sp[c * 64 + k] = vec2(v, 0.0);
+                    merged_sp[c * 64 + k] = vec2(v, 0.0);
+                }
+            }
+        }
+    }
+    barrier();
+
+    // forward DFT of ref per channel: thread -> output freq (fy,fx)
+    for (int c = 0; c < ch; ++c)
+    {
+        int fy = int(tid) / tile;
+        int fx = int(tid) % tile;
+        vec2 acc = vec2(0.0);
+        if (fy < th && fx < tw)
+        {
+            for (int y = 0; y < th; ++y)
+            {
+                for (int x = 0; x < tw; ++x)
+                {
+                    float ang = -2.0 * kPi * (float(fx) * float(x) / float(tw)
+                                              + float(fy) * float(y) / float(th));
+                    vec2 w = vec2(cos(ang), sin(ang));
+                    vec2 s = ref_sp[c * 64 + y * tile + x];
+                    acc += vec2(s.x * w.x - s.y * w.y, s.x * w.y + s.y * w.x);
+                }
+            }
+        }
+        barrier();
+        if (fy < th && fx < tw) ref_sp[c * 64 + int(tid)] = acc;
+        barrier();
+        // keep merged in sync with ref initially
+        if (fy < th && fx < tw) merged_sp[c * 64 + int(tid)] = acc;
+        barrier();
+    }
+
+    // rms over ref (sum_sq of max(0,sample) pre-window, averaged over channels)
+    float rms = 0.0;
+    for (int c = 0; c < ch; ++c)
+    {
+        float sum_sq = 0.0;
+        for (int yy = 0; yy < th; ++yy)
+            for (int xx = 0; xx < tw; ++xx)
+            {
+                float s = refp[((y0 + yy) * W + (x0 + xx)) * ch + c];
+                if (s < 0.0) s = 0.0;
+                sum_sq += s * s;
+            }
+        rms += 0.25 * sqrt(sum_sq) / float(tile);
+    }
+    rms /= float(max(1, ch));
+    float noise_norm = (rms + pc.f1) * float(tile * tile) * pc.f0;
+    float noise_term = max(1e-9, noise_norm);
+
+    const int grid = 7;
+    const int halfGrid = 3;
+    const float range = 0.5;
+
+    for (int comp = 0; comp < num_comp; ++comp)
+    {
+        int cbase = comp * ff;
+        // load comp windowed -> comp_sp
+        for (int c = 0; c < ch; ++c)
+            for (int yy = 0; yy < th; ++yy)
+                for (int xx = 0; xx < tw; ++xx)
+                {
+                    int k = yy * tile + xx;
+                    if (int(tid) == k)
+                    {
+                        float v = cmps[cbase + ((y0 + yy) * W + (x0 + xx)) * ch + c] * sh_win[k];
+                        comp_sp[c * 64 + k] = vec2(v, 0.0);
+                    }
+                }
+        barrier();
+        // forward DFT comp
+        for (int c = 0; c < ch; ++c)
+        {
+            int fy = int(tid) / tile;
+            int fx = int(tid) % tile;
+            vec2 acc = vec2(0.0);
+            if (fy < th && fx < tw)
+            {
+                for (int y = 0; y < th; ++y)
+                    for (int x = 0; x < tw; ++x)
+                    {
+                        float ang = -2.0 * kPi * (float(fx) * float(x) / float(tw)
+                                                  + float(fy) * float(y) / float(th));
+                        vec2 w = vec2(cos(ang), sin(ang));
+                        vec2 s = comp_sp[c * 64 + y * tile + x];
+                        acc += vec2(s.x * w.x - s.y * w.y, s.x * w.y + s.y * w.x);
+                    }
+            }
+            barrier();
+            if (fy < th && fx < tw) comp_sp[c * 64 + int(tid)] = acc;
+            barrier();
+        }
+
+        // phase search: thread -> shift index (0..48)
+        float my_diff = 3.4e38;
+        int my_shift = 0;
+        for (int s = int(tid); s < grid * grid; s += 64)
+        {
+            int iy = s / grid - halfGrid;
+            int ix = s % grid - halfGrid;
+            float sx = range * float(ix) / float(halfGrid);
+            float sy = range * float(iy) / float(halfGrid);
+            float dsum = 0.0;
+            for (int fy = 0; fy < th; ++fy)
+                for (int fx = 0; fx < tw; ++fx)
+                {
+                    float ang = -2.0 * kPi * (float(fx) * sx / float(tw)
+                                              + float(fy) * sy / float(th));
+                    vec2 phase = vec2(cos(ang), sin(ang));
+                    int k = fy * tile + fx;
+                    for (int c = 0; c < ch; ++c)
+                    {
+                        vec2 cs = comp_sp[c * 64 + k];
+                        vec2 shifted = vec2(cs.x * phase.x - cs.y * phase.y,
+                                            cs.x * phase.y + cs.y * phase.x);
+                        vec2 rs = ref_sp[c * 64 + k];
+                        vec2 d = rs - shifted;
+                        dsum += d.x * d.x + d.y * d.y;
+                    }
+                }
+            sh_diff[s] = dsum;
+        }
+        barrier();
+        // argmin (thread 0)
+        int best_shift = 0;
+        if (tid == 0)
+        {
+            float best = 3.4e38;
+            for (int s = 0; s < grid * grid; ++s)
+            {
+                if (sh_diff[s] < best) { best = sh_diff[s]; best_shift = s; }
+            }
+            sh_diff[0] = float(best_shift);
+        }
+        barrier();
+        best_shift = int(sh_diff[0]);
+
+        // merge each freq
+        int iy = best_shift / grid - halfGrid;
+        int ix = best_shift % grid - halfGrid;
+        float bsx = range * float(ix) / float(halfGrid);
+        float bsy = range * float(iy) / float(halfGrid);
+        int fy = int(tid) / tile;
+        int fx = int(tid) % tile;
+        if (fy < th && fx < tw)
+        {
+            float ang = -2.0 * kPi * (float(fx) * bsx / float(tw)
+                                      + float(fy) * bsy / float(th));
+            vec2 phase = vec2(cos(ang), sin(ang));
+            int k = int(tid);
+            float wmin = 0.0, wmax = 0.0, wsum = 0.0;
+            vec2 shifted[4];
+            float wc[4];
+            for (int c = 0; c < ch; ++c)
+            {
+                vec2 cs = comp_sp[c * 64 + k];
+                shifted[c] = vec2(cs.x * phase.x - cs.y * phase.y,
+                                  cs.x * phase.y + cs.y * phase.x);
+                vec2 rs = ref_sp[c * 64 + k];
+                vec2 d = rs - shifted[c];
+                float d2 = d.x * d.x + d.y * d.y;
+                wc[c] = d2 / (d2 + noise_term);
+                if (c == 0) { wmin = wc[c]; wmax = wc[c]; wsum = wc[c]; }
+                else { wmin = min(wmin, wc[c]); wmax = max(wmax, wc[c]); wsum += wc[c]; }
+            }
+            float weight = (ch >= 4) ? 0.5 * (wsum - wmin - wmax)
+                                     : wsum / float(max(1, ch));
+            weight = clampf(weight, 0.0, 1.0);
+            for (int c = 0; c < ch; ++c)
+            {
+                vec2 m = merged_sp[c * 64 + k];
+                vec2 rs = ref_sp[c * 64 + k];
+                m += (1.0 - weight) * shifted[c] + weight * rs;
+                merged_sp[c * 64 + k] = m;
+            }
+        }
+        barrier();
+    }
+
+    // inverse DFT merged per channel, accumulate windowed
+    float inv_stack = 1.0 / float(max(1, stack));
+    for (int c = 0; c < ch; ++c)
+    {
+        int fy = int(tid) / tile;
+        int fx = int(tid) % tile;
+        vec2 acc = vec2(0.0);
+        if (fy < th && fx < tw)
+        {
+            for (int y = 0; y < th; ++y)
+                for (int x = 0; x < tw; ++x)
+                {
+                    float ang = 2.0 * kPi * (float(fx) * float(x) / float(tw)
+                                             + float(fy) * float(y) / float(th));
+                    vec2 w = vec2(cos(ang), sin(ang));
+                    vec2 s = merged_sp[c * 64 + y * tile + x];
+                    acc += vec2(s.x * w.x - s.y * w.y, s.x * w.y + s.y * w.x);
+                }
+            acc *= inv_stack / float(tw * th);
+        }
+        barrier();
+        if (fy < th && fx < tw)
+        {
+            int yy = fy;
+            int xx = fx;
+            int k = int(tid);
+            float win = sh_win[k];
+            int gidx = ((y0 + yy) * W + (x0 + xx)) * ch + c;
+            outv[gidx] += acc.x;
+            if (c == 0) normv[(y0 + yy) * W + (x0 + xx)] += win;
+        }
+        barrier();
+    }
+}

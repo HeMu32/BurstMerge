@@ -1,6 +1,7 @@
 ﻿#include "burstmerge/internal/core/pipeline.h"
 
 #include "burstmerge/internal/core/float_image.h"
+#include "burstmerge/internal/core/gpu_pipeline.h"
 #include "burstmerge/internal/core/pipeline_align.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/pipeline_io.h"
@@ -202,10 +203,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
     {
         ResetProfiler();
         Report(progress, 0.0f, "Starting");
-        if (backend_ != BackendType::CPU)
+        if (backend_ != BackendType::CPU && backend_ != BackendType::Vulkan)
         {
             return
-            {false, "", "Stage 1 currently supports CPU backend only"};
+            {false, "", "Unsupported backend"};
         }
         if (input_paths.empty())
         {
@@ -275,62 +276,89 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 ri.metadata.mosaic_pattern_width = 0;
                 raw_wrappers.push_back(std::move(ri));
             }
+            // decoded[i].pixels (float, ~95 MB/frame for 3840x2160x3ch) are
+            // never read again — metadata has been extracted into raw_wrappers,
+            // and float_images has its own copies (uploaded to GPU). Release
+            // system RAM before the GPU pipeline begins.
+            for (auto& d : decoded) d.pixels.clear();
+            decoded.shrink_to_fit();
 
             Report(progress, PipelineConstants::kProgressAlignStart, "Aligning frames (RGB)");
-            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
-                settings_, cfa_period, progress);
 
             FloatImage merged;
-            if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
+            if (backend_ == BackendType::Vulkan)
             {
-                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (temporal average)");
-                TemporalDenoiseParams params;
-                params.strength = settings_.noise_reduction;
-                params.white_level = white_level;
-                params.black_level = 0.0f;
-                params.num_scales = static_cast<uint32_t>(aligned.size());
-                params.exposure_scales = nullptr;
-                merged = TemporalAverage(float_images[ref_idx], aligned, params);
-            } else if (settings_.merge_algo == MergeAlgorithm::TemporalMedian)
-            {
-                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (temporal median)");
-                TemporalDenoiseParams params;
-                params.strength = settings_.noise_reduction;
-                params.white_level = white_level;
-                params.black_level = 0.0f;
-                params.num_scales = static_cast<uint32_t>(aligned.size());
-                params.exposure_scales = nullptr;
-                merged = TemporalMedian(float_images[ref_idx], aligned, params);
-            } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
-            {
-                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
-                FrequencyMergeParams params;
-                params.mode = settings_.frequency_mode;
-                params.noise_reduction = settings_.noise_reduction;
-                params.tile_size = settings_.tile_size;
-                params.white_level = white_level;
-                params.black_level = 0.0f;
-                params.num_scales = static_cast<uint32_t>(aligned.size());
-                params.exposure_scales = nullptr;
-                merged = FrequencyMerge(float_images[ref_idx], aligned, params);
-            } else
-            {
-                Report(progress, PipelineConstants::kProgressMerge, "Merging frames (spatial)");
-                SpatialMergeParams params;
-                params.mode = settings_.spatial_mode;
-                params.noise_reduction = settings_.noise_reduction;
-                params.robustness = ComputeRobustness(settings_.noise_reduction);
-                float estimated_noise = EstimateNoiseFloor(float_images[ref_idx], 1);
-                float formula_noise = std::max(PipelineConstants::kNoiseFloorMin,
-                    settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
-                params.noise_floor = std::min(estimated_noise, formula_noise);
-                params.highlight_threshold = white_level * PipelineConstants::kHighlightFactor;
-                params.clip_threshold = white_level * PipelineConstants::kClipFactor;
-                params.guide_block_size = 2;
-                params.num_scales = static_cast<uint32_t>(aligned.size());
-                params.exposure_scales = nullptr;
-                merged = SpatialMerge(float_images[ref_idx], aligned, params);
+                // GPU pipeline for RGB: upload float data directly (no CFA),
+                // share the same align / merge / download tail as RAW.
+                // GpuRunBurstPipelineRgb releases float_images[i].data after
+                // uploading each frame to GPU.
+                Report(progress, PipelineConstants::kProgressMerge, "GPU: RGB pipeline");
+                merged = GpuRunBurstPipelineRgb(float_images, ref_idx, white_level, settings_, progress);
             }
+            else
+            {
+                std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
+                    settings_, cfa_period, progress);
+
+                // float_images[i] for i != ref_idx are now dead: BuildAlignedComparisons
+                // has already warped them into `aligned`. Free them before the merge
+                // stage, which allocates its own blur/guide/FFT buffers.
+                FloatImage ref_image = std::move(float_images[ref_idx]);
+                float_images.clear();
+                float_images.shrink_to_fit();
+
+                if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
+                {
+                    Report(progress, PipelineConstants::kProgressMerge, "Merging frames (temporal average)");
+                    TemporalDenoiseParams params;
+                    params.strength = settings_.noise_reduction;
+                    params.white_level = white_level;
+                    params.black_level = 0.0f;
+                    params.num_scales = static_cast<uint32_t>(aligned.size());
+                    params.exposure_scales = nullptr;
+                    merged = TemporalAverage(ref_image, aligned, params);
+                } else if (settings_.merge_algo == MergeAlgorithm::TemporalMedian)
+                {
+                    Report(progress, PipelineConstants::kProgressMerge, "Merging frames (temporal median)");
+                    TemporalDenoiseParams params;
+                    params.strength = settings_.noise_reduction;
+                    params.white_level = white_level;
+                    params.black_level = 0.0f;
+                    params.num_scales = static_cast<uint32_t>(aligned.size());
+                    params.exposure_scales = nullptr;
+                    merged = TemporalMedian(ref_image, aligned, params);
+                } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
+                {
+                    Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
+                    FrequencyMergeParams params;
+                    params.mode = settings_.frequency_mode;
+                    params.noise_reduction = settings_.noise_reduction;
+                    params.tile_size = settings_.tile_size;
+                    params.white_level = white_level;
+                    params.black_level = 0.0f;
+                    params.num_scales = static_cast<uint32_t>(aligned.size());
+                    params.exposure_scales = nullptr;
+                    merged = FrequencyMerge(ref_image, aligned, params);
+                } else
+                {
+                    Report(progress, PipelineConstants::kProgressMerge, "Merging frames (spatial)");
+                    SpatialMergeParams params;
+                    params.mode = settings_.spatial_mode;
+                    params.noise_reduction = settings_.noise_reduction;
+                    params.robustness = ComputeRobustness(settings_.noise_reduction);
+                    float estimated_noise = EstimateNoiseFloor(ref_image, 1);
+                    float formula_noise = std::max(PipelineConstants::kNoiseFloorMin,
+                        settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
+                    params.noise_floor = std::min(estimated_noise, formula_noise);
+
+                    params.highlight_threshold = white_level * PipelineConstants::kHighlightFactor;
+                    params.clip_threshold = white_level * PipelineConstants::kClipFactor;
+                    params.guide_block_size = 2;
+                    params.num_scales = static_cast<uint32_t>(aligned.size());
+                    params.exposure_scales = nullptr;
+                    merged = SpatialMerge(ref_image, aligned, params);
+                }
+            } // else (CPU RGB path)
 
             // Resolve output format (never Auto at this point).
             OutputFormat eff_fmt;
@@ -386,7 +414,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         std::string convert_ctx = output_path_or_dir.empty() ? "." : output_path_or_dir;
         Report(progress, 0.02f, "Preparing inputs");
         convert_dir_.clear();
-        std::vector<std::string> dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
+        std::vector<std::string> dng_paths;
+        { ProfileScope _ps("time.pipeline.prepare_dng_inputs");
+        dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
+        }
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
 // DNG read Phase 1: read all DNG files into memory (sequential I/O)
@@ -409,6 +440,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         Report(progress, kDecodeStart, "Decoding DNG files");
         std::vector<RawImage> images(dng_paths.size());
         {
+        ProfileScope _ps("time.pipeline.decode_dng");
             std::atomic<int> decoded_count{0};
             std::mutex pm;
             ParallelFor(dng_paths.size(), 1, [&](size_t begin, size_t end)
@@ -430,127 +462,149 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 }
             }, "decode_dng" /* named tag for profiler */);
         }
+        // DNG file bytes are no longer needed — decoded images hold their own
+        // copies. Release ~30-50 MB per frame of system RAM before the GPU
+        // pipeline begins.
+        file_buffers.clear();
+        file_buffers.shrink_to_fit();
+
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
         size_t ref_idx = SelectExposureRefIndex(images);
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
-
-        Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
-        std::vector<FloatImage> float_images = BuildFloatImages(images);
-        uint32_t hotpixel_period = (float_images.empty() || float_images[0].channels <= 1)
-            ? images[0].metadata.mosaic_pattern_width
-            : 1u;
-        RepairHotPixels(float_images,
-                        static_cast<float>(images[0].metadata.white_level),
-                        images[0].metadata.black_level,
-                        hotpixel_period);
-        // Log the CFA pattern so we can verify channel ordering
-        if (images[ref_idx].metadata.mosaic_pattern_width > 0)
+        FloatImage merged;
+        if (backend_ == BackendType::Vulkan)
         {
-            uint32_t pw = images[ref_idx].metadata.mosaic_pattern_width;
-            char buf[128];
-            int n = std::snprintf(buf, sizeof(buf), "CFA pattern (%ux%u):", pw, pw);
-            for (uint32_t i = 0; i < pw * pw; ++i)
-            {
-                n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %u",
-                    static_cast<unsigned>(images[ref_idx].metadata.mosaic_pattern[i]));
-            }
-            Report(progress, PipelineConstants::kProgressCfaLog, std::string(buf));
+            // GPU-native pipeline: prepare / align / merge all on Vulkan compute.
+            // Falls through to the shared CPU tail (bit-depth / exposure / DNG).
+            merged = GpuRunBurstPipeline(images, ref_idx, settings_, progress);
         }
-
-        Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
-        NormalizeFrames(float_images, images, ref_idx);
-        for (size_t i = 1; i < images.size(); ++i)
+        else
         {
-            if (!IsCompatibleForAverage(images[0], images[i]))
+            Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
+            std::vector<FloatImage> float_images = BuildFloatImages(images);
+            uint32_t hotpixel_period = (float_images.empty() || float_images[0].channels <= 1)
+                ? images[0].metadata.mosaic_pattern_width
+                : 1u;
+            RepairHotPixels(float_images,
+                            static_cast<float>(images[0].metadata.white_level),
+                            images[0].metadata.black_level,
+                            hotpixel_period);
+            // Log the CFA pattern so we can verify channel ordering
+            if (images[ref_idx].metadata.mosaic_pattern_width > 0)
             {
-                throw std::runtime_error("Input images differ in dimensions, format, or stride");
+                uint32_t pw = images[ref_idx].metadata.mosaic_pattern_width;
+                char buf[128];
+                int n = std::snprintf(buf, sizeof(buf), "CFA pattern (%ux%u):", pw, pw);
+                for (uint32_t i = 0; i < pw * pw; ++i)
+                {
+                    n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %u",
+                        static_cast<unsigned>(images[ref_idx].metadata.mosaic_pattern[i]));
+                }
+                Report(progress, PipelineConstants::kProgressCfaLog, std::string(buf));
             }
-        }
 
-        uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
-        std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, progress);
-        float ref_ev = images[ref_idx].metadata.ev_value;
-        float ref_bias = images[ref_idx].metadata.exposure_bias;
-        std::vector<float> exp_scales;
-        exp_scales.reserve(images.size());
-        for (size_t i = 0; i < images.size(); ++i)
-        {
-            if (i == ref_idx) continue;
-            float comp_ev = images[i].metadata.ev_value;
-            if (ref_ev > 0.0f && comp_ev > 0.0f)
+            Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
+            NormalizeFrames(float_images, images, ref_idx);
+            for (size_t i = 1; i < images.size(); ++i)
             {
-                exp_scales.push_back((ref_ev / comp_ev) *
-                    std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
+                if (!IsCompatibleForAverage(images[0], images[i]))
+                {
+                    throw std::runtime_error("Input images differ in dimensions, format, or stride");
+                }
+            }
+
+            uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
+            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, progress);
+
+            // float_images[i] for i != ref_idx are now dead: BuildAlignedComparisons
+            // has already warped them into `aligned`. Free them before the merge
+            // stage, which allocates its own blur/guide/FFT buffers.
+            FloatImage ref_image = std::move(float_images[ref_idx]);
+            float_images.clear();
+            float_images.shrink_to_fit();
+
+            float ref_ev = images[ref_idx].metadata.ev_value;
+            float ref_bias = images[ref_idx].metadata.exposure_bias;
+            std::vector<float> exp_scales;
+            exp_scales.reserve(images.size());
+            for (size_t i = 0; i < images.size(); ++i)
+            {
+                if (i == ref_idx) continue;
+                float comp_ev = images[i].metadata.ev_value;
+                if (ref_ev > 0.0f && comp_ev > 0.0f)
+                {
+                    exp_scales.push_back((ref_ev / comp_ev) *
+                        std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias));
+                } else
+                {
+                    exp_scales.push_back(1.0f);
+                }
+            }
+
+            //
+            // Merge algorithm selection: three mutually exclusive paths.
+            // Exposure scales (for clipped-pixel detection / temporal weighting)
+            // are computed unconditionally above.
+            //
+            if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
+            {
+                // TemporalAverage: simple exposure-weighted frame average.
+                // noise_reduction is ignored - averaging is averaging.
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal average");
+                TemporalDenoiseParams params;
+                params.strength = settings_.noise_reduction;   // stored but unused by TemporalAverage
+                params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
+                params.black_level = MeanBlackLevel(images[ref_idx].metadata);
+                params.num_scales = static_cast<uint32_t>(exp_scales.size());
+                params.exposure_scales = exp_scales.data();
+                merged = TemporalAverage(ref_image, aligned, params);
+            } else if (settings_.merge_algo == MergeAlgorithm::TemporalMedian)
+            {
+                // TemporalMedian: per-pixel median across all frames.
+                // Robust to outliers; noise_reduction / exposure_scales unused.
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal median");
+                TemporalDenoiseParams params;
+                params.strength = settings_.noise_reduction;
+                params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
+                params.black_level = MeanBlackLevel(images[ref_idx].metadata);
+                params.num_scales = static_cast<uint32_t>(exp_scales.size());
+                params.exposure_scales = exp_scales.data();
+                merged = TemporalMedian(ref_image, aligned, params);
+            } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
+            {
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames with frequency path");
+                FrequencyMergeParams params;
+                params.mode = settings_.frequency_mode;
+                params.noise_reduction = settings_.noise_reduction;
+                params.tile_size = settings_.tile_size;
+                params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
+                params.black_level = MeanBlackLevel(images[ref_idx].metadata);
+                params.num_scales = static_cast<uint32_t>(exp_scales.size());
+                params.exposure_scales = exp_scales.data();
+                merged = FrequencyMerge(ref_image, aligned, params);
             } else
             {
-                exp_scales.push_back(1.0f);
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames with spatial path");
+                SpatialMergeParams params;
+                params.mode = settings_.spatial_mode;
+                params.noise_reduction = settings_.noise_reduction;
+                params.robustness = ComputeRobustness(settings_.noise_reduction);
+                float estimated_noise = EstimateNoiseFloor(ref_image, std::max<uint32_t>(1, cfa_period));
+                float formula_noise = std::max(PipelineConstants::kNoiseFloorMin, settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
+                // Assertion: auto-estimate must not exceed formula value.
+                // Dark reference frames (Bkt) can produce inflated noise floor,
+                // which disables the robust weight formula and causes blur.
+                params.noise_floor = std::min(estimated_noise, formula_noise);
+                float avg_bl = MeanBlackLevel(images[ref_idx].metadata);
+                params.highlight_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kHighlightFactor;
+                params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kClipFactor;
+                params.guide_block_size = images[ref_idx].metadata.mosaic_pattern_width >= 2
+                    ? images[ref_idx].metadata.mosaic_pattern_width
+                    : 2;
+                params.num_scales = static_cast<uint32_t>(exp_scales.size());
+                params.exposure_scales = exp_scales.data();
+                merged = SpatialMerge(ref_image, aligned, params);
             }
-        }
-
-        FloatImage merged;
-        //
-        // Merge algorithm selection: three mutually exclusive paths.
-        // Exposure scales (for clipped-pixel detection / temporal weighting)
-        // are computed unconditionally above.
-        //
-        if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
-        {
-            // TemporalAverage: simple exposure-weighted frame average.
-            // noise_reduction is ignored - averaging is averaging.
-            Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal average");
-            TemporalDenoiseParams params;
-            params.strength = settings_.noise_reduction;   // stored but unused by TemporalAverage
-            params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
-            params.black_level = MeanBlackLevel(images[ref_idx].metadata);
-            params.num_scales = static_cast<uint32_t>(exp_scales.size());
-            params.exposure_scales = exp_scales.data();
-            merged = TemporalAverage(float_images[ref_idx], aligned, params);
-        } else if (settings_.merge_algo == MergeAlgorithm::TemporalMedian)
-        {
-            // TemporalMedian: per-pixel median across all frames.
-            // Robust to outliers; noise_reduction / exposure_scales unused.
-            Report(progress, PipelineConstants::kProgressMerge, "Merging frames with temporal median");
-            TemporalDenoiseParams params;
-            params.strength = settings_.noise_reduction;
-            params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
-            params.black_level = MeanBlackLevel(images[ref_idx].metadata);
-            params.num_scales = static_cast<uint32_t>(exp_scales.size());
-            params.exposure_scales = exp_scales.data();
-            merged = TemporalMedian(float_images[ref_idx], aligned, params);
-        } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
-        {
-            Report(progress, PipelineConstants::kProgressMerge, "Merging frames with frequency path");
-            FrequencyMergeParams params;
-            params.mode = settings_.frequency_mode;
-            params.noise_reduction = settings_.noise_reduction;
-            params.tile_size = settings_.tile_size;
-            params.white_level = static_cast<float>(images[ref_idx].metadata.white_level);
-            params.black_level = MeanBlackLevel(images[ref_idx].metadata);
-            params.num_scales = static_cast<uint32_t>(exp_scales.size());
-            params.exposure_scales = exp_scales.data();
-            merged = FrequencyMerge(float_images[ref_idx], aligned, params);
-        } else
-        {
-            Report(progress, PipelineConstants::kProgressMerge, "Merging frames with spatial path");
-            SpatialMergeParams params;
-            params.mode = settings_.spatial_mode;
-            params.noise_reduction = settings_.noise_reduction;
-            params.robustness = ComputeRobustness(settings_.noise_reduction);
-            float estimated_noise = EstimateNoiseFloor(float_images[ref_idx], std::max<uint32_t>(1, cfa_period));
-            float formula_noise = std::max(PipelineConstants::kNoiseFloorMin, settings_.noise_reduction * PipelineConstants::kNoiseFormulaMul);
-            // Assertion: auto-estimate must not exceed formula value.
-            // Dark reference frames (Bkt) can produce inflated noise floor,
-            // which disables the robust weight formula and causes blur.
-            params.noise_floor = std::min(estimated_noise, formula_noise);
-            float avg_bl = MeanBlackLevel(images[ref_idx].metadata);
-            params.highlight_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kHighlightFactor;
-            params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl) * PipelineConstants::kClipFactor;
-            params.guide_block_size = images[ref_idx].metadata.mosaic_pattern_width >= 2
-                ? images[ref_idx].metadata.mosaic_pattern_width
-                : 2;
-            params.num_scales = static_cast<uint32_t>(exp_scales.size());
-            params.exposure_scales = exp_scales.data();
-            merged = SpatialMerge(float_images[ref_idx], aligned, params);
         }
 
 // Compute bit-depth rescaling factor (must happen in black-subtracted space)
@@ -606,9 +660,20 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             // Original path (bit_depth > 10): restore the mean black level so
             // that the DNG pixel values include the black offset.  The decoder
             // will subtract it later using the BlackLevel metadata tag.
+            //
+            // IMPORTANT: scaled_bl is rounded to the nearest integer here so
+            // that the BlackLevel tag stored in the output DNG is always a
+            // clean integer value.  When sensor_white does not divide evenly
+            // into target_white (e.g. 16383 -> 4095 for 14-bit to 12-bit),
+            // ref_bl * bit_scale can be fractional (e.g. 127.976).  Some RAW
+            // converters (ACR / Lightroom) render fractional BlackLevels
+            // incorrectly in deep shadows, producing a visible red colour
+            // cast after exposure boost.  Rounding to an integer avoids the
+            // issue while staying consistent with the lround quantisation
+            // applied later by FloatImageToUint16HostBuffer.
             if (ref_bl > 1.0f)
             {
-                float scaled_bl = ref_bl * bit_scale;
+                float scaled_bl = std::round(ref_bl * bit_scale);
                 if (bit_scale != 1.0f)
                 {
                     for (float& v : merged.data)
@@ -674,8 +739,15 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
             if (has_per_channel)
             {
+                // Round each per-channel delta to the nearest integer so the
+                // per-channel BlackLevels stored in the DNG are all integers
+                // (see the matching rounding applied to the mean scaled_bl and
+                // to output.metadata.black_level further below).
                 float delta[4];
-                for (int i = 0; i < 4; ++i) delta[i] = (bl_ch[i] - ref_bl) * bit_scale;
+                for (int i = 0; i < 4; ++i)
+                {
+                    delta[i] = std::round((bl_ch[i] - ref_bl) * bit_scale);
+                }
                 for (uint32_t y = 0; y < merged.height; ++y)
                 {
                     for (uint32_t x = 0; x < merged.width; ++x)
@@ -759,13 +831,22 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 // BlackLevel values by bit_scale so they match the rescaled
                 // pixel data.  The decoder subtracts these values to recover
                 // the linear light signal.
+                //
+                // Each value is rounded to the nearest integer so the
+                // BlackLevel tag stored in the DNG is always an integer.
+                // Fractional BlackLevels (e.g. 127.976 when scaling 512 by
+                // 4095/16383) trigger a shadow rendering bug in some RAW
+                // converters (ACR / Lightroom) that floods deep shadows with
+                // red after exposure boost.  See the matching rounding in the
+                // pixel-data restoration path above for details.
                 if (bit_scale != 1.0f && ref_bl > 1.0f)
                 {
                     for (int i = 0; i < 4; ++i)
                     {
                         if (output.metadata.black_level[i] > 0.0f)
                         {
-                            output.metadata.black_level[i] *= bit_scale;
+                            output.metadata.black_level[i] =
+                                std::round(output.metadata.black_level[i] * bit_scale);
                         }
                     }
                 }

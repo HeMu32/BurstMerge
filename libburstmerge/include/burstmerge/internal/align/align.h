@@ -87,6 +87,14 @@ AlignmentResult EstimateTranslation(const FloatImage& reference,
                                     const FloatImage& comparison,
                                     const AlignParams& params);
 
+// Overload that accepts a pre-built reference pyramid, avoiding redundant
+// pyramid rebuilds when aligning multiple frames against the same reference.
+// `reference` (full-resolution) is still needed for RefineTileField.
+AlignmentResult EstimateTranslation(const std::vector<FloatImage>& ref_pyr,
+                                    const FloatImage& reference,
+                                    const FloatImage& comparison,
+                                    const AlignParams& params);
+
 AlignmentResult EstimateFrequencyTileField(
     const std::vector<FloatImage>& ref_pyr,
     const std::vector<FloatImage>& cmp_pyr,

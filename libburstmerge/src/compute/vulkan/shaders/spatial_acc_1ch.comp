@@ -1,0 +1,79 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+float clamp01(float v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+
+float highlightWeight(int linear_mode, float diff, float robust, float nf, float minw)
+{
+    const float relaxed = 2.5;
+    if (linear_mode != 0)
+    {
+        float base = max(1.0, nf / max(0.001, robust));
+        float thr = relaxed * base;
+        return diff >= thr ? 0.0 : clamp01(1.0 - diff / thr);
+    }
+    float ratio = diff / max(1.0, nf * relaxed);
+    float w = 1.0 / (1.0 + ratio * ratio * robust);
+    return w < minw ? minw : w;
+}
+
+// spatial_acc_1ch: accumulate ONE comparison for single-channel images.
+//   binding 0: acc (inout 1ch)        binding 1: wsum (inout 1ch)
+//   binding 2: ref_guide (1ch)        binding 3: cmp (1ch)
+//   binding 4: cmp_guide (1ch)
+//   pc.i4 = linear_mode, f0=robustness f1=noise_floor f2=highlight_threshold
+//   f3=clip_threshold f4=min_cmp_weight f5=this comparison's exposure_scale
+layout(binding = 0) buffer Acc { float acc[]; };
+layout(binding = 1) buffer Wsum { float wsum[]; };
+layout(binding = 2) readonly buffer RefG { float refg[]; };
+layout(binding = 3) readonly buffer Cmp { float cmpp[]; };
+layout(binding = 4) readonly buffer CmpG { float cmpg[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int i = y * pc.w + x;
+    float ref_guide = refg[i];
+    float cmp_guide = cmpg[i];
+    float cmp_v = cmpp[i];
+
+    int linear_mode = pc.i4;
+    float robust = pc.f0;
+    float nf = pc.f1;
+    float hl = pc.f2;
+    float clip = pc.f3;
+    float minw = pc.f4;
+    float scale = pc.f5;
+
+    float w;
+    bool cmp_clipped = (clip > 0.0 && scale > 0.0 && (cmp_v / scale) >= clip);
+    if (cmp_clipped)
+    {
+        w = 0.0;
+    }
+    else if (ref_guide >= hl || cmp_guide >= hl)
+    {
+        float diff = abs(cmp_guide - ref_guide);
+        w = highlightWeight(linear_mode, diff, robust, nf, minw);
+    }
+    else
+    {
+        float diff = abs(cmp_guide - ref_guide);
+        if (linear_mode != 0)
+        {
+            w = (robust == 0.0) ? 1.0 : clamp01(1.0 - diff / max(1.0, nf / robust));
+        }
+        else
+        {
+            float ratio = diff / nf;
+            w = 1.0 / (1.0 + ratio * ratio * robust);
+            w = w < minw ? minw : w;
+        }
+    }
+    acc[i] += cmp_v * w;
+    wsum[i] += w;
+}

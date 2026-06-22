@@ -1,4 +1,5 @@
 #include "burstmerge/api.h"
+#include "burstmerge/internal/core/gpu_pipeline.h"
 #include "burstmerge/internal/core/pipeline.h"
 #include "burstmerge/internal/io/dng_io.h"
 #include "cxxopts.hpp"
@@ -143,6 +144,9 @@ int main(int argc, char* argv[]) {
         ("align-gamma", "Gamma correction for alignment grayscale (default 1.0=off). Value < 1.0 will boost darkness", cxxopts::value<float>()->default_value("1.0"))
         ("smooth-tile-field", "Enable median smoothing of alignment tile fields", cxxopts::value<bool>()->default_value("false"))
         ("output-format", "Output format: auto, png, jpg, bmp, tiff, dng", cxxopts::value<std::string>()->default_value("auto"))
+        ("backend", "Compute backend: cpu, vulkan (vulkan requires a GPU)", cxxopts::value<std::string>()->default_value("cpu"))
+        ("gpu-device,gpu", "Select GPU by index (use --list-gpus to see available, -1 = auto)", cxxopts::value<int>()->default_value("-1"))
+        ("list-gpus", "List available GPU devices and exit")
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -159,12 +163,32 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
+    if (args.count("list-gpus")) {
+        auto gpus = burstmerge::GpuEnumerateDevices();
+        if (gpus.empty()) {
+            std::cout << "No Vulkan GPU devices found." << std::endl;
+        } else {
+            std::cout << "Available GPU devices:" << std::endl;
+            for (size_t i = 0; i < gpus.size(); ++i)
+                std::cout << "  [" << i << "] " << gpus[i] << std::endl;
+        }
+        return 0;
+    }
+
     if (!args.count("input") && !args.count("folder")) {
         std::cerr << "No inputs. Use -i file1.dng -i file2.dng ... or -f path\\to\\folder" << std::endl;
         return 2;
     }
 
-    burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+    burstmerge::BackendType backend = burstmerge::BackendType::CPU;
+    if (args.count("backend")) {
+        std::string bstr = args["backend"].as<std::string>();
+        if (bstr == "vulkan" || bstr == "gpu") backend = burstmerge::BackendType::Vulkan;
+        else if (bstr == "cpu") backend = burstmerge::BackendType::CPU;
+        else { std::cerr << "Unknown backend: " << bstr << std::endl; return 2; }
+    }
+    burstmerge::BurstMerge bm(backend);
+    std::cout << "Backend: " << (backend == burstmerge::BackendType::Vulkan ? "Vulkan" : "CPU") << std::endl;
     std::vector<std::string> inputs;
     if (args.count("input")) {
         auto direct_inputs = args["input"].as<std::vector<std::string>>();
@@ -243,6 +267,7 @@ int main(int argc, char* argv[]) {
     }
     settings.align_gamma = args["align-gamma"].as<float>();
     settings.smooth_tile_field = args["smooth-tile-field"].as<bool>();
+    settings.gpu_device_index = args["gpu-device"].as<int>();
     if (!ParseOutputFormat(args["output-format"].as<std::string>(), settings.output_format)) {
         std::cerr << "Invalid output format (use auto, png, jpg, bmp, tiff, or dng)" << std::endl;
         return 2;
@@ -252,7 +277,6 @@ int main(int argc, char* argv[]) {
     const std::string output_target = args["output"].as<std::string>();
 
     std::cout << "BurstMerge CLI" << std::endl;
-    std::cout << "Backend: CPU" << std::endl;
     std::cout << "Merge: " << MergeAlgoName(settings.merge_algo) << std::endl;
     std::cout << "Tile size: " << settings.tile_size << std::endl;
     std::cout << "Noise reduction: " << settings.noise_reduction << std::endl;

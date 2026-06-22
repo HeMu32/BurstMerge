@@ -33,6 +33,16 @@ add_burstmerge_test(test_common_rgb_fmt)
 target_sources(test_common_rgb_fmt PRIVATE test_aux.cpp)
 set_tests_properties(test_common_rgb_fmt PROPERTIES TIMEOUT 600)
 
+# GPU pipeline tests (stage 2+): separated from stage0/stage1 CPU tests.
+# Requires a Vulkan-capable GPU at runtime.
+add_burstmerge_test(test_stage2)
+set_tests_properties(test_stage2 PROPERTIES TIMEOUT 600)
+
+# test_stage3: CPU vs GPU dual-path consistency (end-to-end DNG comparison).
+# Requires Adobe DNG Converter + Vulkan GPU at runtime.
+add_burstmerge_test(test_stage3)
+set_tests_properties(test_stage3 PROPERTIES TIMEOUT 900)
+
 set(TEST_COMMON_RGB_FMT_LD_PATH "${PROJECT_SOURCE_DIR}/3rdparty/libtiff/install/bin")
 # Seprator for PATH environment variable: ";" on Windows, ":" on Unix
 if (WIN32)

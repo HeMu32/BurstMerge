@@ -1,0 +1,72 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+float clamp01(float v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+
+// temporal_median: per-pixel per-channel median across reference and
+// non-clipped comparisons. Comparisons are packed contiguously in one SSBO.
+//   binding 0: ref (NHWC), binding 1: out (NHWC)
+//   binding 2: cmps (packed NHWC, num_comp frames of stride pc.i1 floats)
+//   binding 3: clip_scaled (float[num_comp])
+//   pc.i0 = num_comp, pc.i1 = frame stride (w*h*channels), pc.f0 = clip_threshold
+layout(binding = 0) readonly buffer Ref { float refp[]; };
+layout(binding = 1) buffer Out { float outv[]; };
+layout(binding = 2) readonly buffer Cmps { float cmps[]; };
+layout(binding = 3) readonly buffer Clip { float clipv[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int ch = pc.channels;
+    int num_comp = pc.i0;
+    int frame_f = pc.i1;
+    float clip = pc.f0;
+    int base = (y * pc.w + x) * ch;
+
+    // per-comparison clipped flag (max channel vs clip_scaled[k])
+    bool clipped[64];
+    for (int k = 0; k < num_comp && k < 64; ++k)
+    {
+        float mx = 0.0;
+        int fbase = k * frame_f + base;
+        for (int c = 0; c < ch; ++c)
+        {
+            float v = cmps[fbase + c];
+            if (c == 0 || v > mx) mx = v;
+        }
+        clipped[k] = (mx >= clipv[k]);
+    }
+
+    for (int c = 0; c < ch; ++c)
+    {
+        int ci = base + c;
+        float refv = refp[ci];
+        if (clip > 0.0 && refv >= clip)
+        {
+            outv[ci] = refv;
+            continue;
+        }
+        float buf[64];
+        int cnt = 0;
+        buf[cnt++] = refv;
+        for (int k = 0; k < num_comp && k < 64; ++k)
+            if (!clipped[k]) buf[cnt++] = cmps[k * frame_f + ci];
+
+        if (cnt == 1) { outv[ci] = buf[0]; continue; }
+        // insertion sort (cnt small)
+        for (int a = 1; a < cnt; ++a)
+        {
+            float key = buf[a];
+            int b = a - 1;
+            while (b >= 0 && buf[b] > key) { buf[b + 1] = buf[b]; --b; }
+            buf[b + 1] = key;
+        }
+        int mid = cnt / 2;
+        if ((cnt & 1) != 0) outv[ci] = buf[mid];
+        else outv[ci] = 0.5 * (buf[mid - 1] + buf[mid]);
+    }
+}

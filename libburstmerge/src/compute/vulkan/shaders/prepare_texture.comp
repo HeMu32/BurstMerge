@@ -1,0 +1,61 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// prepare_texture: raw mosaic -> float plane image.
+// Combines ConvertMosaicToPlaneImage + black-level subtract + exposure scale.
+//
+// Supports two input formats selected by pc.i9:
+//   pc.i9 = 0 (default): packed uint16 input. The GPU reads and converts
+//     uint16→float, eliminating the CPU-side conversion loop. Upload raw
+//     uint16 data via CreateBufferFromU16.
+//   pc.i9 = 1: float32 input. Data was pre-converted on CPU (the legacy
+//     path). Upload via CreateBufferFromFloats.
+//
+//   binding 0: src  (uint[] storage buffer; interpreted per pc.i9)
+//   binding 1: dst  (float, NHWC pc.channels2, dims pc.w2 x pc.h2)
+//   pc.i0 = cfa_period
+//   pc.f1 = mean black level
+//   pc.f2 = exposure scale (1.0 for reference frame)
+//   pc.i9 = input format (0=uint16, 1=float32)
+// dispatch: (ceil(pw/8), ceil(ph/8), period*period) with local 8x8
+layout(binding = 0) readonly buffer Src { uint src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int ox = int(gl_GlobalInvocationID.x);
+    int oy = int(gl_GlobalInvocationID.y);
+    int c  = int(gl_GlobalInvocationID.z);
+    int period = pc.i0;
+    int totalC = period * period;
+    if (c >= totalC) return;
+    if (ox >= pc.w2 || oy >= pc.h2) return;
+
+    int px = c % period;
+    int py = c / period;
+    int x = ox * period + px;
+    int y = oy * period + py;
+
+    float v = 0.0;
+    if (x < pc.w && y < pc.h)
+    {
+        int idx = y * pc.w + x;
+        if (pc.i9 == 0)
+        {
+            // uint16 mode: two uint16 values packed per uint32 word (little-endian).
+            uint word = src[idx >> 1];
+            uint u16val = (idx & 1) == 0 ? (word & 0xFFFFu) : (word >> 16);
+            v = float(u16val);
+        }
+        else
+        {
+            // float32 mode: reinterpret uint bits as float.
+            v = uintBitsToFloat(src[idx]);
+        }
+    }
+    v -= pc.f1;
+    v *= pc.f2;
+    dst[(oy * pc.w2 + ox) * pc.channels2 + c] = v;
+}
