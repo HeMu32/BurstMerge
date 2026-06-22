@@ -14,7 +14,7 @@
 
 ### 解法
 - 不依赖系统 SDK. 在 `3rdparty/glslang/` 内 vendored 一份 `glslangValidator.exe`.
-- 该二进制来源于本机已存在的 Android SDK emulator (`D:\AndroidSdk\emulator\lib64\vulkan\glslangValidator.exe`, 版本 7.8, 支持 GLSL 4.60 + `GL_GOOGLE_include_directive`), 拷入项目即可. 它能正确编译本项目全部 31 个 `.comp`.
+- 该二进制来源于本机已存在的 Android SDK emulator (`D:\AndroidSdk\emulator\lib64\vulkan\glslangValidator.exe`, 版本 7.8, 支持 GLSL 4.60 + `GL_GOOGLE_include_directive`), 拷入项目即可. 它能正确编译本项目全部 33 个 `.comp`.
 - 若新机器连这个来源都没有: 从 GitHub `KhronosGroup/glslang` releases 下载 `glslang-<ver>-windows-x64-Release.zip` (注意 release asset 命名随版本变化, 14.x 起为 `glslang-<ver>-windows-x64-Release.zip`, 更早为 `glslang-master-windows-x64-Release.zip`). 只需 `glslangValidator.exe` 单文件.
 
 ### 为什么不在线下载放进仓库
@@ -211,8 +211,8 @@ build-time 生成头会让 `vulkan_backend.cpp` 依赖一个 generated 文件, C
 
 ## 11. descriptor set 统一布局
 
-全部 31 个 shader 共用**一个** `VkDescriptorSetLayout`:
-- binding 0..6: `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER` (通用图像数据, NHWC float)
+全部 33 个 shader 共用**一个** `VkDescriptorSetLayout`:
+- binding 0..7: `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER` (通用图像数据, NHWC float)
 - binding 7: storage buffer (复用做 binomial 权重, 见第 4 节)
 - (早期方案曾用 binding 8 = uniform, 但为统一性最终全部 storage)
 
@@ -234,3 +234,29 @@ build-time 生成头会让 `vulkan_backend.cpp` 依赖一个 generated 文件, C
 | glslangValidator | `3rdparty/glslang/glslangValidator.exe` |
 | 完整 MinGW 导入库 | `3rdparty/vulkan/Lib/libvulkan-1.a` (dlltool 重生成) |
 | CMake 接入 | `libburstmerge/CMakeLists.txt` (embed + PUBLIC 链接 + generated include 路径) |
+
+### §9. 性能与内存优化经验
+
+**下载 staging buffer (NVIDIA HOST_CACHED)**:
+- 默认 `HOST_VISIBLE|HOST_COHERENT` 在 NVIDIA 上可能是 DEVICE_LOCAL BAR (uncached), CPU 读取仅 ~100 MB/s.
+- 改为优先选 `HOST_VISIBLE|HOST_CACHED` 内存类型 (RTX 3080: type 4, cached system RAM), 读取带宽提升 50× (56MB: 586ms→3ms).
+- 回退: 若无 CACHED 类型, 接受任意 HOST_VISIBLE.
+
+**uint16 GPU 端转换**:
+- 默认上传原始 uint16 (`CreateBufferFromU16`), `prepare_texture` shader 在 GPU 端转 float — 消除 CPU 端 65M 次/帧转换循环.
+- `prepare_texture.comp` 通过 `pc.i9` 选择输入格式 (0=uint16, 1=float32). CPU 回退路径保留 (`use_cpu_fp32_convert` 标志).
+
+**系统内存释放**:
+- GPU 上传完成后, 比较帧的 `pixels` (HostBuffer) 和 `dng_negative` (DngNegativeHolder) 立即释放. 参考帧保留供 DNG 写出.
+- `file_buffers` (DNG 文件字节) 在解码后立即清空.
+- 实测 15 帧 65MP RAW: GPU 对齐/合并期间工作集 4.7→1.8 GB.
+
+**VRAM 跟踪**:
+- `VulkanBackend` 内置 `vram_live`/`vram_peak` 计数器, 析构时打印峰值和泄露.
+
+### §10. GPU 管线架构 (GpuPipelineCore)
+
+`GpuPipelineCore` (`gpu_pipeline.cpp`) 是 RAW 和 RGB 共享的核心, 负责对齐+合并+下载:
+- `GpuRunBurstPipeline` (RAW): prepare_texture (CFA deinterleave + uint16→float + black level) → 调用 Core
+- `GpuRunBurstPipelineRgb` (RGB): 直接上传 float (RecordUpload 批量) → 调用 Core
+- 两者在上传后均释放源数据的系统内存, 仅保留 GPU 缓冲.

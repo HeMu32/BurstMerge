@@ -44,14 +44,14 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	- `tools/dump_dng.cpp`: 独立的 DNG 像素检查器, **不在 CMake 中构建**, 需手动 g++ 编译. 
 
 ## 双层 API
-	- C++ 主入口: `burstmerge::BurstMerge` (PIMPL, `include/burstmerge/api.h`), 委托给 `PipelineOrchestrator` (`src/core/pipeline.cpp:192`). 
+	- C++ 主入口: `burstmerge::BurstMerge` (PIMPL, `include/burstmerge/api.h`), 委托给 `PipelineOrchestrator` (`src/core/pipeline.cpp:196`). 
 	- C ABI: `BM_*` 系列函数 (`include/burstmerge/api_c.h`), 为未来 Python/Rust/C# GUI 预留. 
 
-## 核心处理管线 (CPU RAW 路径, `pipeline.cpp:192`)
+## 核心处理管线 (`pipeline.cpp:196`)
 顺序大致为:
-	1. 后端守卫: 非 CPU 直接返回错误 (`pipeline.cpp:202`, "Stage 1 currently supports CPU backend only"). 
+	1. 后端守卫: 仅接受 CPU 和 Vulkan 后端 (`pipeline.cpp:206`, "Unsupported backend"). 
 	2. `ClassifyInputs`: RAW / Rgb / Mixed; Mixed 会递归过滤掉非 RAW 后走 RAW 路径. 
-	3. RGB 分支: `io::ReadImage` 逐帧解码 → 参考帧取 `size()/2` → `BuildRgbImages` → 对齐 → 合并 → 写出. 
+	3. RGB 分支: `io::ReadImage` 逐帧解码 → 参考帧取 `size()/2` → `BuildRgbImages`. 若 `backend==Vulkan`, 调 `GpuRunBurstPipelineRgb` 上传到 GPU 并在对齐/合并后返回; 否则走 CPU 对齐→合并. → 写出. 
 	4. RAW 分支:
 		- `PrepareDngInputs` (`pipeline_io.cpp:106`): 非 DNG 的 RAW 在 Windows 上调 Adobe DNG Converter 转换. 
 		- 两阶段读取: 先顺序读到内存, 再 `ReadDngFromBuffer` 并行解码 (`ParallelFor` 带 `decode_dng` tag). 
@@ -90,9 +90,11 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 ==============================
 Vulkan GPU 后端 (已实现)
 ==============================
-	- 入口: `GpuRunBurstPipeline()` (`libburstmerge/src/core/gpu_pipeline.cpp`), 由 `pipeline.cpp` 在 `backend_==Vulkan` 时调用. 返回 merged plane `FloatImage` (与 CPU merge 阶段输出同构), 复用 CPU 尾部 (bit-depth/exposure/mosaic/DNG write). 
-	- 后端抽象: `burstmerge::vulkan::VulkanBackend` (`include/burstmerge/internal/compute/vulkan_backend.h` + `src/compute/vulkan/vulkan_backend.cpp`). 提供 buffer 创建/上传/下载/fill, UBO, dispatch (录制式 command buffer: `BeginFrame`/`Dispatch`/`FlushFrame`), 每个 dispatch 后插 compute→compute memory barrier. 仅在算法固有 SyncPoint (noise_floor reduce, mismatch mean) 才 FlushFrame 读回. 
-	- 数据布局: 所有 GPU 图像数据为 `std430` storage buffer 的 `float[]` (NHWC, 与 `FloatImage` 一致). 输入 uint16 mosaic 在上传时转 float, `prepare_texture` shader 一步完成 deinterleave+减黑电平+曝光缩放. 
+	- 入口: `GpuRunBurstPipeline()` (`gpu_pipeline.cpp`) 用于 RAW, `GpuRunBurstPipelineRgb()` 用于 RGB. 两者各自负责数据准备 (RAW: uint16 上传+CFA deinterleave; RGB: float 上传), 然后调用共享核心 `GpuPipelineCore()` 完成 to_grayscale→align→merge→download. 由 `pipeline.cpp` 在 `backend_==Vulkan` 时调用. 返回 merged plane `FloatImage`, 复用 CPU 尾部.
+	- 后端抽象: `burstmerge::vulkan::VulkanBackend` (`include/burstmerge/internal/compute/vulkan_backend.h` + `src/compute/vulkan/vulkan_backend.cpp`). 提供 buffer 创建/上传/下载/fill, UBO, dispatch (录制式: `BeginFrame`/`Dispatch`/`FlushFrame`), `CopyBufferRegion` (帧内 buffer 拷贝), `RecordUpload` (帧内批量上传), `DeferredDestroy` (延迟释放), `EnumerateDevices`/`Initialize(device_index)` (多 GPU 选择). VRAM 峰值跟踪 (`vram_peak`/`vram_live` 计数器, 析构时报告). 仅在算法固有 SyncPoint (noise_floor reduce, mismatch mean) 才 FlushFrame 读回.
+	- 数据布局: 所有 GPU 图像数据为 `std430` storage buffer 的 `float[]` (NHWC, 与 `FloatImage` 一致). 输入 uint16 mosaic 默认由 `CreateBufferFromU16` 上传原始 uint16 数据, `prepare_texture` shader 在 GPU 端完成 uint16→float+deinterleave+减黑电平+曝光缩放 (消除 CPU 端转换瓶颈). Shader 支持双模式 (`pc.i9`): 0=uint16 输入 (默认), 1=float32 输入 (CPU 转换, 保留为回退路径).
+	- 系统内存管理: GPU 上传完成后立即释放比较帧的系统 RAM — RAW 路径释放 `pixels` (HostBuffer) 和 `dng_negative` (DNG SDK 对象, 通过 RawMetadata move-assignment 触发 DestroyNegativeHolder); RGB 路径清空 `float_images[i].data`. 仅保留参考帧. DNG 文件字节 (`file_buffers`) 在解码后立即清空. 实测 15 帧 65MP RAW 在 GPU 对齐/合并期间工作集从 ~4.7 GB 降至 ~1.8 GB.
+	- 下载优化: 持久化 staging buffer 优先使用 `HOST_CACHED` 内存类型 (NVIDIA RTX 3080: type 4), 避免 DEVICE_LOCAL BAR 的 uncached 读取 (56MB 读取: 586ms→3ms). 
 	- Shader 集 (33 个 `.comp`, `src/compute/vulkan/shaders/`): 覆盖全部算法 — texture ops (prepare/downsample/box_blur/binomial_sep/to_grayscale/block_mean_guide/plane_to_mosaic/copy/fill/scale/add), align (sad_global/select_min/upscale_seed/tile_sad/tile_select/tile_refine_diag/dense_level/warp_tilefield/warp_translate), spatial (spatial_acc_multi/spatial_acc_1ch/normalize_div), temporal (temporal_acc_exposure/temporal_median), frequency (freq_laplacian/freq_wiener_tile — 后者含直接 8×8 DFT + 7×7 相位搜索 + Wiener 收缩, 4-phase 非重叠 dispatch), exposure (exposure_curve_global/exposure_reinhard_local/max_to_gray), reductions (extract/reduce_scalar), format (float_to_uint16). 共用 push-constant 块 `ShaderPC` (14 int + 8 float = 88B, 见 `common.glsl`). **全部单精度 float, 无 double, shaderFloat64 不启用**.
 	- 对齐 (全 GPU, 零读回): 灰度金字塔 (2-then-4 模式) → 逐层 coarse-to-fine SAD 搜索 (sad_global 每 candidate 一个 workgroup, 256 线程 reduce; select_min 在 SSBO 内更新 seed, 无 CPU 读回; tie-breaking 匹配 CPU 字典序) → standard 路径 diagonal-wavefront tile 细化 (tile_refine_diag) 或 dense 路径逐层 propagate/correct/search (dense_level) → warp_tilefield 双线性混合 4 角 tile 位移. 
 	- Descriptor set: 统一 layout, binding 0..7 = STORAGE_BUFFER, binding 7 复用于 binomial 权重 (std430, 无 padding). Push constants 88B. Pipeline cache 按 shader 名懒创建. 
@@ -159,7 +161,7 @@ Vulkan GPU 后端 (已实现)
 
 ## 硬编码路径与平台假设
 	- Adobe DNG Converter 路径硬编码: `C:\Program Files\Adobe\Adobe DNG Converter\Adobe DNG Converter.exe` (`dng_converter.cpp:23,29`). 
-	- `apps/cli/main.cpp`: 后端默认 CPU, 可通过 `--backend cpu|vulkan` 选择.
+	- `apps/cli/main.cpp`: 后端默认 CPU, 可通过 `--backend cpu|vulkan|gpu` 选择. `--list-gpus` 列出可用 GPU 并退出. `--gpu-device N` / `--gpu N` 按序号选择 GPU (-1=自动). `Settings.gpu_device_index` 传递到 `vk.Initialize(device_index)`.
 	- `pipeline_align.cpp:244`: 调试 BMP dump 到硬编码 `R:\` (Windows 盘符), 由 `kEnableAlignmentGrayDump=false` 关闭. 
 	- 非显式 DNG 的 RAW 输入在非 Windows 平台会抛 `"Non-DNG RAW input requires pre-conversion on this platform"` (`pipeline_io.cpp:153`). 
 	- 根目录脚本大量硬编码本机路径: `SyncARWLensCorr.ps1` (`C:\MultiMediaTools\Bin\exiftool.exe`), `Scripts/benchmark_parallel.ps1` (`Z:\seq1/seq2`, 注意默认 CLI 路径用大写 `Build` 与实际不符), `_bench.ps1` (用 `NUL` 作输出, 传位置参数且用了未定义的 `--profiler`, **当前 CLI 下无法运行**). 
@@ -212,4 +214,4 @@ Vulkan GPU 后端 (已实现)
 	- 线程/粒度: `libburstmerge/src/core/task_executor.cpp:64` (`ParallelFor`)
 	- FFT (thread-local plan): `libburstmerge/src/core/fft_util.cpp:8`
 	- 参考帧选择: `libburstmerge/src/core/pipeline_frame.cpp:147` (`SelectExposureRefIndex`)
-	- CLI 选项定义: `apps/cli/main.cpp:124`
+	- CLI 选项定义: `apps/cli/main.cpp:129`
