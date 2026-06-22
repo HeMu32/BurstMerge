@@ -341,14 +341,7 @@ uint64_t SpatialMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
     vk.DestroyBuffer(ref_blur);
 
     uint64_t merged = vk.CreateBuffer(pw * ph * ch);
-    // normalize acc -> merged
-    {
-        ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch;
-        Binding b[3] = {{0, acc, 0}, {1, wsum, 0}, {2, merged, 0}};
-        // normalize_div operates in place; use acc then copy. Simpler: run on acc->merged.
-        (void)b;
-    }
-    // Run normalize on acc in place, then copy to merged.
+    // normalize acc -> merged: normalize_div in-place on acc, then copy to merged.
     {
         ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch;
         Binding bn[2] = {{0, acc, 0}, {1, wsum, 0}};
@@ -452,11 +445,6 @@ uint64_t FrequencyMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
     vk.DestroyBuffer(cmps);
 
     // normalize out/norm -> merged_out, then clamp floor -1 (ReduceTileBorderArtifacts)
-    {
-        ShaderPC pn{}; pn.w = pw; pn.h = ph; pn.channels = ch;
-        Binding bn[3] = {{0, out, 0}, {1, norm, 0}, {2, merged_out, 0}};
-        (void)bn;
-    }
     vk.BeginFrame();
     {
         ShaderPC pn{}; pn.w = pw; pn.h = ph; pn.channels = ch;
@@ -852,7 +840,6 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
         }
         vk.FlushFrame();
         vk.DestroyBuffer(wsum);
-        for (size_t k = 0; k < aligned.size(); ++k) vk.DestroyBuffer(aligned[k]);
     }
     else if (settings.merge_algo == MergeAlgorithm::TemporalMedian)
     {
@@ -887,10 +874,9 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
         FrequencyMergeGPU(vk, plane[ref_idx], aligned, raw_meta, ref_idx, settings, pw, ph, ch, mean_bl[ref_idx], merged);
         for (size_t k = 0; k < aligned.size(); ++k) vk.DestroyBuffer(aligned[k]);
     }
-    else // Spatial
+    else // Spatial (SpatialMergeGPU frees aligned[] internally)
     {
         merged = SpatialMergeGPU(vk, plane[ref_idx], aligned, raw_meta, ref_idx, settings, pw, ph, ch, mean_bl[ref_idx], comp_orig, comp_scale);
-        for (size_t k = 0; k < aligned.size(); ++k) vk.DestroyBuffer(aligned[k]);
     }
     // Only plane[ref_idx] remains; comparison planes freed in alignment loop.
     vk.DestroyBuffer(plane[ref_idx]);
@@ -930,6 +916,7 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
 
     std::vector<size_t> comp_orig;
     std::vector<float> comp_scale;
+    std::vector<float> ev_scale(N, 1.0f);
     float ref_ev = images[ref_idx].metadata.ev_value;
     float ref_bias = images[ref_idx].metadata.exposure_bias;
     for (size_t i = 0; i < N; ++i)
@@ -940,6 +927,7 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
             ? (ref_ev / images[i].metadata.ev_value) * std::pow(2.0f, ref_bias - images[i].metadata.exposure_bias)
             : 1.0f;
         comp_scale.push_back(s);
+        ev_scale[i] = s;
     }
 
     // RAW prepare: uint16 -> CFA deinterleave -> black-level subtract ->
@@ -983,7 +971,7 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
         pc.w2 = pw; pc.h2 = ph; pc.channels2 = int(ch);
         pc.i0 = int(period);
         pc.f1 = mean_bl[i];
-        pc.f2 = (i == ref_idx) ? 1.0f : comp_scale[std::find(comp_orig.begin(), comp_orig.end(), i) - comp_orig.begin()];
+        pc.f2 = ev_scale[i];
         pc.i9 = use_cpu_fp32_convert ? 1 : 0;  // 0=uint16 input, 1=float32 input
         Binding b[2] = {{0, rawbufs.back(), 0}, {1, plane[i], 0}};
         vk.Dispatch("prepare_texture", pc, (pw + 7) / 8, (ph + 7) / 8, int(ch), b, 2);
