@@ -22,10 +22,32 @@ bool IsCompatibleForAverage(const RawImage& a, const RawImage& b)
            a.pixels.row_stride == b.pixels.row_stride;
 }
 
+// Map the user-facing noise-reduction knob to the internal spatial-merge
+// robustness scalar.
+//
+// Direction is critical and was previously inverted here. The spatial weight
+// formula `w = 1 / (1 + (diff/noise_floor)^2 * robustness)` means LARGER
+// robustness => LESS averaging => LESS denoising. So if robustness grows with
+// nr (as the old `nr / 13` mapping did), turning UP noise-reduction actually
+// reduces denoising -- the opposite of what the user expects.
+//
+// The reference implementation (hdr-plus-swift, spatial.swift:21-22) inverts
+// the relationship with an exponential decay, replicated here exactly. `nr` is
+// rounded the same way Swift's `Int(noise_reduction + 0.5)` rounds (half-up
+// for the positive values nr always takes). Intermediate math is done in
+// double to match frequency.cpp's robustness path; the pow() result is then
+// narrowed to float. The kRobustnessMin floor keeps a small residual rejection
+// for extreme nr (see pipeline.h for the rationale).
 float ComputeRobustness(float noise_reduction)
 {
-    return std::max(PipelineConstants::kRobustnessMin,
-                    noise_reduction / PipelineConstants::kRobustnessDiv);
+    const int nr_int = static_cast<int>(std::floor(noise_reduction + 0.5f));
+    const double rev = static_cast<double>(PipelineConstants::kRobustnessRevHalf) *
+                       (static_cast<double>(PipelineConstants::kRobustnessRevOffset) -
+                        static_cast<double>(nr_int));
+    const double r = static_cast<double>(PipelineConstants::kRobustnessBase) *
+                         std::pow(static_cast<double>(PipelineConstants::kRobustnessExpBase), rev) -
+                     static_cast<double>(PipelineConstants::kRobustnessSubtract);
+    return std::max(PipelineConstants::kRobustnessMin, static_cast<float>(r));
 }
 
 float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size)

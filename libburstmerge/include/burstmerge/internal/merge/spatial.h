@@ -18,12 +18,10 @@ struct SpatialConstants
     static constexpr float kLinearMinComparisonWeight = 0.04f;
     static constexpr float kHighlightThresholdFactor = 0.92f;
     static constexpr float kClipThresholdFactor = 0.98f;
-    // Reference robustness = 0.12 * 1.3^(0.5*(36 - nr)) - 0.453
-    static constexpr float kRobustnessRevOffset = 36.0f;
-    static constexpr float kRobustnessRevHalf = 0.5f;
-    static constexpr float kRobustnessBase = 0.12f;
-    static constexpr float kRobustnessExpBase = 1.3f;
-    static constexpr float kRobustnessSubtract = 0.4529822f;
+    // NOTE: the robustness curve constants (kRobustnessBase / ExpBase /
+    // RevOffset / RevHalf / Subtract / Min) live in PipelineConstants
+    // (core/pipeline.h) next to ComputeRobustness(), which is their sole
+    // consumer. They were previously declared here but never used.
 };
 
 // Binomial weights: C(32, 16+k) for k=0..8 (reference kernel_size=16)
