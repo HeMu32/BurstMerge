@@ -77,10 +77,19 @@ static RawImage RawReadDngFromStream(dng_stream& stream)
 
     uint32_t pixelSize = DngPixelTypeSize(result.metadata.dng_pixel_type);
 
+    // LinearRaw (demosaiced RGB) DNGs — e.g. DxO DeepPRIME output — carry
+    // 3 interleaved samples per pixel (PhotometricInterpretation 34892, no
+    // CFA). Tag them as R16_Uint_RGB so the channel count survives into the
+    // pipeline; everything else stays single-channel.
+    const bool is_linear_rgb =
+        (planes == 3) && (result.metadata.dng_pixel_type == DngPixelType::Uint16);
+
     // Allocate and read pixel data
     result.pixels.width  = result.metadata.width;
     result.pixels.height = result.metadata.height;
-    result.pixels.format = DngPixelTypeToFormat(result.metadata.dng_pixel_type);
+    result.pixels.format = is_linear_rgb
+        ? PixelFormat::R16_Uint_RGB
+        : DngPixelTypeToFormat(result.metadata.dng_pixel_type);
     result.pixels.row_stride = result.metadata.width * planes * pixelSize;
     result.pixels.size = static_cast<size_t>(result.pixels.row_stride) * result.metadata.height;
     result.pixels.data = new std::byte[result.pixels.size]();

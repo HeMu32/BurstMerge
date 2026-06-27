@@ -25,6 +25,7 @@ uint32_t ChannelsForFormat(PixelFormat format)
     switch (format)
     {
         case PixelFormat::RGBA32_Float: return 4;
+        case PixelFormat::R16_Uint_RGB: return 3;
         default: return 1;
     }
 }
@@ -52,6 +53,7 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale)
             break;
         }
         case PixelFormat::R16_Uint:
+        case PixelFormat::R16_Uint_RGB:
         {
             const auto* p = reinterpret_cast<const uint16_t*>(src.data);
             ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
@@ -76,24 +78,21 @@ FloatImage HostBufferToFloatImage(const HostBuffer& src, float scale)
 
 HostBuffer FloatImageToUint16HostBuffer(const FloatImage& src, uint32_t white_level)
 {
-    if (src.channels != 1)
-    {
-        throw std::runtime_error("FloatImageToUint16HostBuffer expects single-channel image");
-    }
-
     // DNG uses a 16-bit integer container for 12/14/16-bit outputs. The actual
     // target precision is expressed by white_level, and the float pipeline is
     // expected to have already rescaled samples into that target range.
+    // Supports both single-channel (Bayer mosaic) and 3-channel (LinearRaw RGB)
+    // images; the channel count is carried through to the HostBuffer format.
     HostBuffer out;
     out.width = src.width;
     out.height = src.height;
-    out.format = PixelFormat::R16_Uint;
-    out.row_stride = src.width * sizeof(uint16_t);
+    out.format = (src.channels == 3) ? PixelFormat::R16_Uint_RGB : PixelFormat::R16_Uint;
+    out.row_stride = src.width * src.channels * sizeof(uint16_t);
     out.size = static_cast<size_t>(out.row_stride) * src.height;
     out.data = new std::byte[out.size]();
 
     auto* dst = reinterpret_cast<uint16_t*>(out.data);
-    const size_t count = static_cast<size_t>(src.width) * src.height;
+    const size_t count = src.data.size();
     const float hi = static_cast<float>(white_level);
     ParallelFor(count, 1u << 16, [&](size_t i0, size_t i1)
     {
