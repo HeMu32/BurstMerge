@@ -29,7 +29,7 @@ enum class MergeAlgorithm
 enum class ExposureMode
 { Off, Linear, Curve };
 enum class AlignmentMode
-{ Standard, DenseTile, Frequency };
+{ Standard, DenseTile, Frequency, Skip };
 enum class SpatialMergeMode
 { Standard, Linear };
 enum class FrequencyMode

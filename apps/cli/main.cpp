@@ -47,6 +47,7 @@ bool ParseAlignmentMode(const std::string& value, burstmerge::AlignmentMode& out
     if (v == "standard" || v == "legacy") { out = burstmerge::AlignmentMode::Standard; return true; }
     if (v == "dense" || v == "dense-tile") { out = burstmerge::AlignmentMode::DenseTile; return true; }
     if (v == "freq" || v == "frequency") { out = burstmerge::AlignmentMode::Frequency; return true; }
+    if (v == "skip" || v == "none") { out = burstmerge::AlignmentMode::Skip; return true; }
     return false;
 }
 
@@ -135,7 +136,7 @@ int main(int argc, char* argv[]) {
         ("frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
         ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal/median)", cxxopts::value<float>())
         ("m,merge,merge-algo", "Merge algorithm: spatial, frequency, temporal (average), median", cxxopts::value<std::string>())
-        ("a,alignment", "Alignment mode: standard, dense, freq", cxxopts::value<std::string>()->default_value("standard"))
+        ("a,alignment", "Alignment mode: standard, dense, freq, skip (alias: none)", cxxopts::value<std::string>()->default_value("standard"))
         ("spa-mode,spatial-mode", "Spatial merge mode: standard, linear", cxxopts::value<std::string>()->default_value("standard"))
         ("freq-mode,frequency-mode", "Frequency mode: laplacian, wiener, wiener-robust", cxxopts::value<std::string>()->default_value("laplacian"))
         ("exposure-mode", "Exposure mode: off, linear, curve", cxxopts::value<std::string>()->default_value("off"))
@@ -242,7 +243,7 @@ int main(int argc, char* argv[]) {
         settings.merge_algo = burstmerge::MergeAlgorithm::Frequency;
     }
     if (!ParseAlignmentMode(args["alignment"].as<std::string>(), settings.alignment_mode)) {
-        std::cerr << "Invalid alignment mode (use standard, dense, or freq)" << std::endl;
+        std::cerr << "Invalid alignment mode (use standard, dense, freq, or skip)" << std::endl;
         return 2;
     }
     if (!ParseSpatialMode(args["spatial-mode"].as<std::string>(), settings.spatial_mode)) {

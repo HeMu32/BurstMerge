@@ -396,13 +396,20 @@ void TestLinearRawDngOptional()
     // as R16_Uint_RGB with mosaic_pattern_width==0, and that it round-trips
     // through DngWriter as a 3-plane LinearRaw DNG.
     //
-    // Enabled via BURSTMERGE_TEST_LINEAR_DNG=<path-to-linear-dng>.
+    // Default-on: uses the vendored SDK sample 04_PGTM2_per_profile.dng (a
+    // 1000x1000 LinearRaw DNG). Override the path with
+    // BURSTMERGE_TEST_LINEAR_DNG=<path>; set to "0" to skip.
     std::cout << "[test] LinearRaw (3-plane RGB) DNG..." << std::endl;
-    const char* path = std::getenv("BURSTMERGE_TEST_LINEAR_DNG");
-    if (!path || std::strcmp(path, "0") == 0 || path[0] == '\0')
+    const char* kDefaultLinear = "/3rdparty/dng_sdk/sample_files/04_PGTM2_per_profile.dng";
+    std::string path = std::string(TEST_DATA_DIR) + kDefaultLinear;
+    if (const char* env = std::getenv("BURSTMERGE_TEST_LINEAR_DNG"))
     {
-        std::cout << "  SKIP: set BURSTMERGE_TEST_LINEAR_DNG=<path> to enable" << std::endl;
-        return;
+        if (std::strcmp(env, "0") == 0)
+        {
+            std::cout << "  SKIP: BURSTMERGE_TEST_LINEAR_DNG=0" << std::endl;
+            return;
+        }
+        path = env;
     }
     if (!FileExists(path))
     {
@@ -410,7 +417,7 @@ void TestLinearRawDngOptional()
         return;
     }
 
-    burstmerge::DngReader reader(path);
+    burstmerge::DngReader reader(path.c_str());
     burstmerge::RawImage img = reader.Read();
 
     CHECK(img.metadata.mosaic_pattern_width == 0, "linear DNG reports mosaic_pattern_width == 0");

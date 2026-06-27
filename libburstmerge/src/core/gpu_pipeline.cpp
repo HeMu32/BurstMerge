@@ -535,6 +535,14 @@ AlignmentResult GpuEstimateTranslation(const FloatImage& ref_gray,
     AlignmentResult out;
     if (ref_gray.width != cmp_gray.width || ref_gray.height != cmp_gray.height || ref_gray.channels != 1)
         return out;
+    if (params.mode == AlignmentMode::Skip)
+    {
+        out.shift_x = 0;
+        out.shift_y = 0;
+        out.confidence = 1.0f;
+        out.cfa_period = std::max<uint32_t>(1, params.cfa_period);
+        return out;
+    }
     VulkanBackend vk;
     if (!vk.Initialize()) return out;
 
@@ -715,6 +723,21 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
     {
         if (i == ref_idx) continue;
         Report(progress, 0.6f, "GPU: aligning frame " + std::to_string(i));
+
+        if (settings.alignment_mode == AlignmentMode::Skip)
+        {
+            uint64_t warped = vk.CreateBuffer(size_t(pw) * ph * ch);
+            vk.BeginFrame();
+            ShaderPC cpc{}; cpc.w = pw; cpc.h = ph; cpc.channels = ch;
+            Binding cb[2] = {{0, plane[i], 0}, {1, warped, 0}};
+            vk.Dispatch("copy", cpc, (size_t(pw) * ph * ch + 255) / 256, 1, 1, cb, 2);
+            vk.FlushFrame();
+            vk.DestroyBuffer(gray[i]);
+            vk.DestroyBuffer(plane[i]);
+            aligned.push_back(warped);
+            continue;
+        }
+
         auto cmp_pyr = BuildGrayPyramid(vk, gray[i], pw, ph, tile_size);
         int z2[2] = {0, 0};
         vk.UploadFloats(align_state, reinterpret_cast<float*>(z2), 2);

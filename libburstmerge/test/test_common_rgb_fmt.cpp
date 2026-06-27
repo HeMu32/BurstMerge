@@ -415,6 +415,28 @@ static void TestGroupMixedRawAndExport()
         CHECK(IsTiff(result.output_path), "raw to tiff signature");
     }
 
+    // LinearRaw (3-plane demosaiced RGB) DNG → non-DNG RGB export. Exercises
+    // the input_is_linear branch of the RAW pipeline's non-DNG write tail,
+    // which selects kPixelRGB instead of kPixelGray. Uses the vendored SDK
+    // sample so this is default-on.
+    {
+        fs::path linear = fs::path(TEST_DATA_DIR) / "3rdparty/dng_sdk/sample_files/04_PGTM2_per_profile.dng";
+        if (FileExists(linear))
+        {
+            fs::path out = OutDir() / "linear_to_png.png";
+            auto settings = MakeSettings();
+            settings.output_format = burstmerge::OutputFormat::PNG;
+            auto result = RunBurstMerge({linear.string()}, settings, out);
+            CHECK(result.success, "linear to png succeeds");
+            CHECK(IsPng(result.output_path), "linear to png signature");
+            CheckOutputBasic(result.output_path);
+            CheckNotAllZero(result.output_path);
+        } else
+        {
+            std::cout << "  SKIP linear_to_png (LinearRaw sample not found)" << std::endl;
+        }
+    }
+
     // Folder-based versions of the same mixed-format combinations.
     // These mirror the -i cases above, but use -f-style directory inputs.
     {
@@ -618,6 +640,50 @@ static void TestGroupRejection()
 }
 
 // ---------------------------------------------------------------------------
+// Group 7a: Skip alignment on multi-frame RGB bursts (CPU)
+// ---------------------------------------------------------------------------
+static void TestGroupSkipAlignment()
+{
+    std::cout << "[test] skip alignment (RGB)..." << std::endl;
+
+    {
+        auto png_inputs = SmallRgbPngInputs();
+        fs::path out = OutDir() / "skip_rgb_png.png";
+        auto settings = MakeSettings();
+        settings.alignment_mode = burstmerge::AlignmentMode::Skip;
+        auto result = RunBurstMerge(png_inputs, settings, out);
+        CHECK(result.success, "skip rgb png succeeds");
+        if (result.success)
+        {
+            CheckOutputBasic(result.output_path);
+            CheckNotAllZero(result.output_path);
+        }
+    }
+
+    {
+        auto jpg_inputs = SmallRgbJpegInputs("jpeg_444.jpg");
+        fs::path out = OutDir() / "skip_rgb_jpg.jpg";
+        auto settings = MakeSettings();
+        settings.alignment_mode = burstmerge::AlignmentMode::Skip;
+        auto result = RunBurstMerge(jpg_inputs, settings, out);
+        CHECK(result.success, "skip rgb jpg succeeds");
+        if (result.success)
+            CheckOutputBasic(result.output_path);
+    }
+
+    {
+        auto tiff_inputs = SmallRgbTiffInputs();
+        fs::path out = OutDir() / "skip_rgb_tif.tif";
+        auto settings = MakeSettings();
+        settings.alignment_mode = burstmerge::AlignmentMode::Skip;
+        auto result = RunBurstMerge(tiff_inputs, settings, out);
+        CHECK(result.success, "skip rgb tif succeeds");
+        if (result.success)
+            CheckOutputBasic(result.output_path);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Group 7: Bit-depth constraint verification via exiftool
 // ---------------------------------------------------------------------------
 static void TestGroupBitDepthVerify()
@@ -816,6 +882,7 @@ int main()
     TestGroupAutoInferenceEdge();
     TestGroupCrossFormat();
     TestGroupRejection();
+    TestGroupSkipAlignment();
     TestGroupBitDepthVerify();
 
     std::cout << "\nCommon RGB fmt: " << g_checks << " checks, " << g_failed << " failed" << std::endl;

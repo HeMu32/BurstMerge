@@ -35,6 +35,16 @@ AlignmentResult EstimateTranslationImpl(
     const FloatImage& comparison,
     const AlignParams& params)
 {
+    if (params.mode == AlignmentMode::Skip)
+    {
+        AlignmentResult out;
+        out.shift_x = 0;
+        out.shift_y = 0;
+        out.confidence = 1.0f;
+        out.cfa_period = std::max<uint32_t>(1, params.cfa_period);
+        return out;
+    }
+
     std::vector<FloatImage> cmp_pyr = BuildPyramidSingle(comparison, params.tile_size);
 
     if (params.mode == AlignmentMode::DenseTile)
