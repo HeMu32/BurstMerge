@@ -595,16 +595,6 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
         }
     }
 
-#if 0
-    if (x0 == 4 && y0 == 0)
-    {
-        const auto& cs = comp_stats[0];
-        std::fprintf(stderr, "DIAG tile(%u,%u): mismatch=%.4f highlights_norm=%.4f exposure_factor=%.3f rms=%.1f noise_norm=%.1f robustness_norm=%.6f read_noise=%.1f max_motion=%.1f\n",
-            x0, y0, cs.stats.mismatch, cs.stats.highlights_norm, cs.exposure_factor, cs.stats.rms,
-            noise_norm, ctx.robustness_norm, ctx.read_noise, ctx.max_motion_norm);
-    }
-#endif
-
     const double mean_mismatch = comp_stats.empty() ? 0.0 : [&]()
     {
         double sum = 0.0;
@@ -989,29 +979,36 @@ FloatImage WienerFftMergeRobust(const FloatImage& reference,
         }
 
         ReduceTileBorderArtifacts(pass_out, reference, tile, params.black_level);
-        for (size_t i = 0; i < out.data.size(); ++i)
+
+        const float* po = pass_out.data.data();
+        const float* pn = pass_norm.data.data();
+        float* o = out.data.data();
+        float* pc = pass_count.data.data();
+        const uint32_t ch = out.channels;
+        const int64_t npix = static_cast<int64_t>(out.width) * out.height;
+
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < npix; ++i)
         {
-            out.data[i] += pass_out.data[i];
-        }
-        for (uint32_t y = 0; y < pass_out.height; ++y)
-        {
-            for (uint32_t x = 0; x < pass_out.width; ++x)
-            {
-                if (pass_norm.At(x, y, 0) > 1e-6f)
-                    pass_count.At(x, y, 0) += 1.0f;
-            }
+            if (pn[i] > 1e-6f)
+                pc[i] += 1.0f;
+            for (uint32_t c = 0; c < ch; ++c)
+                o[i * ch + c] += po[i * ch + c];
         }
     }
 
-    for (uint32_t y = 0; y < out.height; ++y)
     {
-        for (uint32_t x = 0; x < out.width; ++x)
+        float* o = out.data.data();
+        const float* pc = pass_count.data.data();
+        const uint32_t ch = out.channels;
+        const int64_t npix = static_cast<int64_t>(out.width) * out.height;
+
+        #pragma omp parallel for schedule(static)
+        for (int64_t i = 0; i < npix; ++i)
         {
-            const float cnt = std::max(1.0f, pass_count.At(x, y, 0));
-            for (uint32_t c = 0; c < out.channels; ++c)
-            {
-                out.At(x, y, c) /= cnt;
-            }
+            const float cnt = std::max(1.0f, pc[i]);
+            for (uint32_t c = 0; c < ch; ++c)
+                o[i * ch + c] /= cnt;
         }
     }
 
