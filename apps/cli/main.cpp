@@ -144,6 +144,7 @@ int main(int argc, char* argv[]) {
         ("exposure-curve", "Exposure curve mode: global, local", cxxopts::value<std::string>()->default_value("global"))
         ("align-gamma", "Gamma correction for alignment grayscale (default 1.0=off). Value < 1.0 will boost darkness", cxxopts::value<float>()->default_value("1.0"))
         ("smooth-tile-field", "Enable median smoothing of alignment tile fields", cxxopts::value<bool>()->default_value("false"))
+        ("highlight-recovery", "Recover clipped green-channel highlights from R/B neighbours (default on)", cxxopts::value<bool>()->default_value("true"))
         ("output-format", "Output format: auto, png, jpg, bmp, tiff, dng", cxxopts::value<std::string>()->default_value("auto"))
         ("backend", "Compute backend: cpu, vulkan (vulkan requires a GPU)", cxxopts::value<std::string>()->default_value("cpu"))
         ("gpu-device,gpu", "Select GPU by index (use --list-gpus to see available, -1 = auto)", cxxopts::value<int>()->default_value("-1"))
@@ -268,6 +269,7 @@ int main(int argc, char* argv[]) {
     }
     settings.align_gamma = args["align-gamma"].as<float>();
     settings.smooth_tile_field = args["smooth-tile-field"].as<bool>();
+    settings.highlight_recovery = args["highlight-recovery"].as<bool>();
     settings.gpu_device_index = args["gpu-device"].as<int>();
     if (!ParseOutputFormat(args["output-format"].as<std::string>(), settings.output_format)) {
         std::cerr << "Invalid output format (use auto, png, jpg, bmp, tiff, or dng)" << std::endl;
@@ -283,6 +285,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Noise reduction: " << settings.noise_reduction << std::endl;
     std::cout << "Align gamma: " << settings.align_gamma << std::endl;
     std::cout << "Smooth tile field: " << (settings.smooth_tile_field ? "on" : "off") << std::endl;
+    std::cout << "Highlight recovery: " << (settings.highlight_recovery ? "on" : "off") << std::endl;
     std::cout << "Bit depth: " << settings.bit_depth << std::endl;
     std::cout << "Output format: ";
     switch (settings.output_format) {

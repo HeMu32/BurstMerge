@@ -547,6 +547,11 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
             Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
             NormalizeFrames(float_images, images, ref_idx);
+            if (settings_.highlight_recovery)
+            {
+                Report(progress, PipelineConstants::kProgressNormalize, "Recovering clipped highlights");
+                RecoverHighlights(float_images, images, ref_idx);
+            }
             for (size_t i = 1; i < images.size(); ++i)
             {
                 if (!IsCompatibleForAverage(images[0], images[i]))

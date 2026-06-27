@@ -595,6 +595,16 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
         }
     }
 
+#if 0
+    if (x0 == 4 && y0 == 0)
+    {
+        const auto& cs = comp_stats[0];
+        std::fprintf(stderr, "DIAG tile(%u,%u): mismatch=%.4f highlights_norm=%.4f exposure_factor=%.3f rms=%.1f noise_norm=%.1f robustness_norm=%.6f read_noise=%.1f max_motion=%.1f\n",
+            x0, y0, cs.stats.mismatch, cs.stats.highlights_norm, cs.exposure_factor, cs.stats.rms,
+            noise_norm, ctx.robustness_norm, ctx.read_noise, ctx.max_motion_norm);
+    }
+#endif
+
     const double mean_mismatch = comp_stats.empty() ? 0.0 : [&]()
     {
         double sum = 0.0;
@@ -820,7 +830,6 @@ TileMergeResult ComputeRobustTileResult(const RobustTileContext& ctx,
     }
 
     {
-        ProfileScope scope("time.merge.wiener_ifft");
         const double inv_stack = 1.0 / static_cast<double>(ctx.stack_size);
         for (uint32_t c = 0; c < ctx.reference.channels; ++c)
         {
@@ -881,6 +890,17 @@ FloatImage WienerFftMergeRobust(const FloatImage& reference,
     out.height = reference.height;
     out.channels = reference.channels;
     out.data.resize(reference.data.size(), 0.0f);
+
+    // Track how many passes actually contribute to each pixel. Border pixels
+    // (first/last stride rows and columns) are only covered by a subset of
+    // the kWienerShiftPasses shift-offset passes. Dividing by the total pass
+    // count instead of the actual contributor count halves the output at
+    // borders, producing dark edge artifacts.
+    FloatImage pass_count;
+    pass_count.width = reference.width;
+    pass_count.height = reference.height;
+    pass_count.channels = 1;
+    pass_count.data.assign(static_cast<size_t>(reference.width) * reference.height, 0.0f);
 
     const uint32_t tile = static_cast<uint32_t>(FrequencyConstants::kWienerTileSize);
     const uint32_t stride = std::max<uint32_t>(1, tile / 2);
@@ -971,8 +991,27 @@ FloatImage WienerFftMergeRobust(const FloatImage& reference,
         ReduceTileBorderArtifacts(pass_out, reference, tile, params.black_level);
         for (size_t i = 0; i < out.data.size(); ++i)
         {
-            out.data[i] += pass_out.data[i] /
-                static_cast<float>(FrequencyConstants::kWienerShiftPasses);
+            out.data[i] += pass_out.data[i];
+        }
+        for (uint32_t y = 0; y < pass_out.height; ++y)
+        {
+            for (uint32_t x = 0; x < pass_out.width; ++x)
+            {
+                if (pass_norm.At(x, y, 0) > 1e-6f)
+                    pass_count.At(x, y, 0) += 1.0f;
+            }
+        }
+    }
+
+    for (uint32_t y = 0; y < out.height; ++y)
+    {
+        for (uint32_t x = 0; x < out.width; ++x)
+        {
+            const float cnt = std::max(1.0f, pass_count.At(x, y, 0));
+            for (uint32_t c = 0; c < out.channels; ++c)
+            {
+                out.At(x, y, c) /= cnt;
+            }
         }
     }
 

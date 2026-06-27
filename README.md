@@ -27,6 +27,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Simple temporal median merge
 - Motion-robust merge in the spatial domain
 - Motion-robust merge in the frequency domain
+- Highlight recovery for clipped green channels (extrapolated from R/B neighbours)
 - Optional exposure correction for improved shadow tonality
 - Burst support with bracketed exposure (not applicable for common RGB formats)
 
@@ -45,6 +46,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
     - DNG decoding
     - picture alignment
     - merging
+    - highlight recovery
 - Folder-based sequence reading
 - Windows 10 support (via MinGW-W64 9.0.0)
 
@@ -67,6 +69,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - More constrained alignment algorithms: perspective, ...
 - Simple median (done) and mid-percentage merge (todo) options
 - More texture-preserving and noise-robust frame merging algorithm
+- Highlight recovery for non-Bayer CFA patterns on GPU (CPU handles all patterns; GPU shader is Bayer-only)
 - Algorithms dedicated for STF synthesis
 - Support for additional operating systems
 - CJK path support
@@ -180,6 +183,7 @@ Important targets defined by the current project:
 - `burstmerge_compare`: DNG pixel comparison tool in `apps/console`
 - `test_deps`
 - `test_dng_io`
+- `test_highlight`
 - `test_stage0`
 - `test_stage1`
 - `test_common_rgb_fmt`
@@ -196,6 +200,7 @@ Test coverage in the current tree includes:
 
 - dependency and low-level API checks
 - DNG read/write paths
+- highlight recovery (Bayer, LinearRAW, edge cases, multi-frame)
 - single-frame and multi-frame processing
 - RGB format input/output checks
 

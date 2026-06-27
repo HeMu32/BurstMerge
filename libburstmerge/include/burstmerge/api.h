@@ -55,6 +55,7 @@ struct Settings
     int            bit_depth        = 14;
     float          align_gamma      = 1.0f;
     bool           smooth_tile_field = false;
+    bool           highlight_recovery = true;  // recover clipped green highlights (default on)
     int            gpu_device_index = -1;  // GPU device index for Vulkan backend (-1 = auto)
     // output_format: Auto = auto-infer (DNG for RAW, PNG for non-RAW)
     OutputFormat   output_format    = OutputFormat::Auto;

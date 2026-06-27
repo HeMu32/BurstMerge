@@ -75,7 +75,8 @@ bool ConverterAvailable()
 
 void ProcessAndVerify(const std::string& name,
                       const std::vector<std::string>& inputs,
-                      const std::string& output_path)
+                      const std::string& output_path,
+                      bool highlight_recovery = true)
 {
     std::cout << "[test] process " << name << "..." << std::endl;
     CHECK(!inputs.empty(), name + " inputs non-empty");
@@ -88,6 +89,7 @@ void ProcessAndVerify(const std::string& name,
     burstmerge::Settings settings;
     settings.merge_algo = burstmerge::MergeAlgorithm::Spatial;
     settings.noise_reduction = 13.0f;
+    settings.highlight_recovery = highlight_recovery;
     bm.Configure(settings);
 
     int progress_calls = 0;
@@ -518,8 +520,15 @@ int main()
         }
         if (!bkt2.empty())
         {
-            ProcessAndVerify("bkt2_arw_5", bkt2, (out_dir / "bkt2_output.dng").string());
-            CheckCenterSaturated("bkt2_center", (out_dir / "bkt2_output.dng").string());
+            ProcessAndVerify("bkt2_arw_5_recovery_on", bkt2,
+                (out_dir / "bkt2_output_recovery_on.dng").string(), true);
+            CheckCenterSaturated("bkt2_center_recovery_on",
+                (out_dir / "bkt2_output_recovery_on.dng").string());
+
+            ProcessAndVerify("bkt2_arw_5_recovery_off", bkt2,
+                (out_dir / "bkt2_output_recovery_off.dng").string(), false);
+            CheckCenterSaturated("bkt2_center_recovery_off",
+                (out_dir / "bkt2_output_recovery_off.dng").string());
         } else
         {
             std::cout << "[test] SKIP bkt2_arw_5 (samples/Bkt2 not found)" << std::endl;

@@ -1001,6 +1001,57 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
     }
     vk.FlushFrame();
     for (auto r : rawbufs) vk.DestroyBuffer(r);
+
+    // Highlight recovery: extrapolate clipped green photosites from nearby
+    // R/B values. Bayer-only (period==2, 4-channel plane). Non-Bayer and
+    // LinearRAW inputs are handled by the CPU path (or skip on GPU).
+    if (settings.highlight_recovery && period == 2 && ch == 4)
+    {
+        for (size_t i = 0; i < N; ++i)
+        {
+            float dyn_range = static_cast<float>(images[i].metadata.white_level) - mean_bl[i];
+            if (dyn_range <= 0.0f) continue;
+            float effective_range = dyn_range * ev_scale[i];
+            if (effective_range <= 0.0f) continue;
+
+            float cf_g = images[i].metadata.color_factors[1] > 0.0f
+                       ? images[i].metadata.color_factors[1] : 1.0f;
+            float factor_r = images[i].metadata.color_factors[0] > 0.0f
+                           ? images[i].metadata.color_factors[0] / cf_g : 1.0f;
+            float factor_b = images[i].metadata.color_factors[2] > 0.0f
+                           ? images[i].metadata.color_factors[2] / cf_g : 1.0f;
+
+            float factor_for_ch[4];
+            int g_ch[2];
+            int n_g = 0;
+            for (int c = 0; c < 4; ++c)
+            {
+                uint16_t color = images[i].metadata.mosaic_pattern[static_cast<size_t>(c)];
+                if (color == 0) factor_for_ch[c] = factor_r;
+                else if (color == 2) factor_for_ch[c] = factor_b;
+                else
+                {
+                    factor_for_ch[c] = 1.0f;
+                    if (n_g < 2) g_ch[n_g++] = c;
+                }
+            }
+            if (n_g < 2) continue;
+
+            ShaderPC pc{};
+            pc.w2 = pw;
+            pc.h2 = ph;
+            pc.i0 = g_ch[0];
+            pc.i1 = g_ch[1];
+            pc.f0 = effective_range;
+            pc.f1 = factor_for_ch[0];
+            pc.f2 = factor_for_ch[1];
+            pc.f3 = factor_for_ch[2];
+            pc.f4 = factor_for_ch[3];
+            Binding b[1] = {{0, plane[i], 0}};
+            vk.Dispatch("highlight_recovery", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 1);
+        }
+        vk.FlushFrame();
+    }
     }
 
     // All pixel data is now on GPU (uploaded via CreateBufferFromU16 above).

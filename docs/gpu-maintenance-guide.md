@@ -11,7 +11,8 @@
 ```
 pipeline.cpp
   ├── RAW 路径 → GpuRunBurstPipeline(std::vector<RawImage>&, ...)
-  │     ├── 准备: CreateBufferFromU16 → prepare_texture (GPU 端 uint16→float + CFA deinterleave)
+  │   ├── 准备: CreateBufferFromU16 → prepare_texture (GPU 端 uint16→float + CFA deinterleave)
+  │   │     → highlight_recovery (GPU 端 Bayer 高光恢复, prepare_texture 之后)
   │     ├── 释放比较帧系统内存 (pixels + dng_negative)
   │     └── GpuPipelineCore(vk, plane, raw_meta, ...)
   │           ├── to_grayscale (灰度化, 可选 gamma)
@@ -32,7 +33,7 @@ pipeline.cpp
 | `gpu_pipeline.cpp` | GpuRunBurstPipeline / GpuRunBurstPipelineRgb / GpuPipelineCore + 内部辅助函数 |
 | `gpu_pipeline.h` | 公开接口声明 |
 | `vulkan_backend.cpp/.h` | Vulkan 设备管理、buffer 生命周期、command buffer 录制、dispatch |
-| `shaders/*.comp` | 33 个 compute shader + `common.glsl` (push-constant 定义) |
+| `shaders/*.comp` | 34 个 compute shader + `common.glsl` (push-constant 定义) |
 | `embed_shaders.ps1` | configure-time SPIR-V 编译与嵌入 |
 | `pipeline.cpp` | 后端路由: `backend_==Vulkan` 时调 GPU 入口 |
 
@@ -169,10 +170,21 @@ Wiener FFT 使用 4 个非重叠 phase (phase_x, phase_y ∈ {0,1}) 避免累加
 ### 5.3 新增 shader 清单
 
 1. 在 `shaders/` 下创建 `.comp` 文件
-2. 包含 `#extension GL_GOOGLE_include_directives : enable` + `#include "common.glsl"`
+2. 包含 `#extension GL_GOOGLE_include_directive : enable` + `#include "common.glsl"`
 3. 声明 `layout(local_size_x=8, local_size_y=8)` 用于 2D shader（必须匹配 `/8` 的 dispatch 尺寸）
 4. 运行 `cmake ..` 重新编译 SPIR-V
 5. 在 `vulkan_backend.cpp` 中调用 `vk.Dispatch("新shader名", ...)`
+
+### 5.4 highlight_recovery (第 34 个 shader)
+
+Bayer-only 高光恢复, 在 `prepare_texture` 之后、RAM 释放之前 dispatch.
+- **调度**: `(ceil(pw/8), ceil(ph/8), 1)`, `local_size 8x8`, 每线程一个超级像素
+- **操作**: in-place 修改 plane buffer (4 通道), 仅写入两个绿色通道
+- **Push constant**: `pc.w2/h2`=plane 尺寸, `pc.i0/i1`=两个绿色通道索引, `pc.f0`=effective_range, `pc.f1..f4`=各通道 colour factor
+- **常量**: 硬编码 0.8/0.99/0.9/4.5/0.2, 必须与 `HighlightRecoveryParams` (`pipeline_frame.h`) 一致
+- **安全**: 相邻线程仅读取非绿色通道 (R/B), 写入仅限各自绿色通道 → 无数据竞争
+- **非 Bayer 跳过**: `period != 2 || ch != 4` 时不 dispatch (CPU 路径覆盖其他 CFA 模式)
+- **分发位置**: `gpu_pipeline.cpp` 的 `time.gpu.prepare` ProfileScope 内, 在 `rawbufs` 释放之后
 
 ---
 
@@ -195,7 +207,7 @@ Wiener FFT 使用 4 个非重叠 phase (phase_x, phase_y ∈ {0,1}) 避免累加
 启用: `BURSTMERGE_PROFILE=1` 环境变量 (仅 Debug build，已设为 `-O2 -g`)。
 
 GPU 阶段 ProfileScope 条目:
-- `time.gpu.prepare` — 上传 + prepare_texture + to_grayscale
+- `time.gpu.prepare` — 上传 + prepare_texture + [新增] highlight_recovery + to_grayscale
 - `time.gpu.align` — 金字塔 + 对齐 + warp
 - `time.gpu.merge` — 合并
 - `time.gpu.download` — 下载

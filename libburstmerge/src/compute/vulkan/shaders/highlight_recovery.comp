@@ -1,0 +1,142 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// highlight_recovery: extrapolate clipped green photosites from nearby R/B
+// values using camera colour factors. Bayer-only (4-channel plane format).
+//
+// Ported from hdr-plus-swift texture.metal:add_texture_highlights.
+// Constants MUST match HighlightRecoveryParams in pipeline_frame.h.
+//
+// Operates in-place on the plane buffer. One thread per super-pixel.
+// Only green channels are modified; R/B channels are read-only.
+//
+//   binding 0: plane buffer (float[], NHWC, channels=4), read-write
+//   pc.w2 = plane width  (super-pixel columns)
+//   pc.h2 = plane height (super-pixel rows)
+//   pc.i0 = green channel index 1 (0..3)
+//   pc.i1 = green channel index 2 (0..3)
+//   pc.f0 = effective_range = (white_level - black_mean) * ev_scale
+//   pc.f1 = colour factor for channel 0
+//   pc.f2 = colour factor for channel 1
+//   pc.f3 = colour factor for channel 2
+//   pc.f4 = colour factor for channel 3
+//   dispatch: (ceil(pw/8), ceil(ph/8), 1) with local 8x8
+
+layout(binding = 0) buffer Img { float img[]; };
+
+// Constants matching HighlightRecoveryParams (pipeline_frame.h).
+const float kBrightRatioThreshold  = 0.8;
+const float kNeighbourClipRatio    = 0.99;
+const float kExtrapolationWeightBase = 0.9;
+const float kExtrapolationWeightSlope = 4.5;
+const float kWeightClampRange      = 0.2;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    int ox = int(gl_GlobalInvocationID.x);
+    int oy = int(gl_GlobalInvocationID.y);
+    if (ox >= pc.w2 || oy >= pc.h2) return;
+
+    float factor[4];
+    factor[0] = pc.f1;
+    factor[1] = pc.f2;
+    factor[2] = pc.f3;
+    factor[3] = pc.f4;
+
+    float inv_range = 1.0 / pc.f0;
+
+    int base = (oy * pc.w2 + ox) * 4;
+    float pv[4];
+    pv[0] = img[base + 0];
+    pv[1] = img[base + 1];
+    pv[2] = img[base + 2];
+    pv[3] = img[base + 3];
+
+    for (int gi = 0; gi < 2; ++gi)
+    {
+        int g_ch = (gi == 0) ? pc.i0 : pc.i1;
+        int g_px = g_ch % 2;
+        int g_py = g_ch / 2;
+        int h_ch = g_py * 2 + (1 - g_px);
+        int v_ch = (1 - g_py) * 2 + g_px;
+
+        float pv_g = pv[g_ch];
+        float ratio_g = pv_g * inv_range;
+        if (ratio_g <= kBrightRatioThreshold) continue;
+
+        float pv_h_same = pv[h_ch];
+        float pv_v_same = pv[v_ch];
+        float ratio_h_same = pv_h_same * inv_range;
+        float ratio_v_same = pv_v_same * inv_range;
+
+        float pv_h_adj = 0.0;
+        float pv_v_adj = 0.0;
+        float ratio_h_adj = 0.0;
+        float ratio_v_adj = 0.0;
+        float pixel_count = 2.0;
+
+        if (g_px == 1)
+        {
+            if (ox + 1 < pc.w2)
+            {
+                int nbase = (oy * pc.w2 + (ox + 1)) * 4;
+                pv_h_adj = img[nbase + h_ch];
+                ratio_h_adj = pv_h_adj * inv_range;
+                pixel_count += 1.0;
+            }
+        }
+        else
+        {
+            if (ox > 0)
+            {
+                int nbase = (oy * pc.w2 + (ox - 1)) * 4;
+                pv_h_adj = img[nbase + h_ch];
+                ratio_h_adj = pv_h_adj * inv_range;
+                pixel_count += 1.0;
+            }
+        }
+
+        if (g_py == 0)
+        {
+            if (oy > 0)
+            {
+                int nbase = ((oy - 1) * pc.w2 + ox) * 4;
+                pv_v_adj = img[nbase + v_ch];
+                ratio_v_adj = pv_v_adj * inv_range;
+                pixel_count += 1.0;
+            }
+        }
+        else
+        {
+            if (oy + 1 < pc.h2)
+            {
+                int nbase = ((oy + 1) * pc.w2 + ox) * 4;
+                pv_v_adj = img[nbase + v_ch];
+                ratio_v_adj = pv_v_adj * inv_range;
+                pixel_count += 1.0;
+            }
+        }
+
+        float clip_h = kNeighbourClipRatio * factor[h_ch];
+        float clip_v = kNeighbourClipRatio * factor[v_ch];
+
+        if (!(ratio_h_same > clip_h || ratio_v_same > clip_v ||
+              ratio_h_adj > clip_h || ratio_v_adj > clip_v))
+            continue;
+
+        float extrapolated =
+            ((pv_h_same + pv_h_adj) / factor[h_ch] +
+             (pv_v_same + pv_v_adj) / factor[v_ch]) / pixel_count;
+
+        float t = 1.0 - ratio_g;
+        t = clamp(t, 0.0, kWeightClampRange);
+        float weight = kExtrapolationWeightBase - kExtrapolationWeightSlope * t;
+        float max_val = max(extrapolated, pv_g);
+        pv[g_ch] = weight * max_val + (1.0 - weight) * pv_g;
+    }
+
+    img[base + pc.i0] = pv[pc.i0];
+    img[base + pc.i1] = pv[pc.i1];
+}
