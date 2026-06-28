@@ -208,7 +208,7 @@ void TestDngRoundTrips()
         {"3rdparty/dng_sdk/sample_files/09_ImageSequenceInfo_1_of_3.dng", 200, 200, true, "SDK image sequence sample"},
         {"3rdparty/dng_sdk/sample_files/12_ImageStats_WeightedAverage.dng", 3000, 2000, true, "SDK image stats sample"},
         {"libburstmerge/test/samples/X1M5_Wide.dng", 4000, 3000, true, "project Sony DNG sample"},
-        {"3rdparty/dng_sdk/sample_files/03_jxl_bayer_raw_integer.dng", 0, 0, false, "JXL unsupported by current SDK build"},
+        {"3rdparty/dng_sdk/sample_files/03_jxl_bayer_raw_integer.dng", 10240, 7168, true, "SDK JXL Bayer raw sample (libjxl now linked)"},
     };
 
     int read_ok = 0;

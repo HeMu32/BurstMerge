@@ -38,6 +38,8 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
     - Note: RAW-in RGB-out and RGB-in RAW-out are not supported
 - Selectable 10/12/14/16 bit precision for DNG output
 - Selectable 8/16 bit precision for TIFF and PNG output
+- Accpects RAWs pre-processed by Adobe LrC/ACR AI noise reduction
+- Accpects RAWs pre-processed by DxO PureRAW
 
 ### Performance and platform support
 
@@ -61,8 +63,6 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Hot pixel suppression (current implementation not working well)
 - Preserve lens correction profiles (via exiftool, Sony ARW only)
 - Configurable path to Adobe DNG Converter (hard-coded for now, will not be a problem on most machines)
-- Support working together with Adobe LrC/ACR AI noise reduction
-- Support working together with DxO PureRAW
 - More comperhensive metadata copying for output
 - Write processing parameters and program version to output
 - Support images with more channels

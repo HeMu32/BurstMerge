@@ -70,7 +70,8 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	- `denoise/temporal.cpp`: 热像素修复 + 时域平均. 
 	- [新增] `pipeline_frame.cpp::RecoverHighlights`: 高光恢复 (裁切绿色通道外推). 对应 Swift `texture.swift:add_texture_highlights` + `texture.metal:add_texture_highlights`. 常量 `HighlightRecoveryParams` 与 GPU shader `highlight_recovery.comp` 必须一致.
 	- `exposure/exposure.cpp`: 线性 / Reinhard 曲线提亮. 对应 `exposure/exposure.swift`. 
-	- `io/dng_sdk_bridge.cpp`: 用不透明指针持有 `dng_negative`, 完整保留 Opcode/CameraProfile/EXIF/XMP. 对应 Swift 的 `dng_sdk_wrapper.cpp` Obj-C++ 桥. 
+	- `io/dng_sdk_bridge.cpp`: 用不透明指针持有 `dng_negative`, 完整保留 Opcode/CameraProfile/EXIF/XMP. 对应 Swift 的 `dng_sdk_wrapper.cpp` Obj-C++ 桥.
+	- `io/dng_reader.cpp`: DNG 读取入口. 读 Stage1Image (Bayer CFA) 后, 若 `info.fEnhancedIndex != -1` 则调 `ReadEnhancedImage` (默认 host = mode 2 "linear-only": 将 enhanced LinearRaw 解码到 `fStage3Image`, 清除 MosaicInfo/OpcodeLists/`fEnhanceParams`), 再 `ClearStage1Image` 丢弃 Bayer, 使 `RawImage()` 回退到 Stage3. `is_linear_rgb` (planes==3) 检测将其标记为 `R16_Uint_RGB`, 走现有 LinearRaw 管线. 支持 ACR NR / Enhanced-Image (`sfEnhancedImage`) DNG (典型为 JPEG XL 压缩的 LinearRaw SubIFD). 对应 Swift `dng_sdk_wrapper.cpp` 的 `ReadDNG`.
 	- `io/dng_converter.cpp` (Windows-only): 包装 Adobe DNG Converter CLI. 对应 `io_dng_sdk.swift::convert_raws_to_dngs`. 
 	- `core/fft_util.cpp`: 用 PocketFFT 替代 Metal FFT shader; **必须 thread-local 持有 plan** (pocketfft plan 内部有工作缓冲, 不可多线程共享). 
 
@@ -121,10 +122,10 @@ Vulkan GPU 后端 (已实现)
 	- `WIN32` 时额外编译 `src/io/dng_converter.cpp` (Adobe DNG Converter 包装). 
 
 ## 三方依赖状态
-	- `dng_sdk`: 完整 vendored 源码, 编译为内部静态库, 符号隐藏 (`-fvisibility=hidden`). 构建 fighting 见 `docs/plan-dsv4.md` (`qWinOS` 宏, XMP INT64 宏冲突, SEH 移除等). `dng_host` 非线程安全, 并行解码需每线程独立构造. 
+	- `dng_sdk`: 完整 vendored 源码, 编译为内部静态库, 符号隐藏 (`-fvisibility=hidden`). 构建 fighting 见 `docs/plan-dsv4.md` (`qWinOS` 宏, XMP INT64 宏冲突, SEH 移除等). `dng_host` 非线程安全, 并行解码需每线程独立构造. **JPEG XL 已启用**: `3rdparty/dng_sdk/CMakeLists.txt` 以 `add_subdirectory` 方式编译 vendored libjxl (含 highway + brotli + skcms 子目录), 链接 `jxl` + `jxl_threads` 到 `dng_sdk` (PRIVATE); 编译真实 `dng_jxl.cpp` 而非 `dng_jxl_stubs.cpp`. `dng_jxl.cpp` 中两处 XMP 使用 (EncodeJXL_Common 的 XMP box + ProcessXMPBox 的 `dng_xmp` 构造) 用 `#if qDNGUseXMP` 守护 (本机构建 `qDNGUseXMP=0`). **MinGW 限制**: Highway 的 AVX2 target 在 MinGW 下因函数多版本派发与 16 字节栈对齐 Windows ABI 冲突而 SIGSEGV, libjxl CMakeLists 中 `MINGW` 分支禁用 `HWY_AVX2` (SSE4 回退, 解码仍然正确); libjxl 子目录的 `CMAKE_CXX_FLAGS_RELEASE` 临时剥离 `-ffast-math` 和 `-march=native` (Highway 需精确 IEEE-754, 自管 ISA 派发).
 	- `pocketfft`: 单文件 `.c` + `.h`, MIT. 直接编进 `burstmerge` 静态库. 
 	- `cxxopts`: header-only, 仅 CLI 使用. 
-	- `libtiff`: 完整源码 + 预编译 install (`3rdparty/libtiff/install/`). 需要运行时 `libtiff.dll` 在 PATH (ctest 已为 `test_common_rgb_fmt` 配置). 
+	- `libtiff`: 完整源码 + 预编译 install (`3rdparty/libtiff/install/`). 需要运行时 `libtiff.dll` 在 PATH (`libburstmerge/test/CMakeLists.txt` 的 `add_burstmerge_test` 函数已为所有测试统一前置 `3rdparty/libtiff/install/bin` 到 `PATH`).
 	- `vulkan`: 头/库/dll 齐全. **已启用** — `libburstmerge/CMakeLists.txt` 对所有编译器 (GCC/MinGW + MSVC) 链接 `libvulkan-1.a` (PUBLIC, 传播给所有可执行目标). 原始 `.a` 是不完整子集 (573 符号), 已用 `dlltool` 从 `vulkan_core.h` 导出的 767 个函数名重新生成完整导入库 (`cmake` 无此步骤, `.a` 已在 `3rdparty/vulkan/Lib/` 落地). 运行时需 `vulkan-1.dll` (系统已装). 
 	- `glslang`: `3rdparty/glslang/glslangValidator.exe` (v7.8, GLSL 4.60). **configure-time** 由 `cmake/embed_shaders.ps1` 将 `src/compute/vulkan/shaders/*.comp` 编译为 SPIR-V 并嵌入到 `${CMAKE_BINARY_DIR}/generated/spirv_embedded.inl` (uint32 字节数组), `vulkan_backend.cpp` 直接 `#include`. 修改 shader 后需重新 `cmake configure`. 
 	- `openmp`: 当前 MinGW 静态链接 `libgomp.a`, 无需分发 DLL; 仅含 readme. 
@@ -154,6 +155,11 @@ Vulkan GPU 后端 (已实现)
 	- `libburstmerge/src/io/dng_converter.cpp:164` 有 `// WEAK!!!`: Adobe DNG Converter 进程退出后文件可能还没写完, 用 200ms 轮询 + 1s 稳定窗口 (最长 2 分钟) 等 DNG 落盘. 这是明确的弱实现. 
 	- `apps/console/main.cpp:6`: `burstmerge_console` 是 placeholder, 只认 `process`/`exit`, 输出硬编码到 `./out`. 
 	- `dng_writer_adapter.cpp:31`: DNG 通过通用 `ImageWriter` 写出会抛 `"use the dedicated RAW pipeline for DNG output"`. 这是**故意的误用防护**, 不是缺陷. 
+
+## Enhanced-Image DNG 读取 (重要修复)
+	- ACR NR / Enhanced-Image DNG (含 `sfEnhancedImage` SubIFD, 典型为 JPEG XL 压缩的 LinearRaw) 曾在输出阶段崩溃: `WriteDNGWithMetadata` 中 `hasEnhancedImage = (&RawImage() != Stage3Image()) && EnhanceParams().NotEmpty()` 为 true (因 `negative.Parse` 从 enhanced IFD 设置了 `fEnhanceParams`, 但读取器只调 `ReadStage1Image` 未调 `ReadEnhancedImage`, `fStage3Image` 为 NULL), 随后 `Stage3Image()->Bounds()` 解引用 NULL → 0xC0000005.
+	- 修复 (`dng_reader.cpp::RawReadDngFromStream`): `ReadStage1Image` 之后, 若 `info.fEnhancedIndex != -1 && !host.IgnoreEnhanced()` 则调 `ReadEnhancedImage` (默认 host = mode 2 "linear-only": 解码 enhanced 到 `fStage3Image`, 清除 MosaicInfo/OpcodeLists/`fEnhanceParams`) 再 `ClearStage1Image` 丢弃 Bayer. `is_linear_rgb` (planes==3) → `R16_Uint_RGB` → 现有 LinearRaw 管线. 写出时 `hasEnhancedImage` 为 false (`EnhanceParams` 已清空), 不再崩溃.
+	- 前置依赖: libjxl 必须已链接 (否则 enhanced SubIFD 若为 JPEG XL 压缩, `ReadEnhancedImage` 会抛 `"JXL not supported"`). 见上方 "三方依赖状态 > dng_sdk > JPEG XL 已启用".
 
 ## todos.txt 记录的已知问题 (根目录 `todos.txt`)
 	- 参考帧选取: 用户指定参考帧**未实现/未移植** (自动选取已实现: 包围取最暗, 普通取中间; 但无 CLI `--reference`). 
@@ -211,7 +217,7 @@ Vulkan GPU 后端 (已实现)
 	- 频域合并: `libburstmerge/src/merge/frequency.cpp:1026` (`FrequencyMerge`)
 	- 热像素/时域平均: `libburstmerge/src/denoise/temporal.cpp:13` / `:223`
 	- 曝光: `libburstmerge/src/exposure/exposure.cpp:118` (`ApplyExposure`)
-	- DNG 读取: `libburstmerge/src/io/dng_reader.cpp:142` (`ReadDngFromBuffer`)
+	- DNG 读取: `libburstmerge/src/io/dng_reader.cpp:23` (`RawReadDngFromStream`), `:172` (`ReadDngFromBuffer`); Enhanced-Image 读取 `:59` (`ReadEnhancedImage` + `ClearStage1Image`)
 	- DNG SDK 桥 (不透明指针): `libburstmerge/src/io/dng_sdk_bridge.cpp`
 	- Adobe DNG Converter 包装: `libburstmerge/src/io/dng_converter.cpp:93`
 	- 线程/粒度: `libburstmerge/src/core/task_executor.cpp:64` (`ParallelFor`)

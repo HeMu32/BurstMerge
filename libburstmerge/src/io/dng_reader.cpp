@@ -42,6 +42,25 @@ static RawImage RawReadDngFromStream(dng_stream& stream)
     negative.PostParse(host, stream, info);
     negative.ReadStage1Image(host, stream, info);
 
+    // Enhanced-Image DNGs (e.g. Adobe Camera Raw "NR" output) carry a second
+    // full-resolution SubIFD flagged sfEnhancedImage holding a pre-denoised
+    // LinearRaw (typically JPEG XL compressed). With the default host
+    // (SaveDNGVersion == dngVersion_None, SaveLinearDNG == false) the SDK
+    // runs ReadEnhancedImage in "linear-only" mode: it decodes the enhanced
+    // image into fStage3Image, then clears MosaicInfo / LinearizationInfo /
+    // OpcodeLists / fEnhanceParams so the negative describes a pure linear
+    // DNG. We then drop the Bayer Stage1 we just read so the existing
+    // image-selection logic (Stage1Image() ?? RawImage()) and metadata
+    // extraction consistently reach fStage3Image via the RawImage() fallback,
+    // and the existing is_linear_rgb path routes the data through the
+    // LinearRaw pipeline. Without this, fEnhanceParams stays populated while
+    // fStage3Image is NULL and the DNG writer dereferences it (NULL access).
+    if (info.fEnhancedIndex != -1 && !host.IgnoreEnhanced())
+    {
+        negative.ReadEnhancedImage(host, stream, info);
+        negative.ClearStage1Image();
+    }
+
     // Metadata extraction
     uint32_t pat_w = 2;
     io::ExtractRawMetadata(holder,
@@ -77,10 +96,12 @@ static RawImage RawReadDngFromStream(dng_stream& stream)
 
     uint32_t pixelSize = DngPixelTypeSize(result.metadata.dng_pixel_type);
 
-    // LinearRaw (demosaiced RGB) DNGs — e.g. DxO DeepPRIME output — carry
-    // 3 interleaved samples per pixel (PhotometricInterpretation 34892, no
-    // CFA). Tag them as R16_Uint_RGB so the channel count survives into the
-    // pipeline; everything else stays single-channel.
+    // LinearRaw (demosaiced RGB) DNGs — e.g. DxO DeepPRIME output, or the
+    // sfEnhancedImage SubIFD of Adobe Camera Raw "NR" DNGs (read above via
+    // ReadEnhancedImage) — carry 3 interleaved samples per pixel
+    // (PhotometricInterpretation 34892, no CFA). Tag them as R16_Uint_RGB so
+    // the channel count survives into the pipeline; everything else stays
+    // single-channel.
     const bool is_linear_rgb =
         (planes == 3) && (result.metadata.dng_pixel_type == DngPixelType::Uint16);
 
