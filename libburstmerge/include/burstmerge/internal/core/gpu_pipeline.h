@@ -3,6 +3,7 @@
 #include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/core/float_image.h"
 #include "burstmerge/internal/core/pipeline.h"
+#include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/io/dng_io.h"
 
 #include <functional>
@@ -20,8 +21,11 @@ namespace burstmerge
 // unchanged. Throws std::runtime_error on GPU failure.
 // Non-const images: the function releases pixel data and DNG SDK objects
 // for comparison frames after uploading to GPU, to reduce peak system RAM.
+// `exposure` drives both the exposure-weighted merge gate (is_bracketed) and
+// the chained-alignment gate (needs_chained_alignment + exposure_order).
 FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
                                size_t ref_idx,
+                               const ExposureClassification& exposure,
                                const Settings& settings,
                                const PipelineOrchestrator::ProgressFn& progress);
 

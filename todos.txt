@@ -28,5 +28,8 @@ ImageMetadata::tags: 从未被写入
     在既有加权上叠加 EV 权数 wn=1/exposure_scale (增强, 非替换). 裁切门不变 (按恢复前白值判溢出).
     WienerFftRobust 保持自有 Swift 式曝光处理; TemporalAverage/Median 不变.
   - 激活: 自动 (包围序列 ec.is_bracketed); 等曝光连拍 wn≡1, 与旧路径逐位一致 (无回归).
-  - GPU 路径: 暂未实现 (算法稳定后再移植), 见 docs/experiments/exposure-weighted-merge.md.
-  - 测试: test_stage0 新增 exposure classification + spatial exposure weighting (20 checks).
+  - GPU 路径: 已移植 — spatial (pc.f6 乘 wn) / freq_laplacian+freq_wiener (trust SSBO + inv_stack);
+    链式对齐 (transmission) 亦已移植 (GpuPipelineCore 按 EV 序链式对齐, 对齐 primitive 共用).
+    CPU/GPU 一致性: 等曝光 MAD 不变; 包围曝光 MAD 从 ~0.25% 降至 <0.01% (bkt1 spatial-dense 2.36→0.038).
+  - 测试: test_stage0 新增 exposure classification + spatial exposure weighting (20 checks);
+    test_stage3 CPU-vs-GPU 含 bkt1 spatial-dense (MAD 0.0045, rel 2.8e-05%).

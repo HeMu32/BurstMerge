@@ -504,7 +504,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         {
             // GPU-native pipeline: prepare / align / merge all on Vulkan compute.
             // Falls through to the shared CPU tail (bit-depth / exposure / DNG).
-            merged = GpuRunBurstPipeline(images, ref_idx, settings_, progress);
+            merged = GpuRunBurstPipeline(images, ref_idx, exposure, settings_, progress);
             ran_gpu_pipeline = true;
         }
         else if (backend_ == BackendType::Vulkan && input_is_linear)

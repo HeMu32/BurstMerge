@@ -72,7 +72,6 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Multi-threaded image loading
 - Support for AVIF and/or HEIF
 - Improve alignment algorithms for extreme exposure bracket range
-- Exposure-weighted merging on the GPU/Vulkan path (currently CPU-only)
 - Soft low-cut for merging exposure brackets
 - More constrained alignment algorithms: perspective, ...
 - Mid-percentage merge option

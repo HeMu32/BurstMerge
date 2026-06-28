@@ -75,15 +75,44 @@ the original saturation.
 so `wn ≡ 1` and every formula collapses bit-for-bit to the legacy path (verified
 by `test_stage0`'s uniform-scales invariance check).
 
-### 3. GPU / Vulkan path — not yet implemented
+### 3. GPU / Vulkan path — implemented
 
-The GPU merge shaders still use equal-weight accumulation; they do not consume a
-per-frame weight number. This produces a small CPU/GPU divergence for bracketed
-bursts only (uniform bursts are unaffected). The existing `test_stage3` CPU-vs-GPU
-consistency check still passes for `bkt1` (MAD ~0.016%) because the divergence is
-small for that sample, but it is expected to grow for wider brackets. Porting
-will add a `wn` SSBO / push-constant to `spatial_acc_*`, `freq_laplacian`, and
-`freq_wiener_tile` (see `docs/gpu-maintenance-guide.md` for the shader PC layout).
+The GPU mirrors the CPU weighting and chaining:
+
+- **Merge weighting** (engaged by `exposure.is_bracketed`):
+  - `spatial_acc_multi` / `spatial_acc_1ch` (per-comparison dispatch): the final
+    weight is multiplied by `pc.f6` (= `1/exposure_scale` for this comparison,
+    1.0 when not bracketed).
+  - `freq_laplacian` (single dispatch): a `float trust[num_comp]` SSBO at
+    binding 5 weights the low-frequency accumulation; high-freq max-abs is
+    unchanged.
+  - `freq_wiener_tile` (single dispatch ×4 phases): a `trust[num_comp]` SSBO at
+    binding 4 scales each comparison's spectral blend, and the normalisation is
+    precomputed on the host as `inv_stack = 1/(1+Σwn)` and passed via `pc.f2`.
+- **Chained ("transmission") alignment** (engaged by
+  `exposure.needs_chained_alignment`, spread > 2×): `GpuPipelineCore` processes
+  frames in EV order, each aligned (via the shared `align_to_parent` primitive)
+  against its EV-adjacent neighbour already warped into the reference frame
+  (the neighbour's gray is rebuilt from its warped plane via `to_grayscale`).
+  Mirrors the CPU `BuildAlignedComparisons` chained path; fixed-reference
+  remains the path for non-chained bursts.
+
+`wn == 1.0` (and a fixed-reference parent) is an exact no-op on the GPU, so
+uniform / non-bracketed bursts are bit-identical to the legacy path (verified:
+Seq CPU-vs-GPU MAD unchanged before/after the port).
+
+**Dual-path consistency (CPU vs GPU), measured via `burstmerge_compare`:**
+
+| sample.mode            | before GPU port | after (weighting + chained align) |
+|------------------------|-----------------|-----------------------------------|
+| Seq1 spatial           | 0.023           | 0.023 (unchanged — non-bracketed) |
+| Bkt1 spatial-dense     | 2.36 (0.014%)   | **0.038** (MAXDIFF 2492→34)       |
+| Bkt1 freq-wiener       | 0.82            | **0.030** (MAXDIFF 149→34)        |
+| Bkt2 spatial           | 4.05            | **0.078**                         |
+| Bkt2 freq-wiener       | 2.46            | **0.067**                         |
+
+Bracketed divergence dropped ~30–60× and now matches the non-bracketed
+baseline (~0.02–0.08 MAD, rel < 0.001%), well under the project's tolerance.
 
 ## Tests
 
@@ -96,4 +125,5 @@ will add a `wn` SSBO / push-constant to `spatial_acc_*`, `freq_laplacian`, and
   rejection of a clipped bright frame despite a large `wn`.
 
 Existing `test_stage1::CheckCenterSaturated` (bracketed highlights stay
-saturated) and `test_stage3` bkt1 consistency continue to pass unchanged.
+saturated) and `test_stage3` (CPU-vs-GPU, incl. bkt1 spatial-dense now at
+MAD 0.0045 / rel 2.8e-05%) continue to pass.

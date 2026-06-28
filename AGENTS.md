@@ -83,7 +83,7 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	- 裁切门 (`value/scale ≥ clip_threshold → 权重 0`) 不变 — 这正是"按恢复前白值判定溢出"的实现, 也充当 wn 的天然上限: 高 EV 帧虽 `wn` 大, 但其溢出像素直接归零, 不会污染高光.
 	- 激活: 自动 — 编排器对包围序列 (`ec.is_bracketed`) 置 `SpatialMergeParams::exposure_weighted` / `FrequencyMergeParams::exposure_weighted` 为 true; 等曝光连拍 `wn ≡ 1`, 输出与旧路径**逐位一致** (无回归).
 	- 覆盖: `SpatialMerge` (单通道 + 多通道), `FrequencyMerge::Laplacian` (低频加权, 高频 max-abs 不变), `FrequencyMerge::WienerFft` (每帧频谱 blend × wn, 归一化改 1/(1+Σwn)). **不覆盖** `WienerFftRobust` (自有 Swift 式曝光处理) 与 `TemporalAverage/Median`.
-	- GPU 路径**暂未实现** (算法稳定后再移植), 由此产生的 CPU/GPU 差异记录在 `docs/experiments/exposure-weighted-merge.md`.
+	- GPU 路径**已实现**: spatial shader (`spatial_acc_multi/1ch`) 经 `pc.f6` 乘 wn; `freq_laplacian` / `freq_wiener_tile` 经 trust SSBO + 预计算 `inv_stack`. 等曝光连拍 `wn ≡ 1` 时与旧路径逐位一致 (无回归). 见 `docs/experiments/exposure-weighted-merge.md`.
 
 ## 关键数据结构
 	- `FloatImage` (`core/float_image.h`): `width/height/channels + std::vector<float>`, NHWC 布局, 贯穿整个管线. 
@@ -96,7 +96,7 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 
 ## 后端现状
 	- **CPU (OpenMP)** 和 **Vulkan (GPU compute)** 双后端均可用. CLI 通过 `--backend cpu|vulkan` 选择 (默认 cpu, `apps/cli/main.cpp`). 
-	- **Vulkan 后端** (已实现): 见下方 "Vulkan GPU 后端" 章节. 在 RTX 3080 / 5060 Ti 上验证, 全部合并模式与 CPU 近像素级一致 (spatial/temporal/freq-laplacian/wiener-fft MAD < 0.02%; 包围曝光序列 < 0.25%). 对齐 standard+dense bit-identical (max 0px). **全单精度 float, 无 double**. 
+	- **Vulkan 后端** (已实现): 见下方 "Vulkan GPU 后端" 章节. 在 RTX 3080 / 5060 Ti 上验证, 全部合并模式与 CPU 近像素级一致 (等曝光 + 包围曝光 MAD < 0.02%; 包围曝光此前 < 0.25%, 引入 GPU 链式对齐 + EV 加权后降至 < 0.01%). 对齐 standard+dense bit-identical (max 0px); 包围曝光链式对齐 (transmission) 已在 GPU 实现. **全单精度 float, 无 double**.
 	- `pipeline.cpp` 的 RAW 分支在 `SelectExposureRefIndex` 之后按 `backend_` 分流: Vulkan 走 `GpuRunBurstPipeline` (prepare/align/merge 全在 GPU), CPU 走原有路径; 二者共用后续 bit-depth/exposure/DNG 写出尾部. 
 	- `SubGraph` / `IComputeBackend` 仍保留为接口, 当前未被 Vulkan 后端使用 (Vulkan 用 GPU-native 管线直接调度, 非通用节点图). 
 
@@ -110,7 +110,7 @@ Vulkan GPU 后端 (已实现)
 	- 下载优化: 持久化 staging buffer 优先使用 `HOST_CACHED` 内存类型 (NVIDIA RTX 3080: type 4), 避免 DEVICE_LOCAL BAR 的 uncached 读取 (56MB 读取: 586ms→3ms). 
 	- Shader 集 (33 个 `.comp`, `src/compute/vulkan/shaders/`): 覆盖全部算法 — texture ops (prepare/downsample/box_blur/binomial_sep/to_grayscale/block_mean_guide/plane_to_mosaic/copy/fill/scale/add), align (sad_global/select_min/upscale_seed/tile_sad/tile_select/tile_refine_diag/dense_level/warp_tilefield/warp_translate), spatial (spatial_acc_multi/spatial_acc_1ch/normalize_div), temporal (temporal_acc_exposure/temporal_median), frequency (freq_laplacian/freq_wiener_tile — 后者含直接 8×8 DFT + 7×7 相位搜索 + Wiener 收缩, 4-phase 非重叠 dispatch), exposure (exposure_curve_global/exposure_reinhard_local/max_to_gray), reductions (extract/reduce_scalar), format (float_to_uint16). 共用 push-constant 块 `ShaderPC` (14 int + 8 float = 88B, 见 `common.glsl`). **全部单精度 float, 无 double, shaderFloat64 不启用**.
 	- [新增] `highlight_recovery.comp` (第 34 个 shader): Bayer-only 高光恢复, 在 `prepare_texture` 之后 dispatch. 操作 4 通道 plane buffer (in-place), 仅修改绿色通道. Push constant: `pc.w2/h2`=plane 尺寸, `pc.i0/i1`=两个绿色通道索引, `pc.f0`=effective_range, `pc.f1..f4`=各通道 colour factor. 常量必须与 `HighlightRecoveryParams` (`pipeline_frame.h`) 一致. 非 Bayer (X-Trans 等) 在 GPU 路径跳过 (CPU 路径覆盖).
-	- 对齐 (全 GPU, 零读回): 灰度金字塔 (2-then-4 模式) → 逐层 coarse-to-fine SAD 搜索 (sad_global 每 candidate 一个 workgroup, 256 线程 reduce; select_min 在 SSBO 内更新 seed, 无 CPU 读回; tie-breaking 匹配 CPU 字典序) → standard 路径 diagonal-wavefront tile 细化 (tile_refine_diag) 或 dense 路径逐层 propagate/correct/search (dense_level) → warp_tilefield 双线性混合 4 角 tile 位移. 
+	- 对齐 (全 GPU, 零读回): 灰度金字塔 (2-then-4 模式) → 逐层 coarse-to-fine SAD 搜索 (sad_global 每 candidate 一个 workgroup, 256 线程 reduce; select_min 在 SSBO 内更新 seed, 无 CPU 读回; tie-breaking 匹配 CPU 字典序) → standard 路径 diagonal-wavefront tile 细化 (tile_refine_diag) 或 dense 路径逐层 propagate/correct/search (dense_level) → warp_tilefield 双线性混合 4 角 tile 位移. **[新增] 包围曝光链式对齐 (transmission)**: `ec.needs_chained_alignment` (spread > 2×) 时, `GpuPipelineCore` 按 EV 序顺序处理, 每帧对其到 EV 相邻邻居 (已 warp 进参考坐标系, 经 `to_grayscale` 重建灰度+金字塔), 而非直接对齐到参考帧. 与 CPU `BuildAlignedComparisons` 链式路径对应; 对齐 primitive (`align_to_parent` lambda) 固定参考/链式路径共用.
 	- Descriptor set: 统一 layout, binding 0..7 = STORAGE_BUFFER, binding 7 复用于 binomial 权重 (std430, 无 padding). Push constants 88B. Pipeline cache 按 shader 名懒创建. 
 	- 调试要点 (曾踩的坑): 每个 2D shader 必须声明 `layout(local_size_x=8,local_size_y=8)` 以匹配 `/8` 的 dispatch (否则只覆盖 1/64 像素); `FillFloat` 必须设 `pc.h=1` (否则 `n=w*h*ch=0` 不写入); binomial 权重必须用 std430 storage buffer 而非 std140 UBO (后者 float[] 步长 16B). 
 
@@ -186,7 +186,7 @@ Vulkan GPU 后端 (已实现)
 	- 根目录脚本大量硬编码本机路径: `SyncARWLensCorr.ps1` (`C:\MultiMediaTools\Bin\exiftool.exe`), `Scripts/benchmark_parallel.ps1` (`Z:\seq1/seq2`, 注意默认 CLI 路径用大写 `Build` 与实际不符), `_bench.ps1` (用 `NUL` 作输出, 传位置参数且用了未定义的 `--profiler`, **当前 CLI 下无法运行**). 
 
 ## 尚未实现 / 占位
-	- Vulkan 后端 **已实现** (见上方 "Vulkan GPU 后端" 章节). 全部合并模式 (spatial/linear/temporal/freq-laplacian/wiener-fft) 与 CPU 近像素级一致 (等曝光 MAD < 0.02%; 包围曝光 < 0.25%); 对齐 standard+dense bit-identical (max 0px). **全单精度 float, shaderFloat64 不启用**. WienerFftRobust 在 GPU 路径未实现 (会抛异常拒绝); hot-pixel repair 尚未在 GPU 路径实现 (当前跳过). [新增] 高光恢复 (highlight recovery) 在 GPU 路径已实现 (Bayer-only, `highlight_recovery.comp`, `prepare_texture` 之后 dispatch). `IComputeBackend`/`SubGraph` 通用节点图接口保留但未被 Vulkan 后端使用.
+	- Vulkan 后端 **已实现** (见上方 "Vulkan GPU 后端" 章节). 全部合并模式 (spatial/linear/temporal/freq-laplacian/wiener-fft) 与 CPU 近像素级一致 (等曝光 MAD < 0.02%; 包围曝光 < 0.01%); 对齐 standard+dense bit-identical (max 0px). **全单精度 float, shaderFloat64 不启用**. WienerFftRobust 在 GPU 路径未实现 (会抛异常拒绝); hot-pixel repair 尚未在 GPU 路径实现 (当前跳过). [新增] 高光恢复 (highlight recovery) 在 GPU 路径已实现 (Bayer-only, `highlight_recovery.comp`, `prepare_texture` 之后 dispatch). [新增] 曝光加权合并 (spatial/freq-laplacian/freq-wiener) 与链式对齐 (transmission) 均已在 GPU 实现. `IComputeBackend`/`SubGraph` 通用节点图接口保留但未被 Vulkan 后端使用.
 	- X-Trans CFA 支持: `float_image.h:46` 与 `float_image.cpp:349` 各有一条 `TODO(X-Trans)`, 当前非 Bayer 走通道平均 fallback, 可能不保色相位. 
 	- `tools/dump_dng.cpp` 不在 CMake 构建中; 其头注释 (列 `x,y,r,g,b`) 与实际输出 (`x,y,raw_value`) 不一致, 且有未使用变量 `search_rows`. 
 
@@ -234,7 +234,8 @@ Vulkan GPU 后端 (已实现)
 	- FFT (thread-local plan): `libburstmerge/src/core/fft_util.cpp:8`
 	- 参考帧选择: `libburstmerge/src/core/pipeline_frame.cpp` (`SelectExposureRefIndex`)
 	- [新增] 包围曝光判定 (统一): `libburstmerge/src/core/pipeline_frame.cpp` (`ClassifyExposureSequence` / `IsBracketedSequence` / `ExposureClassification`), 声明在 `pipeline_frame.h`; 消费者 `SelectExposureRefIndex` + `BuildAlignedComparisons` (`pipeline_align.cpp`) + 合并门控 (`pipeline.cpp`)
-	- [新增] 曝光加权合并: `SpatialMergeParams::exposure_weighted` / `FrequencyMergeParams::exposure_weighted` (`merge/spatial.h`, `merge/frequency.h`); 累加点 `spatial.cpp` (单/多通道), `frequency.cpp` (Laplacian 低频 + `WienerFftMerge` 频谱 blend)
+	- [新增] 曝光加权合并: `SpatialMergeParams::exposure_weighted` / `FrequencyMergeParams::exposure_weighted` (`merge/spatial.h`, `merge/frequency.h`); CPU 累加点 `spatial.cpp` (单/多通道), `frequency.cpp` (Laplacian 低频 + `WienerFftMerge` 频谱 blend); GPU 累加点 `spatial_acc_multi/1ch.comp` (`pc.f6`), `freq_laplacian.comp` / `freq_wiener_tile.comp` (trust SSBO + `pc.f2=inv_stack`)
+	- [新增] GPU 链式对齐 (transmission): `gpu_pipeline.cpp` `GpuPipelineCore` (`align_to_parent` lambda + EV 序链式分支), 对应 CPU `BuildAlignedComparisons` 链式路径
 	- [新增] 高光恢复: `libburstmerge/src/core/pipeline_frame.cpp` (`RecoverHighlights`), 常量 `HighlightRecoveryParams` (`pipeline_frame.h`)
 	- [新增] GPU 高光恢复 shader: `libburstmerge/src/compute/vulkan/shaders/highlight_recovery.comp`
 	- CLI 选项定义: `apps/cli/main.cpp:129`
