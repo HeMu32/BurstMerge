@@ -52,6 +52,54 @@ struct HighlightRecoveryParams
     static constexpr float kWeightClampRange = 0.2f;
 };
 
+/// @brief Result of classifying a burst's exposure spread.
+///
+/// @note This is the SINGLE source of truth for "is this an exposure-bracketed
+///       burst?". Every pipeline stage that used to re-derive that answer from
+///       its own min/max-EV loop (reference-frame selection, chained alignment,
+///       exposure-weighted merge) now consumes this struct, computed once by
+///       ClassifyExposureSequence() in the orchestrator and threaded through as
+///       a parameter. See pipeline.h for the threshold constants.
+struct ExposureClassification
+{
+    /// True if at least one frame carries a valid (>0) `ev_value`. When false
+    /// the burst is treated as constant-exposure (no bracketing possible) and
+    /// every other field is left at its default.
+    bool has_exposure = false;
+
+    /// True when the EV spread exceeds kBracketEvRatioThreshold (1.4x linear,
+    /// ~+0.49 stops). This is the coarse "bracketed vs uniform" gate shared by
+    /// reference-frame selection (pick the darkest frame) and the
+    /// exposure-weighted merge branch.
+    bool is_bracketed = false;
+
+    /// True when the EV spread exceeds 2^kBracketTransmissionFallbackEv (2.0x,
+    /// +1 stop). A stricter gate than is_bracketed: only wide brackets justify
+    /// the cost/complexity of chained (transmission) alignment. Note the
+    /// 1.4x..2.0x band where a burst is bracketed for reference/merge purposes
+    /// but still uses fixed-reference alignment.
+    bool needs_chained_alignment = false;
+
+    /// Frames with valid EV, sorted ascending by ev_value. Used directly by
+    /// reference-frame selection (front() == darkest) and by chained alignment
+    /// (walk outwards from the reference in EV order). Empty when
+    /// has_exposure is false.
+    std::vector<std::pair<float, size_t>> exposure_order;
+};
+
+/// @brief Classify a burst's exposure spread in one pass.
+///
+/// Scans every frame's `ev_value` once and applies both bracketing thresholds
+/// (kBracketEvRatioThreshold and kBracketTransmissionFallbackEv), replacing the
+/// two previously-duplicated min/max-EV loops in SelectExposureRefIndex and
+/// BuildAlignedComparisons.
+ExposureClassification ClassifyExposureSequence(const std::vector<RawImage>& images);
+
+/// @brief Convenience predicate: did ClassifyExposureSequence flag the burst as
+///        bracketed? Thin wrapper for callers (merge weighting, tests, CLI) that
+///        only need the boolean gate.
+bool IsBracketedSequence(const std::vector<RawImage>& images);
+
 bool IsCompatibleForAverage(const RawImage& a, const RawImage& b);
 float ComputeRobustness(float noise_reduction);
 float EstimateNoiseFloor(const FloatImage& image, uint32_t guide_block_size);
@@ -80,7 +128,15 @@ void RecoverHighlights(std::vector<FloatImage>& float_images,
                        const std::vector<RawImage>& raw_images,
                        size_t ref_idx);
 std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images);
-size_t SelectExposureRefIndex(const std::vector<RawImage>& images);
+
+/// @brief Choose the reference frame index for a burst.
+///
+/// Consumes the precomputed ExposureClassification (the orchestrator computes
+/// it once and threads it through) rather than re-scanning ev_value. For a
+/// bracketed burst (`ec.is_bracketed`) the darkest frame is picked
+/// (`ec.exposure_order.front()`); otherwise the middle frame by position.
+size_t SelectExposureRefIndex(const std::vector<RawImage>& images,
+                              const ExposureClassification& ec);
 
 // --- Non-RAW helpers ---
 FloatImage DecodedImageToFloatImage(const io::DecodedImage& img);

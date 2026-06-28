@@ -299,11 +299,12 @@ void DumpWarpedGrayBmp(const FloatImage& gray_src,
 } // namespace
 
 std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& float_images,
-                                                const std::vector<RawImage>& raw_images,
-                                                size_t ref_idx,
-                                                const Settings& settings,
-                                                uint32_t cfa_period,
-                                                const PipelineOrchestrator::ProgressFn& progress)
+                                                 const std::vector<RawImage>& raw_images,
+                                                 size_t ref_idx,
+                                                 const Settings& settings,
+                                                 uint32_t cfa_period,
+                                                 const ExposureClassification& exposure,
+                                                 const PipelineOrchestrator::ProgressFn& progress)
 {
     ProfileScope scope("time.pipeline.build_aligned_comparisons");
     // Pipeline-facing adapter around alignment: choose guides, dispatch to the
@@ -404,26 +405,13 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         return align_and_warp_pregrays(gr, gs, source, source_idx, progress_idx, total_count);
     };
 
-    bool has_exposure = false;
-    float min_exp = std::numeric_limits<float>::max();
-    float max_exp = 0.0f;
-    std::vector<std::pair<float, size_t>> exposure_order;
-    exposure_order.reserve(raw_images.size());
-    for (size_t i = 0; i < raw_images.size(); ++i)
-    {
-        float v = raw_images[i].metadata.ev_value;
-        if (v > 0.0f)
-        {
-            has_exposure = true;
-            min_exp = std::min(min_exp, v);
-            max_exp = std::max(max_exp, v);
-            exposure_order.push_back({v, i});
-        }
-    }
-
-    const bool use_transmission = has_exposure && !exposure_order.empty() &&
-                                  max_exp > min_exp * std::pow(2.0f, PipelineConstants::kBracketTransmissionFallbackEv);
-                                  // Enable chained alignment for dense mode + bracketed stacks
+    // Bracketing decision and the EV-sorted frame order are computed once by
+    // the orchestrator (ClassifyExposureSequence) and passed in via `exposure`.
+    // Chained ("transmission") alignment is enabled iff the spread exceeds the
+    // stricter 2^kBracketTransmissionFallbackEv threshold; the EV order is
+    // reused directly (already sorted ascending).
+    const bool use_transmission = exposure.needs_chained_alignment;
+    const std::vector<std::pair<float, size_t>>& exposure_order = exposure.exposure_order;
 
     if (!use_transmission)
     {
@@ -457,10 +445,7 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         ref_idx, exposure_order.size());
 #endif
 
-    std::sort(exposure_order.begin(), exposure_order.end(),
-              [](const auto& a, const auto& b)
-              { return a.first < b.first; });
-
+    // exposure_order is already sorted ascending by EV (ClassifyExposureSequence).
     const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
     size_t root_pos = 0;
     for (size_t pos = 0; pos < exposure_order.size(); ++pos)

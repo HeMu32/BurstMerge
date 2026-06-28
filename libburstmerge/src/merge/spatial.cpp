@@ -312,6 +312,28 @@ FloatImage SpatialMerge(const FloatImage& reference,
         }
     }
 
+    // Exposure-bracketing weight numbers, one per comparison frame:
+    //   wn[idx] = 1 / exposure_scales[idx]  (= comp_ev / ref_ev, the linear
+    //             exposure ratio; brighter comparisons get a larger number).
+    // The reference seed implicitly carries wn = 1 (scales are ref-relative).
+    // When exposure_weighted is false -- or for uniform bursts, where every
+    // scale is ~1.0 -- wn[idx] stays 1.0 and the accumulation below collapses
+    // to the legacy equal-weight path, bit-for-bit.
+    //
+    // This AUGMENTS the existing per-pixel robustness / highlight / clip weight
+    // (computed unchanged in the loops below); it does not replace it. Clipped
+    // comparisons are still force-zeroed by the clip gate, so a bright frame's
+    // large wn cannot drag highlights -- it drops out exactly where it clips.
+    std::vector<float> cmp_wn(aligned_comparisons.size(), 1.0f);
+    if (params.exposure_weighted && params.exposure_scales)
+    {
+        for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+        {
+            if (idx < params.num_scales && params.exposure_scales[idx] > 0.0f)
+                cmp_wn[idx] = 1.0f / params.exposure_scales[idx];
+        }
+    }
+
     if (reference.channels == 1)
     {
         ProfileScope scope(linear_mode ? "time.merge.spatial.linear.merge_loop" : "time.merge.spatial.standard.merge_loop");
@@ -370,8 +392,13 @@ FloatImage SpatialMerge(const FloatImage& reference,
                         }
                     }
 
-                        weighted_sum += aligned_comparisons[idx].data[i] * w;
-                        weight_sum += w;
+                        // Exposure weight number multiplies the existing
+                        // robustness weight `w`; the reference seed stays at 1.
+                        // Skipped (wn==1) for the uniform-burst / non-bracketed
+                        // path, so behaviour is unchanged there.
+                        const float we = w * cmp_wn[idx];
+                        weighted_sum += aligned_comparisons[idx].data[i] * we;
+                        weight_sum += we;
                     }
 
                     out.data[i] = weighted_sum / weight_sum;
@@ -476,7 +503,11 @@ FloatImage SpatialMerge(const FloatImage& reference,
 
                         for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
                         {
-                            float w = shared_w[idx];
+                            // Exposure weight number multiplies the shared
+                            // per-frame weight (robustness + chroma veto +
+                            // clip gate), applied after all of those; the
+                            // reference seed stays at weight 1.
+                            const float w = shared_w[idx] * cmp_wn[idx];
                             weighted_sum += aligned_comparisons[idx].data[ci] * w;
                             weight_sum += w;
                         }

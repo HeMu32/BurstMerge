@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 #include <new>
+#include <cmath>
 
 #include "burstmerge/api.h"
 #include "burstmerge/api_c.h"
@@ -876,6 +877,187 @@ static void test_temporal_median_clip_with_recovery()
     std::cout << "  TemporalMedian clip + bypass OK (with recovery)" << std::endl;
 }
 
+// Exercises the unified bracketing classifier (ClassifyExposureSequence /
+// IsBracketedSequence / SelectExposureRefIndex) across the three EV-spread
+// regimes: uniform, bracketed-only (1.4x..2.0x), and wide bracket (>2.0x).
+static void test_exposure_classification()
+{
+    std::cout << "[test] exposure classification..." << std::endl;
+
+    auto mk = [](float ev) {
+        burstmerge::RawImage ri;
+        ri.metadata.ev_value = ev;
+        return ri;
+    };
+
+    // Uniform burst: same EV everywhere -> not bracketed, no chaining, middle ref.
+    {
+        std::vector<burstmerge::RawImage> imgs;
+        for (int i = 0; i < 3; ++i) imgs.push_back(mk(1.0f));
+        auto ec = burstmerge::ClassifyExposureSequence(imgs);
+        CHECK(ec.has_exposure, "uniform: has_exposure");
+        CHECK(!ec.is_bracketed, "uniform: not bracketed");
+        CHECK(!ec.needs_chained_alignment, "uniform: no chained alignment");
+        CHECK(!burstmerge::IsBracketedSequence(imgs), "uniform: IsBracketedSequence false");
+        CHECK_EQ(burstmerge::SelectExposureRefIndex(imgs, ec), imgs.size() / 2,
+                 "uniform: middle frame is reference");
+    }
+
+    // Narrow bracket (ratio 1.5x: within 1.4x..2.0x band): bracketed, but the
+    // spread is not yet wide enough to trigger chained alignment.
+    {
+        std::vector<burstmerge::RawImage> imgs;
+        imgs.push_back(mk(1.0f));
+        imgs.push_back(mk(1.25f));
+        imgs.push_back(mk(1.5f));
+        auto ec = burstmerge::ClassifyExposureSequence(imgs);
+        CHECK(ec.is_bracketed, "narrow bracket: bracketed");
+        CHECK(!ec.needs_chained_alignment, "narrow bracket: no chained alignment");
+        CHECK_EQ(ec.exposure_order.front().second, 0u,
+                 "narrow bracket: order front is darkest (ev=1.0, idx 0)");
+        CHECK_EQ(burstmerge::SelectExposureRefIndex(imgs, ec), 0u,
+                 "narrow bracket: darkest frame is reference");
+    }
+
+    // Wide bracket (ratio 16x: >2.0x): both bracketed and chained alignment.
+    {
+        std::vector<burstmerge::RawImage> imgs;
+        imgs.push_back(mk(1.0f));
+        imgs.push_back(mk(0.25f));   // darkest
+        imgs.push_back(mk(4.0f));
+        auto ec = burstmerge::ClassifyExposureSequence(imgs);
+        CHECK(ec.is_bracketed, "wide bracket: bracketed");
+        CHECK(ec.needs_chained_alignment, "wide bracket: chained alignment");
+        CHECK_EQ(burstmerge::SelectExposureRefIndex(imgs, ec), 1u,
+                 "wide bracket: darkest frame (idx 1) is reference");
+    }
+
+    // No EV data at all -> not bracketed, empty order.
+    {
+        std::vector<burstmerge::RawImage> imgs;
+        imgs.push_back(mk(0.0f));
+        imgs.push_back(mk(0.0f));
+        auto ec = burstmerge::ClassifyExposureSequence(imgs);
+        CHECK(!ec.has_exposure, "no EV: not has_exposure");
+        CHECK(!ec.is_bracketed, "no EV: not bracketed");
+        CHECK(ec.exposure_order.empty(), "no EV: empty exposure_order");
+    }
+
+    std::cout << "  Exposure classification OK" << std::endl;
+}
+
+// Verifies the exposure-weight-number (wn) augmentation of SpatialMerge:
+//  - uniform-burst invariance (wn == 1 -> bit-identical to legacy path),
+//  - EV weight-number domination in shadows (brighter frame pulls the average),
+//  - the clip gate zeroes clipped comparisons despite a large wn.
+// All cases use robustness == 0 so the per-pixel robustness weight w == 1 and
+// the only differentiator is wn, making the expected averages exact.
+static void test_spatial_exposure_weighting()
+{
+    std::cout << "[test] spatial exposure weighting..." << std::endl;
+
+    const uint32_t w = 8, h = 8, ch = 1;
+
+    // --- Uniform-burst invariance: with every exposure_scale == 1.0, wn == 1
+    //     everywhere, so exposure_weighted must reproduce the legacy output. ---
+    {
+        burstmerge::FloatImage ref = make_float_image(w, h, ch, 100.0f);
+        burstmerge::FloatImage compA = make_float_image(w, h, ch, 130.0f);
+        burstmerge::FloatImage compB = make_float_image(w, h, ch, 90.0f);
+        std::vector<burstmerge::FloatImage> comps = {compA, compB};
+
+        float scales[2] = {1.0f, 1.0f};
+        burstmerge::SpatialMergeParams p_off{};
+        p_off.robustness = 0.0f;            // -> per-pixel weight w == 1
+        p_off.noise_floor = 100.0f;
+        p_off.highlight_threshold = 1e6f;   // never enter highlight branch
+        p_off.guide_block_size = 1;
+        p_off.num_scales = 2;
+        p_off.exposure_scales = scales;
+        p_off.exposure_weighted = false;
+
+        burstmerge::SpatialMergeParams p_on = p_off;
+        p_on.exposure_weighted = true;      // wn == 1 -> must equal p_off
+
+        burstmerge::FloatImage out_off = burstmerge::SpatialMerge(ref, comps, p_off);
+        burstmerge::FloatImage out_on  = burstmerge::SpatialMerge(ref, comps, p_on);
+
+        bool identical = true;
+        for (size_t i = 0; i < out_off.data.size(); ++i)
+            if (out_off.data[i] != out_on.data[i]) { identical = false; break; }
+        CHECK(identical,
+              "uniform scales: exposure_weighted=true bit-identical to false");
+    }
+
+    // --- EV weight-number domination: a brighter comparison (larger wn) pulls
+    //     the shadow average toward its value. ---
+    {
+        // ref=100; compA is a darker frame (scale 2.0 -> wn 0.5) value 90;
+        // compB is a brighter frame (scale 0.5 -> wn 2.0) value 110.
+        burstmerge::FloatImage ref = make_float_image(w, h, ch, 100.0f);
+        burstmerge::FloatImage compA = make_float_image(w, h, ch, 90.0f);
+        burstmerge::FloatImage compB = make_float_image(w, h, ch, 110.0f);
+        std::vector<burstmerge::FloatImage> comps = {compA, compB};
+
+        float scales[2] = {2.0f, 0.5f};
+        burstmerge::SpatialMergeParams p{};
+        p.robustness = 0.0f;
+        p.noise_floor = 100.0f;
+        p.highlight_threshold = 1e6f;
+        p.guide_block_size = 1;
+        p.num_scales = 2;
+        p.exposure_scales = scales;
+
+        // Legacy equal-weight average: (100 + 90 + 110)/3 = 100.0
+        p.exposure_weighted = false;
+        burstmerge::FloatImage out_eq = burstmerge::SpatialMerge(ref, comps, p);
+        CHECK(std::fabs(out_eq.data[0] - 100.0f) < 0.01f,
+              "EV weighting off -> equal-weight average 100 (got " +
+              std::to_string(out_eq.data[0]) + ")");
+
+        // wn-weighted average: (100*1 + 90*0.5 + 110*2.0)/(1+0.5+2.0) ~ 104.286
+        p.exposure_weighted = true;
+        burstmerge::FloatImage out_wn = burstmerge::SpatialMerge(ref, comps, p);
+        const float expected = (100.0f + 90.0f * 0.5f + 110.0f * 2.0f) /
+                               (1.0f + 0.5f + 2.0f);
+        CHECK(std::fabs(out_wn.data[0] - expected) < 0.01f,
+              "EV weighting on -> wn-weighted average (got " +
+              std::to_string(out_wn.data[0]) + " want " + std::to_string(expected) + ")");
+        CHECK(expected > 100.0f,
+              "brighter frame (wn=2) pulls shadow average above 100");
+    }
+
+    // --- Clip gate is the clamp: a clipped bright comparison contributes 0
+    //     despite a large wn, so it cannot drag the highlight down. ---
+    {
+        // ref=950 (highlight); bright comp scale 0.0625 (wn=16) value 800,
+        // whose pre-normalization value 800/0.0625 = 12800 exceeds clip_threshold.
+        burstmerge::FloatImage ref = make_float_image(w, h, ch, 950.0f);
+        burstmerge::FloatImage comp = make_float_image(w, h, ch, 800.0f);
+        std::vector<burstmerge::FloatImage> comps = {comp};
+
+        float scales[1] = {0.0625f};
+        burstmerge::SpatialMergeParams p{};
+        p.robustness = 0.0f;
+        p.noise_floor = 100.0f;
+        p.highlight_threshold = 1e6f;
+        p.clip_threshold = 1000.0f;         // enable gate; 12800 >= 1000 -> clipped
+        p.guide_block_size = 1;
+        p.num_scales = 1;
+        p.exposure_scales = scales;
+        p.exposure_weighted = true;         // wn = 16, but clipped -> weight 0
+
+        burstmerge::FloatImage out = burstmerge::SpatialMerge(ref, comps, p);
+        // Rejected bright comp -> output == reference (950). Without the clip
+        // gate it would be (950 + 800*16)/17 ~ 809, confirming rejection.
+        CHECK(std::fabs(out.data[0] - 950.0f) < 0.01f,
+              "clipped bright frame rejected despite wn=16 (got " +
+              std::to_string(out.data[0]) + ")");
+    }
+
+    std::cout << "  Spatial exposure weighting OK" << std::endl;
+}
+
 int main()
 {
     test_types();
@@ -892,6 +1074,8 @@ int main()
     test_temporal_median();
     test_temporal_median_clip_no_recovery();
     test_temporal_median_clip_with_recovery();
+    test_exposure_classification();
+    test_spatial_exposure_weighting();
 
     std::cout << "\n================================" << std::endl;
     std::cout << "Stage 0: " << g_tests << " checks, "

@@ -55,10 +55,11 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	4. RAW 分支:
 		- `PrepareDngInputs` (`pipeline_io.cpp:106`): 非 DNG 的 RAW 在 Windows 上调 Adobe DNG Converter 转换. 
 		- 两阶段读取: 先顺序读到内存, 再 `ReadDngFromBuffer` 并行解码 (`ParallelFor` 带 `decode_dng` tag). 
-		- `SelectExposureRefIndex` (`pipeline_frame.cpp:147`): 包围曝光 (max_ev > 1.25×min_ev) 取最暗帧, 否则取中间帧. 
-		- `RepairHotPixels` → `NormalizeFrames` (减黑电平, 按 EV 比例缩放) → `BuildAlignedComparisons`. 
+		- `ClassifyExposureSequence` (`pipeline_frame.cpp`): 统一的包围曝光判定, 单次扫描 ev_value 同时应用两个阈值 — `is_bracketed` (>1.4×, ~+0.49EV) 与 `needs_chained_alignment` (>2^kBracketTransmissionFallbackEv=2×, +1EV). 在编排器 `Process` 中**计算一次**, 作为参数线程传递给 `SelectExposureRefIndex` / `BuildAlignedComparisons` / 合并加权门控, 取代此前各处重复的 min/max-EV 循环. `IsBracketedSequence` 是仅返回布尔的便捷包装.
+		- `SelectExposureRefIndex` (`pipeline_frame.cpp`): 包围曝光 (`ec.is_bracketed`) 取最暗帧 (`ec.exposure_order.front()`), 否则取中间帧. 消费预计算的 `ExposureClassification` (不再自行扫描 ev_value).
+		- `RepairHotPixels` → `NormalizeFrames` (减黑电平, 按 EV 比例缩放) → `BuildAlignedComparisons` (链式对齐门控改用 `ec.needs_chained_alignment`, 直接复用已排序的 `ec.exposure_order`).
 		- [新增] `RecoverHighlights` (`pipeline_frame.cpp`): 在 `NormalizeFrames` 之后、`BuildAlignedComparisons` 之前执行. 对被裁切的绿色通道进行高光恢复 (从邻近 R/B 像素外推). 三层分发: Bayer (全空间邻居算法, 匹配 Swift `texture.metal:add_texture_highlights`), LinearRAW (逐像素同像素 R/B 外推), 其他 mosaic (同超级像素 R/B 外推). 常量定义在 `HighlightRecoveryParams` (`pipeline_frame.h`). GPU 端仅 Bayer (`highlight_recovery.comp`). CLI `--highlight-recovery` (默认开启).
-		- 三选一合并: `TemporalAverage` / `FrequencyMerge` / `SpatialMerge`. 
+		- 三选一合并: `TemporalAverage` / `FrequencyMerge` / `SpatialMerge`. **[新增]** 包围曝光 (`ec.is_bracketed`) 时, Spatial / Laplacian / WienerFft(标准) 启用基于 EV 权数的增强加权 (见下方"曝光加权合并"); WienerFftRobust 保留自有 Swift 式曝光处理 (忽略该开关); TemporalAverage/Median 不受影响.
 		- 位深缩放 (`pipeline.cpp:531-606`): ≤10bit 走 "黑电平置零" 路径, >10bit 路径还原黑电平. 此处注释记录了 ACR/Lightroom 低 bit 黑电平渲染 bug 的规避. 
 		- 可选 `ApplyExposure` → 逐通道黑电平 delta → `ConvertPlaneImageToMosaic` → 写出. 
 	5. 清理: 删除转换临时目录; 若设置了 `BURSTMERGE_PROFILE` 打印 profile 报告. 
@@ -66,7 +67,7 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 ## 模块职责与对应参考实现 (hdr-plus-swift)
 	- `core/`: 管线编排/线程/性能/缓冲/FFT. 对应 Swift 的 `denoise.swift` (TileInfo/progress/Metal device) 和 `texture.swift`. 
 	- `align/`: 金字塔 + 三种估计器 (Standard/Dense/Frequency) + warp. 对应 `align/align.swift` + `align.metal`. 
-	- `merge/`: spatial (像素域加权) 与 frequency (Laplacian / WienerFft / WienerFftRobust). 对应 `merge/spatial.swift` 和 `merge/frequency.swift` + `.metal`. 
+	- `merge/`: spatial (像素域加权) 与 frequency (Laplacian / WienerFft / WienerFftRobust). 对应 `merge/spatial.swift` 和 `merge/frequency.swift` + `.metal`. **[新增]** 包围曝光时 Spatial / Laplacian / WienerFft(标准) 在既有加权之上**叠加** EV 权数 `wn = 1/exposure_scales[idx]` (增强, 非替换); WienerFftRobust 保持自有 Swift 式曝光处理不变; TemporalAverage/Median 不受影响. 详见下方"曝光加权合并".
 	- `denoise/temporal.cpp`: 热像素修复 + 时域平均. 
 	- [新增] `pipeline_frame.cpp::RecoverHighlights`: 高光恢复 (裁切绿色通道外推). 对应 Swift `texture.swift:add_texture_highlights` + `texture.metal:add_texture_highlights`. 常量 `HighlightRecoveryParams` 与 GPU shader `highlight_recovery.comp` 必须一致.
 	- `exposure/exposure.cpp`: 线性 / Reinhard 曲线提亮. 对应 `exposure/exposure.swift`. 
@@ -74,6 +75,15 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	- `io/dng_reader.cpp`: DNG 读取入口. 读 Stage1Image (Bayer CFA) 后, 若 `info.fEnhancedIndex != -1` 则调 `ReadEnhancedImage` (默认 host = mode 2 "linear-only": 将 enhanced LinearRaw 解码到 `fStage3Image`, 清除 MosaicInfo/OpcodeLists/`fEnhanceParams`), 再 `ClearStage1Image` 丢弃 Bayer, 使 `RawImage()` 回退到 Stage3. `is_linear_rgb` (planes==3) 检测将其标记为 `R16_Uint_RGB`, 走现有 LinearRaw 管线. 支持 ACR NR / Enhanced-Image (`sfEnhancedImage`) DNG (典型为 JPEG XL 压缩的 LinearRaw SubIFD). 对应 Swift `dng_sdk_wrapper.cpp` 的 `ReadDNG`.
 	- `io/dng_converter.cpp` (Windows-only): 包装 Adobe DNG Converter CLI. 对应 `io_dng_sdk.swift::convert_raws_to_dngs`. 
 	- `core/fft_util.cpp`: 用 PocketFFT 替代 Metal FFT shader; **必须 thread-local 持有 plan** (pocketfft plan 内部有工作缓冲, 不可多线程共享). 
+
+## 曝光加权合并 (Exposure-Weighted Merge) — [新增] CPU 路径
+包围曝光序列下, 既有合并算法对各帧等权处理, 无法体现"高 EV 帧主导暗部、低 EV 帧主导亮部"的 HDR 目的. 本特性在不破坏既有加权 (robustness / Wiener 收缩 / 高光门 / 裁切门) 的前提下, 为每帧叠加一个基于曝光的**权数** (weight number):
+	- `wn_i = 1 / exposure_scales[i]` (比较帧); 合并参考帧 (`ref_idx`, 包围序列里也是最暗的曝光参考帧) 隐式取 `wn = 1`. 缺失 EV 数据时 `wn = 1` (中性).
+	- 各算法的**既有每像素权重保持不变**, 仅在累加时再乘以 `wn` (增强, 非替换). 规范化 (÷Σ权重) 自然变为按权数加权.
+	- 裁切门 (`value/scale ≥ clip_threshold → 权重 0`) 不变 — 这正是"按恢复前白值判定溢出"的实现, 也充当 wn 的天然上限: 高 EV 帧虽 `wn` 大, 但其溢出像素直接归零, 不会污染高光.
+	- 激活: 自动 — 编排器对包围序列 (`ec.is_bracketed`) 置 `SpatialMergeParams::exposure_weighted` / `FrequencyMergeParams::exposure_weighted` 为 true; 等曝光连拍 `wn ≡ 1`, 输出与旧路径**逐位一致** (无回归).
+	- 覆盖: `SpatialMerge` (单通道 + 多通道), `FrequencyMerge::Laplacian` (低频加权, 高频 max-abs 不变), `FrequencyMerge::WienerFft` (每帧频谱 blend × wn, 归一化改 1/(1+Σwn)). **不覆盖** `WienerFftRobust` (自有 Swift 式曝光处理) 与 `TemporalAverage/Median`.
+	- GPU 路径**暂未实现** (算法稳定后再移植), 由此产生的 CPU/GPU 差异记录在 `docs/experiments/exposure-weighted-merge.md`.
 
 ## 关键数据结构
 	- `FloatImage` (`core/float_image.h`): `width/height/channels + std::vector<float>`, NHWC 布局, 贯穿整个管线. 
@@ -222,7 +232,9 @@ Vulkan GPU 后端 (已实现)
 	- Adobe DNG Converter 包装: `libburstmerge/src/io/dng_converter.cpp:93`
 	- 线程/粒度: `libburstmerge/src/core/task_executor.cpp:64` (`ParallelFor`)
 	- FFT (thread-local plan): `libburstmerge/src/core/fft_util.cpp:8`
-	- 参考帧选择: `libburstmerge/src/core/pipeline_frame.cpp:147` (`SelectExposureRefIndex`)
+	- 参考帧选择: `libburstmerge/src/core/pipeline_frame.cpp` (`SelectExposureRefIndex`)
+	- [新增] 包围曝光判定 (统一): `libburstmerge/src/core/pipeline_frame.cpp` (`ClassifyExposureSequence` / `IsBracketedSequence` / `ExposureClassification`), 声明在 `pipeline_frame.h`; 消费者 `SelectExposureRefIndex` + `BuildAlignedComparisons` (`pipeline_align.cpp`) + 合并门控 (`pipeline.cpp`)
+	- [新增] 曝光加权合并: `SpatialMergeParams::exposure_weighted` / `FrequencyMergeParams::exposure_weighted` (`merge/spatial.h`, `merge/frequency.h`); 累加点 `spatial.cpp` (单/多通道), `frequency.cpp` (Laplacian 低频 + `WienerFftMerge` 频谱 blend)
 	- [新增] 高光恢复: `libburstmerge/src/core/pipeline_frame.cpp` (`RecoverHighlights`), 常量 `HighlightRecoveryParams` (`pipeline_frame.h`)
 	- [新增] GPU 高光恢复 shader: `libburstmerge/src/compute/vulkan/shaders/highlight_recovery.comp`
 	- CLI 选项定义: `apps/cli/main.cpp:129`

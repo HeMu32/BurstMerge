@@ -23,6 +23,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Simple temporal median merge
 - Motion-robust merge in the spatial domain
 - Motion-robust merge in the frequency domain
+- Exposure-weighted merging for bracketed bursts (spatial / frequency-Laplacian / frequency-Wiener): brighter frames lead the shadows while clipped comparisons are rejected at the highlights — engaged automatically for bracketed RAW bursts, CPU path.
 - Highlight recovery for clipped green channels (extrapolated from R/B neighbours)
     - Highlight recovery was for internal processing only and was not intended for extending dynamic range for outputs.
 - Optional non-linear exposure mapping for improved shadow tonality
@@ -61,6 +62,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - OpenEXR support
 - DPX support
 - Hot pixel suppression (current implementation not working well)
+- Better noise estimation algorithm
 - Preserve lens correction profiles (via exiftool, Sony ARW only)
 - Configurable path to Adobe DNG Converter (hard-coded for now, will not be a problem on most machines)
 - More comperhensive metadata copying for output
@@ -70,7 +72,8 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Multi-threaded image loading
 - Support for AVIF and/or HEIF
 - Improve alignment algorithms for extreme exposure bracket range
-- Improve merge algorithms for extreme exposure bracket range
+- Exposure-weighted merging on the GPU/Vulkan path (currently CPU-only)
+- Soft low-cut for merging exposure brackets
 - More constrained alignment algorithms: perspective, ...
 - Mid-percentage merge option
 - More texture-preserving and noise-robust frame merging algorithm
@@ -151,6 +154,7 @@ Frames flow through the stages below. Stages marked with an option list expose a
     - `--merge temporal`: exposure-weighted temporal average (simplest; ignores `--noise-reduction`).
     - `--merge median`: per-pixel median across frames (robust to outliers; but tend to produce bad results in motion scene; ignores `--noise-reduction`).
     - Strength knob for spatial/frequency: `--noise-reduction`.
+    - For bracketed RAW bursts, spatial / frequency-laplacian / frequency-wiener automatically engage **exposure-weighted merging**: each comparison frame's contribution is scaled by an EV-derived weight number (`wn = 1/exposure_scale`) on top of the existing motion-robust weight, so brighter frames lead the shadows while clipped comparisons are rejected at the highlights. Automatic (no flag); CPU path only. `wiener-robust` keeps its own exposure handling.
 8. **Bit-depth scaling** — rescale to the requested depth and reconcile black/white levels. *(fixed; `--bit-depth`)*
 9. **Non-Linear Exposure Mapping** *(optional)* — `--exposure-mode`: `off` *(default)*, `linear` (gain), or `curve` (tone curve). Curve sub-mode `--exposure-curve`: `global` or `local` (Reinhard). Magnitude: `--exposure-stops`.
 10. **Mosaic rebuild & write** — re-pack to Bayer mosaic (RAW path) and write the output container. *(fixed; `--output-format`, `-o`)*
