@@ -1015,12 +1015,10 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
         Binding b[2] = {{0, rawbufs.back(), 0}, {1, plane[i], 0}};
         vk.Dispatch("prepare_texture", pc, (pw + 7) / 8, (ph + 7) / 8, int(ch), b, 2);
     }
-    vk.FlushFrame();
-    for (auto r : rawbufs) vk.DestroyBuffer(r);
 
     // Highlight recovery: extrapolate clipped green photosites from nearby
-    // R/B values. Bayer-only (period==2, 4-channel plane). Non-Bayer and
-    // LinearRAW inputs are handled by the CPU path (or skip on GPU).
+    // R/B values. Bayer-only (period==2, 4-channel plane). Dispatched in the
+    // SAME frame as prepare_texture to avoid an extra FlushFrame sync point.
     if (settings.highlight_recovery && period == 2 && ch == 4)
     {
         Report(progress, PipelineConstants::kProgressNormalize, "Recovering clipped highlights");
@@ -1067,8 +1065,9 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
             Binding b[1] = {{0, plane[i], 0}};
             vk.Dispatch("highlight_recovery", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 1);
         }
-        vk.FlushFrame();
     }
+    vk.FlushFrame();
+    for (auto r : rawbufs) vk.DestroyBuffer(r);
     }
 
     // All pixel data is now on GPU (uploaded via CreateBufferFromU16 above).
