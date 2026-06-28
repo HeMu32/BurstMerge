@@ -327,6 +327,14 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                     params.num_scales = static_cast<uint32_t>(aligned.size());
                     params.exposure_scales = nullptr;
                     merged = TemporalMedian(ref_image, aligned, params);
+                } else if (settings_.merge_algo == MergeAlgorithm::ExpBracketAverage)
+                {
+                    Report(progress, PipelineConstants::kProgressMerge, "Merging frames (exposure-bracketed average)");
+                    ExpBracketAverageParams params;
+                    params.clip_threshold = white_level * PipelineConstants::kClipFactor;
+                    params.num_scales = static_cast<uint32_t>(aligned.size());
+                    params.exposure_scales = nullptr;
+                    merged = ExpBracketAverage(ref_image, aligned, params);
                 } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
                 {
                     Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
@@ -621,6 +629,19 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.num_scales = static_cast<uint32_t>(exp_scales.size());
                 params.exposure_scales = exp_scales.data();
                 merged = TemporalMedian(ref_image, aligned, params);
+            } else if (settings_.merge_algo == MergeAlgorithm::ExpBracketAverage)
+            {
+                // ExpBracketAverage: EV weight number (wn = 1/scale) averaging
+                // with the same clip gate as spatial (max-across-channels).
+                // Assumes bracketed input; non-bracketed degrades to equal-weight
+                // average (wn = 1 for all frames).
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames with exposure-bracketed average");
+                ExpBracketAverageParams params;
+                float avg_bl_eb = MeanBlackLevel(images[ref_idx].metadata);
+                params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl_eb) * PipelineConstants::kClipFactor;
+                params.num_scales = static_cast<uint32_t>(exp_scales.size());
+                params.exposure_scales = exp_scales.data();
+                merged = ExpBracketAverage(ref_image, aligned, params);
             } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
             {
                 Report(progress, PipelineConstants::kProgressMerge, "Merging frames with frequency path");

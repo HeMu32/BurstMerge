@@ -64,6 +64,7 @@ Per mode:
 | `FrequencyMerge::WienerFft` | each comparison's spectral blend × `wn`; normalisation `1/(1+Σwn)` |
 | `FrequencyMerge::WienerFftRobust` | **unchanged** — keeps its own Swift-style exposure handling |
 | `TemporalAverage` / `TemporalMedian` | **unchanged** (semantics preserved)             |
+| `ExpBracketAverage` | **always** uses `wn = 1/scale` + hard clip gate (assumes bracketed input) |
 
 The clip gate (`value/scale ≥ clip_threshold → weight 0`) is preserved and acts
 as the natural upper bound on `wn`: a bright frame's large `wn` cannot pollute
@@ -113,6 +114,38 @@ Seq CPU-vs-GPU MAD unchanged before/after the port).
 
 Bracketed divergence dropped ~30–60× and now matches the non-bracketed
 baseline (~0.02–0.08 MAD, rel < 0.001%), well under the project's tolerance.
+
+### 4. ExpBracketAverage — dedicated bracket-aware average
+
+A fifth merge mode (`MergeAlgorithm::ExpBracketAverage`, CLI alias
+`exp-bkt-average` / `expbkt-avg`) designed for bracketed input. Unlike
+`TemporalAverage` (which uses its own sqrt + luminance-taper weighting derived
+from a blurred luminance map), `ExpBracketAverage` uses the **same** EV weight
+number (`wn = 1/exposure_scales[i]`) and the **same** clip gate
+(`max-across-channels / scale ≥ clip_threshold → weight 0`) as the spatial
+multichannel path. The reference frame is always seeded with weight 1.
+
+Key properties:
+- **No BoxBlur** — simpler and faster than `TemporalAverage` (which blurs every
+  frame for its luminance-based weighting). CPU is ~5–7 % faster; GPU is equal.
+- **Clip detection ignores highlight-recovery regions**: the max-across-channels
+  test is dominated by the un-recovered R/B channels, so a recovered green value
+  (extrapolated downward from clipped white) does not inflate the max. This means
+  a sensor-clipped photosite is still detected via R/B even after green recovery.
+- **Non-bracketed fallback**: when `exposure_scales` is null (RGB path) or all
+  scales are 1.0 (uniform burst), `wn ≡ 1` and the algorithm degrades to a
+  plain equal-weight average with clip gate. The user is responsible for
+  supplying bracketed input; no rejection of non-bracketed sequences.
+- **Hard clip threshold**: unlike spatial merge's soft robustness weight (which
+  gracefully degrades near clipping), the averaging algorithm uses a binary
+  include/exclude decision. This means CPU-vs-GPU warp differences can flip the
+  clip decision at boundary highlights, producing larger per-pixel divergence
+  than spatial merge (Bkt1: 2 % differing pixels, MAD 0.044 / rel 0.004 %).
+  The overall image is virtually identical; the differing pixels are
+  concentrated in clipped highlight regions.
+
+GPU shader: `expbkt_acc.comp` (binding 0=acc, 1=wsum, 2=cmp;
+`pc.f0`=`clip×scale`, `pc.f1`=`scale`). Per-frame accumulate + `normalize_div`.
 
 ## Tests
 

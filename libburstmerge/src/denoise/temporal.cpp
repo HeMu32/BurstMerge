@@ -500,4 +500,83 @@ FloatImage TemporalMedian(const FloatImage& reference,
     return out;
 }
 
+FloatImage ExpBracketAverage(const FloatImage& reference,
+                             const std::vector<FloatImage>& aligned_comparisons,
+                             const ExpBracketAverageParams& params)
+{
+    ProfileScope scope("time.merge.exp_bracket_average_total");
+    FloatImage out;
+    out.width = reference.width;
+    out.height = reference.height;
+    out.channels = reference.channels;
+    out.data.resize(reference.data.size(), 0.0f);
+
+    const uint32_t ch = reference.channels;
+    const size_t row_elems = static_cast<size_t>(out.width) * ch;
+    const bool has_scales = params.exposure_scales &&
+                            params.num_scales == aligned_comparisons.size();
+
+    std::vector<float> wn(aligned_comparisons.size(), 1.0f);
+    if (has_scales)
+    {
+        for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+            wn[idx] = 1.0f / std::max(1e-6f, params.exposure_scales[idx]);
+    }
+
+    std::vector<float> clip_scaled(aligned_comparisons.size(), 0.0f);
+    if (params.clip_threshold > 0.0f)
+    {
+        for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+        {
+            float scale = has_scales ? std::max(1e-6f, params.exposure_scales[idx]) : 1.0f;
+            clip_scaled[idx] = params.clip_threshold * scale;
+        }
+    }
+
+    ParallelForRows(out.height, RecommendedImageRowGrain(out.width, ch, kRowGrainMinPixels, kRowGrainMinRows), [&](uint32_t y_begin, uint32_t y_end)
+    {
+        for (uint32_t y = y_begin; y < y_end; ++y)
+        {
+            const size_t row_base = static_cast<size_t>(y) * row_elems;
+            for (uint32_t x = 0; x < out.width; ++x)
+            {
+                const size_t px = row_base + static_cast<size_t>(x) * ch;
+
+                for (uint32_t c = 0; c < ch; ++c)
+                    out.data[px + c] = reference.data[px + c];
+                float weight_sum = 1.0f;
+
+                for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+                {
+                    bool clipped = false;
+                    if (clip_scaled[idx] > 0.0f)
+                    {
+                        float mx = aligned_comparisons[idx].data[px];
+                        for (uint32_t c = 1; c < ch; ++c)
+                        {
+                            float v = aligned_comparisons[idx].data[px + c];
+                            if (v > mx) mx = v;
+                        }
+                        if (mx >= clip_scaled[idx]) clipped = true;
+                    }
+
+                    if (!clipped)
+                    {
+                        float w = wn[idx];
+                        for (uint32_t c = 0; c < ch; ++c)
+                            out.data[px + c] += aligned_comparisons[idx].data[px + c] * w;
+                        weight_sum += w;
+                    }
+                }
+
+                float inv = 1.0f / std::max(1e-6f, weight_sum);
+                for (uint32_t c = 0; c < ch; ++c)
+                    out.data[px + c] *= inv;
+            }
+        }
+    }, "exp_bkt_avg" /* named tag for profiler */);
+
+    return out;
+}
+
 } // namespace burstmerge

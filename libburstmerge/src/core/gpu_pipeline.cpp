@@ -1005,6 +1005,41 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
         vk.DestroyBuffer(packed); vk.DestroyBuffer(clipbuf);
         for (size_t k = 0; k < aligned.size(); ++k) vk.DestroyBuffer(aligned[k]);
     }
+    else if (settings.merge_algo == MergeAlgorithm::ExpBracketAverage)
+    {
+        merged = vk.CreateBuffer(size_t(pw) * ph * ch);
+        uint64_t wsum = vk.CreateBuffer(size_t(pw) * ph * ch);
+        vk.FillFloat(wsum, 1.0f);
+        {
+            ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch;
+            Binding b[2] = {{0, plane[ref_idx], 0}, {1, merged, 0}};
+            vk.BeginFrame(); vk.Dispatch("copy", pc, (size_t(pw) * ph * ch + 255) / 256, 1, 1, b, 2); vk.FlushFrame();
+        }
+        float wl = float(raw_meta[ref_idx].metadata.white_level);
+        float bl = mean_bl[ref_idx];
+        float clip = (wl > bl + 1.0f) ? (wl - bl) * PipelineConstants::kClipFactor : 0.0f;
+        for (size_t k = 0; k < aligned.size(); ++k)
+        {
+            vk.BeginFrame();
+            {
+                ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch;
+                pc.f0 = clip * comp_scale[k];
+                pc.f1 = comp_scale[k];
+                Binding b[3] = {{0, merged, 0}, {1, wsum, 0}, {2, aligned[k], 0}};
+                vk.Dispatch("expbkt_acc", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 3);
+            }
+            vk.FlushFrame();
+            vk.DestroyBuffer(aligned[k]);
+        }
+        vk.BeginFrame();
+        {
+            ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch; pc.i6 = 1;
+            Binding b[2] = {{0, merged, 0}, {1, wsum, 0}};
+            vk.Dispatch("normalize_div", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 2);
+        }
+        vk.FlushFrame();
+        vk.DestroyBuffer(wsum);
+    }
     else if (settings.merge_algo == MergeAlgorithm::Frequency)
     {
         merged = vk.CreateBuffer(size_t(pw) * ph * ch);

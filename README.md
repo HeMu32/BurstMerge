@@ -20,10 +20,11 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 ### Merge and processing modes
 
 - Simple temporal averaging merge
+- Exposure-bracketed average merge (EV weight numbers + clip gate; CPU + GPU)
 - Simple temporal median merge
 - Motion-robust merge in the spatial domain
 - Motion-robust merge in the frequency domain
-- Exposure-weighted merging for bracketed bursts (spatial / frequency-Laplacian / frequency-Wiener): brighter frames lead the shadows while clipped comparisons are rejected at the highlights — engaged automatically for bracketed RAW bursts, CPU path.
+- Exposure-weighted merging for bracketed bursts (spatial / frequency-Laplacian / frequency-Wiener / exp-bkt-average): brighter frames lead the shadows while clipped comparisons are rejected at the highlights — engaged automatically for bracketed RAW bursts, CPU + GPU paths.
 - Highlight recovery for clipped green channels (extrapolated from R/B neighbours)
     - Highlight recovery was for internal processing only and was not intended for extending dynamic range for outputs.
 - Optional non-linear exposure mapping for improved shadow tonality
@@ -107,11 +108,11 @@ The minimum invocation needs inputs (`-i` / `--folder`) and an output target (`-
 | `-i, --input <path>` | — | Input file. Repeatable (`-i a.dng -i b.dng`). |
 | `-f, --folder <dir>` | — | Add every regular file in `<dir>` (sorted). Repeatable. |
 | `-o, --output <path>` | `./out` | Output file path (with extension) **or** output directory. |
-| `-m, --merge <algo>` | `spatial` | Merge algorithm: `spatial`, `frequency`, `temporal` (average), `median`. (alias: `--merge-algo`) |
+| `-m, --merge <algo>` | `spatial` | Merge algorithm: `spatial`, `frequency`, `temporal` (average), `exp-bkt-average` (alias `expbkt-avg`), `median`. (alias: `--merge-algo`) |
 | `-a, --alignment <mode>` | `standard` | Alignment mode: `standard`, `dense`, `freq`. |
 | `--spatial-mode <mode>` | `standard` | Spatial sub-mode: `standard`, `linear`. (alias: `--spa-mode`) |
 | `--frequency-mode <mode>` | `laplacian` | Frequency sub-mode: `laplacian`, `wiener`, `wiener-robust`. (alias: `--freq-mode`) |
-| `-n, --noise-reduction <f>` | `13.0` | Noise reduction strength. Ignored when merge is `temporal`/`median`. |
+| `-n, --noise-reduction <f>` | `13.0` | Noise reduction strength. Ignored when merge is `temporal`/`exp-bkt-average`/`median`. |
 | `-t, --tile <int>` | `32` | Alignment tile size (clamped to minimum 16). |
 | `-b, --bit-depth <int>` | `14` | Output bit depth: `8`, `10`, `12`, `14`, `16`. |
 | `--output-format <fmt>` | `auto` | `auto`, `png`, `jpg`, `bmp`, `tiff`, `dng`. `auto` selects DNG for RAW input and PNG for RGB input. |
@@ -130,7 +131,7 @@ Notes:
 
 - `--bit-depth` is honored as-is for DNG output; for RGB containers it is snapped to the nearest supported depth (8 for PNG/JPEG/BMP, 8 or 16 for TIFF).
 - Bracketed-exposure bursts are supported only for RAW input. The reference frame is chosen automatically (darkest frame for bracketed bursts, middle frame otherwise); manual reference-frame selection is not yet exposed on the CLI.
-- With `--backend vulkan`, `--frequency-mode wiener-robust` is rejected (the GPU path is not implemented — use `wiener` or `laplacian`), and hot-pixel repair is skipped. Every other merge mode matches the CPU output to within rounding.
+- With `--backend vulkan`, `--frequency-mode wiener-robust` is rejected (the GPU path is not implemented — use `wiener` or `laplacian`), and hot-pixel repair is skipped. Every other merge mode matches the CPU output to within rounding. `exp-bkt-average` uses a hard clip threshold (unlike spatial's soft robustness weight), so CPU-vs-GPU divergence can be larger at clipped highlight boundaries (MAD still < 0.005 %).
 
 ### Processing pipeline
 
@@ -147,13 +148,14 @@ Frames flow through the stages below. Stages marked with an option list expose a
     - `--alignment dense`: dense per-tile propagation and correction across all pyramid levels.
     - `--alignment freq`: Fourier-based sub-pixel shift estimation.
     - Geometry/quality knobs: `--tile` (tile size, min 16), `--align-gamma` (gamma on the alignment grayscale), `--smooth-tile-field` (median-smooth the displacement field).
-7. **Merge** — Do MFNR, aka. combine the aligned comparison frames with the reference. Four mutually exclusive algorithms:
+7. **Merge** — Do MFNR, aka. combine the aligned comparison frames with the reference. Five mutually exclusive algorithms:
     - `--merge spatial` *(default)*: pixel-domain weighted blending, motion-robust via per-pixel weights. Sub-mode `--spatial-mode`: `standard` *(default)* or `linear`.
     - `--merge frequency`: frequency-domain merge. Sub-mode `--frequency-mode`: `laplacian` *(default)*, `wiener` (FFT Wiener), `wiener-robust` (CPU only).
     - `--merge temporal`: exposure-weighted temporal average (simplest; ignores `--noise-reduction`).
+    - `--merge exp-bkt-average` (alias `expbkt-avg`): bracket-aware average using EV weight numbers (`wn = 1/scale`) and a hard clip gate (same overflow detection as spatial). Assumes bracketed input; non-bracketed degrades to equal-weight average. CPU + GPU.
     - `--merge median`: per-pixel median across frames (robust to outliers; but tend to produce bad results in motion scene; ignores `--noise-reduction`).
     - Strength knob for spatial/frequency: `--noise-reduction`.
-    - For bracketed RAW bursts, spatial / frequency-laplacian / frequency-wiener automatically engage **exposure-weighted merging**: each comparison frame's contribution is scaled by an EV-derived weight number (`wn = 1/exposure_scale`) on top of the existing motion-robust weight, so brighter frames lead the shadows while clipped comparisons are rejected at the highlights. Automatic (no flag); CPU path only. `wiener-robust` keeps its own exposure handling.
+    - For bracketed RAW bursts, spatial / frequency-laplacian / frequency-wiener automatically engage **exposure-weighted merging**: each comparison frame's contribution is scaled by an EV-derived weight number (`wn = 1/exposure_scale`) on top of the existing motion-robust weight, so brighter frames lead the shadows while clipped comparisons are rejected at the highlights. Automatic (no flag); CPU + GPU. `wiener-robust` keeps its own exposure handling. `exp-bkt-average` always uses this weighting.
 8. **Bit-depth scaling** — rescale to the requested depth and reconcile black/white levels. *(fixed; `--bit-depth`)*
 9. **Non-Linear Exposure Mapping** *(optional)* — `--exposure-mode`: `off` *(default)*, `linear` (gain), or `curve` (tone curve). Curve sub-mode `--exposure-curve`: `global` or `local` (Reinhard). Magnitude: `--exposure-stops`.
 10. **Mosaic rebuild & write** — re-pack to Bayer mosaic (RAW path) and write the output container. *(fixed; `--output-format`, `-o`)*
