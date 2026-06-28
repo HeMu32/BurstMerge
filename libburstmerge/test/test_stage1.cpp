@@ -75,7 +75,8 @@ bool ConverterAvailable()
 
 void ProcessAndVerify(const std::string& name,
                       const std::vector<std::string>& inputs,
-                      const std::string& output_path)
+                      const std::string& output_path,
+                      bool highlight_recovery = true)
 {
     std::cout << "[test] process " << name << "..." << std::endl;
     CHECK(!inputs.empty(), name + " inputs non-empty");
@@ -88,6 +89,7 @@ void ProcessAndVerify(const std::string& name,
     burstmerge::Settings settings;
     settings.merge_algo = burstmerge::MergeAlgorithm::Spatial;
     settings.noise_reduction = 13.0f;
+    settings.highlight_recovery = highlight_recovery;
     bm.Configure(settings);
 
     int progress_calls = 0;
@@ -355,6 +357,122 @@ void CheckCenterSaturated(const std::string& name, const std::string& dng_path)
               << (int)vals[2] << " " << (int)vals[3] << " (thresh=" << (int)threshold << ")" << std::endl;
 }
 
+// LinearRaw (demosaiced 3-plane RGB) DNG pipeline coverage.
+// Uses the vendored SDK sample 04_PGTM2_per_profile.dng (1000x1000, LinearRaw).
+// Does NOT reuse TestSingleFrameProcessing/TestMultiFrameProcessing: those
+// hardcode Bayer-specific expectations (white_level==16383, R16_Uint).
+static std::string LinearRawSamplePath()
+{
+    return std::string(TEST_DATA_DIR) +
+           "/3rdparty/dng_sdk/sample_files/04_PGTM2_per_profile.dng";
+}
+
+static void VerifyLinearRawOutput(const std::string& name,
+                                  const std::string& output_path,
+                                  uint32_t orig_w, uint32_t orig_h)
+{
+    if (!FileExists(output_path)) return;
+    burstmerge::DngReader reader(output_path.c_str());
+    auto image = reader.Read();
+    CHECK(image.metadata.width == orig_w, name + " width preserved");
+    CHECK(image.metadata.height == orig_h, name + " height preserved");
+    // LinearRaw must stay LinearRaw through the pipeline (ClearDngMosaicInfo).
+    CHECK(image.metadata.mosaic_pattern_width == 0,
+          name + " output stays LinearRaw (mosaic_pattern_width == 0)");
+    CHECK(image.pixels.format == burstmerge::PixelFormat::R16_Uint_RGB,
+          name + " output pixels.format R16_Uint_RGB");
+    const size_t expect_size = static_cast<size_t>(orig_w) * orig_h * 3u * sizeof(uint16_t);
+    CHECK(image.pixels.size == expect_size, name + " output sized for 3 planes");
+    bool has_non_zero = false;
+    for (size_t i = 0; i < image.pixels.size && i < 4096; ++i)
+    {
+        if (image.pixels.data[i] != std::byte{0}) { has_non_zero = true; break; }
+    }
+    CHECK(has_non_zero, name + " output pixel data non-zero");
+}
+
+void TestLinearRawPipeline()
+{
+    std::cout << "[test] LinearRaw pipeline..." << std::endl;
+    const std::string lin = LinearRawSamplePath();
+    if (!FileExists(lin))
+    {
+        std::cout << "  SKIP: LinearRaw sample not found: " << lin << std::endl;
+        return;
+    }
+
+    uint32_t orig_w = 0, orig_h = 0;
+    {
+        burstmerge::DngReader r(lin.c_str());
+        auto img = r.Read();
+        orig_w = img.metadata.width;
+        orig_h = img.metadata.height;
+        CHECK(img.metadata.mosaic_pattern_width == 0, "linear input mosaic_pattern_width == 0");
+        CHECK(img.pixels.format == burstmerge::PixelFormat::R16_Uint_RGB, "linear input R16_Uint_RGB");
+    }
+
+    fs::path out_dir = fs::path(TEST_BINARY_DIR) / "stage1_outputs";
+    fs::create_directories(out_dir);
+
+    // Single-frame LinearRaw passthrough (covers hot-pixel skip, ClearMosaicInfo,
+    // RGB quantize/write for the linear path).
+    {
+        std::string out = (out_dir / "linear_single_output.dng").string();
+        std::remove(out.c_str());
+        burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+        burstmerge::Settings settings;
+        settings.bit_depth = 16;
+        bm.Configure(settings);
+        bm.AddImage(lin);
+        auto result = bm.Process(out);
+        CHECK(result.success, "linear single process succeeds (err=" + result.error_msg + ")");
+        CHECK(result.output_path == out, "linear single output path exact");
+        VerifyLinearRawOutput("linear_single", out, orig_w, orig_h);
+    }
+
+    // Two-frame LinearRaw merge (covers alignment + merge on 3-channel data).
+    {
+        std::string out = (out_dir / "linear_two_output.dng").string();
+        std::remove(out.c_str());
+        burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+        burstmerge::Settings settings;
+        settings.bit_depth = 16;
+        settings.merge_algo = burstmerge::MergeAlgorithm::TemporalAverage;
+        bm.Configure(settings);
+        bm.AddImage(lin);
+        bm.AddImage(lin);
+        auto result = bm.Process(out);
+        CHECK(result.success, "linear two-frame process succeeds (err=" + result.error_msg + ")");
+        VerifyLinearRawOutput("linear_two", out, orig_w, orig_h);
+    }
+}
+
+void TestLinearRawBayerRejection()
+{
+    std::cout << "[test] LinearRaw + Bayer rejection..." << std::endl;
+    const std::string lin = LinearRawSamplePath();
+    const std::string bayer = (fs::path(TEST_DATA_DIR) / "libburstmerge" / "test" / "samples" / "X1M5_Wide.dng").string();
+    if (!FileExists(lin) || !FileExists(bayer))
+    {
+        std::cout << "  SKIP: need both LinearRaw and Bayer samples" << std::endl;
+        return;
+    }
+
+    fs::path out_dir = fs::path(TEST_BINARY_DIR) / "stage1_outputs";
+    fs::create_directories(out_dir);
+    std::string out = (out_dir / "linear_bayer_reject_should_not_exist.dng").string();
+    std::remove(out.c_str());
+
+    burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+    bm.AddImage(lin);
+    bm.AddImage(bayer);
+    auto result = bm.Process(out);
+    CHECK(!result.success, "linear+bayer mix must be rejected");
+    bool mentions_mix = result.error_msg.find("Cannot mix LinearRaw") != std::string::npos;
+    CHECK(mentions_mix, "linear+bayer error explains topology mismatch");
+    CHECK(!FileExists(out), "linear+bayer produces no output file");
+}
+
 int main()
 {
     fs::path root(TEST_DATA_DIR);
@@ -380,6 +498,11 @@ int main()
         { dng_path, dng_path, dng_path },
         (out_dir / "three_frames_output.dng").string());
 
+    // LinearRaw (3-plane demosaiced RGB) DNG coverage — default-on, no converter
+    // needed (sample is already a DNG).
+    TestLinearRawPipeline();
+    TestLinearRawBayerRejection();
+
     if (ConverterAvailable())
     {
         auto seq = FilesWithExt(samples / "Seq1", ".arw");
@@ -388,11 +511,24 @@ int main()
         {
             bkt2 = FilesWithExt(samples / "Bkt2", ".arw");
         }
-        ProcessAndVerify("seq_arw_5", seq, (out_dir / "seq_output.dng").string());
+        if (seq.empty())
+        {
+            std::cout << "[test] SKIP seq_arw_5 (samples/Seq1 empty)" << std::endl;
+        } else
+        {
+            ProcessAndVerify("seq_arw_5", seq, (out_dir / "seq_output.dng").string());
+        }
         if (!bkt2.empty())
         {
-            ProcessAndVerify("bkt2_arw_5", bkt2, (out_dir / "bkt2_output.dng").string());
-            CheckCenterSaturated("bkt2_center", (out_dir / "bkt2_output.dng").string());
+            ProcessAndVerify("bkt2_arw_5_recovery_on", bkt2,
+                (out_dir / "bkt2_output_recovery_on.dng").string(), true);
+            CheckCenterSaturated("bkt2_center_recovery_on",
+                (out_dir / "bkt2_output_recovery_on.dng").string());
+
+            ProcessAndVerify("bkt2_arw_5_recovery_off", bkt2,
+                (out_dir / "bkt2_output_recovery_off.dng").string(), false);
+            CheckCenterSaturated("bkt2_center_recovery_off",
+                (out_dir / "bkt2_output_recovery_off.dng").string());
         } else
         {
             std::cout << "[test] SKIP bkt2_arw_5 (samples/Bkt2 not found)" << std::endl;

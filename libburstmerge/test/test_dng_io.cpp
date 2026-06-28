@@ -47,6 +47,7 @@ bool SupportsRoundTrip(const burstmerge::RawImage& image)
     switch (image.pixels.format)
     {
         case burstmerge::PixelFormat::R16_Uint:
+        case burstmerge::PixelFormat::R16_Uint_RGB:
         case burstmerge::PixelFormat::R32_Float:
             return true;
         default:
@@ -161,8 +162,10 @@ void CheckMetadata(const burstmerge::RawImage& image, const SampleExpectation& s
     }
     CHECK(has_non_zero_pixel, std::string(sample.relative_path) + " has non-zero pixel data");
 
-    CHECK(image.metadata.mosaic_pattern_width == 2 || image.metadata.mosaic_pattern_width == 6,
-          std::string(sample.relative_path) + " mosaic pattern width is supported");
+    CHECK(image.metadata.mosaic_pattern_width == 0 ||
+          image.metadata.mosaic_pattern_width == 2 ||
+          image.metadata.mosaic_pattern_width == 6,
+          std::string(sample.relative_path) + " mosaic pattern width is supported (0=LinearRaw, 2/6=Bayer)");
     for (float color_factor : image.metadata.color_factors)
     {
         CHECK(color_factor > 0.0f, std::string(sample.relative_path) + " color factor > 0");
@@ -175,8 +178,9 @@ void CheckMetadata(const burstmerge::RawImage& image, const SampleExpectation& s
                   std::string(sample.relative_path) + " Uint8 maps to R8_Uint");
             break;
         case burstmerge::DngPixelType::Uint16:
-            CHECK(image.pixels.format == burstmerge::PixelFormat::R16_Uint,
-                  std::string(sample.relative_path) + " Uint16 maps to R16_Uint");
+            CHECK(image.pixels.format == burstmerge::PixelFormat::R16_Uint ||
+                  image.pixels.format == burstmerge::PixelFormat::R16_Uint_RGB,
+                  std::string(sample.relative_path) + " Uint16 maps to R16_Uint (Bayer) or R16_Uint_RGB (LinearRaw)");
             break;
         case burstmerge::DngPixelType::Float32:
             CHECK(image.pixels.format == burstmerge::PixelFormat::R32_Float,
@@ -385,10 +389,81 @@ void TestAdobeDngConverterOptional()
 
 } // namespace
 
+void TestLinearRawDngOptional()
+{
+    // Reads a LinearRaw (PhotometricInterpretation 34892, 3 SamplesPerPixel)
+    // DNG — e.g. DxO DeepPRIME output — and validates that the reader tags it
+    // as R16_Uint_RGB with mosaic_pattern_width==0, and that it round-trips
+    // through DngWriter as a 3-plane LinearRaw DNG.
+    //
+    // Default-on: uses the vendored SDK sample 04_PGTM2_per_profile.dng (a
+    // 1000x1000 LinearRaw DNG). Override the path with
+    // BURSTMERGE_TEST_LINEAR_DNG=<path>; set to "0" to skip.
+    std::cout << "[test] LinearRaw (3-plane RGB) DNG..." << std::endl;
+    const char* kDefaultLinear = "/3rdparty/dng_sdk/sample_files/04_PGTM2_per_profile.dng";
+    std::string path = std::string(TEST_DATA_DIR) + kDefaultLinear;
+    if (const char* env = std::getenv("BURSTMERGE_TEST_LINEAR_DNG"))
+    {
+        if (std::strcmp(env, "0") == 0)
+        {
+            std::cout << "  SKIP: BURSTMERGE_TEST_LINEAR_DNG=0" << std::endl;
+            return;
+        }
+        path = env;
+    }
+    if (!FileExists(path))
+    {
+        std::cout << "  SKIP: sample not found: " << path << std::endl;
+        return;
+    }
+
+    burstmerge::DngReader reader(path.c_str());
+    burstmerge::RawImage img = reader.Read();
+
+    CHECK(img.metadata.mosaic_pattern_width == 0, "linear DNG reports mosaic_pattern_width == 0");
+    CHECK(img.pixels.format == burstmerge::PixelFormat::R16_Uint_RGB, "linear DNG tagged R16_Uint_RGB");
+    CHECK(img.metadata.width > 0 && img.metadata.height > 0, "linear DNG has dimensions");
+    const size_t expect_size = static_cast<size_t>(img.metadata.width) *
+                               img.metadata.height * 3u * sizeof(uint16_t);
+    CHECK(img.pixels.size == expect_size, "linear DNG pixel buffer sized for 3 planes");
+    CHECK(img.pixels.row_stride == img.metadata.width * 3u * sizeof(uint16_t),
+          "linear DNG row stride accounts for 3 planes");
+
+    bool has_non_zero = false;
+    for (size_t i = 0; i < std::min<size_t>(img.pixels.size, 4096); ++i)
+        if (img.pixels.data[i] != std::byte{0}) { has_non_zero = true; break; }
+    CHECK(has_non_zero, "linear DNG has non-zero pixel data");
+
+    // Round-trip through the writer into a LinearRaw output DNG.
+    const std::string root = TEST_DATA_DIR;
+    const std::string out_dir = root + "/build/test_dng_linear_outputs";
+    CreateDirectoryIfNotExist(root + "/build");
+    CreateDirectoryIfNotExist(out_dir);
+    const std::string out_path = out_dir + "/linear_roundtrip.dng";
+    std::remove(out_path.c_str());
+
+    burstmerge::RawImage out_image;
+    out_image.metadata = std::move(img.metadata);
+    out_image.pixels = std::move(img.pixels);
+    burstmerge::DngWriter writer(out_image.metadata.dng_negative);
+    writer.Write(out_path.c_str(), out_image);
+    CHECK(FileExists(out_path), "linear round-trip DNG written");
+
+    // Re-read and confirm it is still detected as linear RGB.
+    burstmerge::DngReader r2(out_path.c_str());
+    burstmerge::RawImage img2 = r2.Read();
+    CHECK(img2.metadata.mosaic_pattern_width == 0, "round-trip linear DNG still mosaic_pattern_width == 0");
+    CHECK(img2.pixels.format == burstmerge::PixelFormat::R16_Uint_RGB, "round-trip linear DNG still R16_Uint_RGB");
+    CHECK(img2.metadata.width == out_image.metadata.width, "round-trip linear DNG width preserved");
+
+    std::remove(out_path.c_str());
+}
+
 int main()
 {
     TestDngRoundTrips();
     TestInvalidInput();
+    TestLinearRawDngOptional();
     TestAdobeDngConverterOptional();
 
     std::cout << "\nDNG I/O: " << g_checks << " checks, " << g_failed << " failed" << std::endl;

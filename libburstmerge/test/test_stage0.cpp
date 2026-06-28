@@ -17,6 +17,7 @@
 #include "burstmerge/internal/merge/frequency.h"
 #include "burstmerge/internal/denoise/temporal.h"
 #include "burstmerge/internal/exposure/exposure.h"
+#include "burstmerge/internal/core/pipeline_frame.h"
 
 static int g_tests = 0;
 static int g_failed = 0;
@@ -590,6 +591,37 @@ static void test_frequency_wiener_highlights()
         v = (v - black) * exposure_scale + black;
     }
 
+    // Apply highlight recovery before frequency merge. Work in black-subtracted
+    // space (matching post-NormalizeFrames state), then restore black.
+    {
+        std::vector<burstmerge::FloatImage> rec_imgs = {reference, comparison};
+        for (auto& im : rec_imgs)
+            for (float& v : im.data) v -= black;
+
+        const uint16_t rggb[4] = {0, 1, 1, 2};
+        auto mk = [&](float ev) {
+            burstmerge::RawImage ri;
+            ri.metadata.white_level = static_cast<uint32_t>(white);
+            ri.metadata.mosaic_pattern_width = 2;
+            for (int i = 0; i < 4; ++i)
+            {
+                ri.metadata.mosaic_pattern[i] = rggb[i];
+                ri.metadata.black_level[i] = black;
+            }
+            ri.metadata.ev_value = ev;
+            return ri;
+        };
+        std::vector<burstmerge::RawImage> rec_raws;
+        rec_raws.push_back(mk(1.0f));
+        rec_raws.push_back(mk(1.0f / exposure_scale));
+        burstmerge::RecoverHighlights(rec_imgs, rec_raws, 0);
+
+        reference = std::move(rec_imgs[0]);
+        comparison = std::move(rec_imgs[1]);
+        for (float& v : reference.data) v += black;
+        for (float& v : comparison.data) v += black;
+    }
+
     burstmerge::FrequencyMergeParams params{};
     params.mode = burstmerge::FrequencyMode::WienerFftRobust;
     params.noise_reduction = 13.0f;
@@ -703,8 +735,8 @@ static void test_temporal_median()
 // Clip detection + highlight bypass: comparisons with clipped values are
 // excluded from the median (prevents Frankenstein pixel color casts), and
 // reference values at/near clipping are preserved (keeps the signal for RAW
-// converter highlight recovery).
-static void test_temporal_median_clip()
+// converter highlight recovery). This variant runs WITHOUT highlight recovery.
+static void test_temporal_median_clip_no_recovery()
 {
     std::cout << "[test] temporal median clip + bypass..." << std::endl;
 
@@ -759,7 +791,89 @@ static void test_temporal_median_clip()
           "TemporalMedian rejects exposure-scaled clipped comparison (got "
           + std::to_string(out_br.At(0, 0, 1)) + ")");
 
-    std::cout << "  TemporalMedian clip + bypass OK" << std::endl;
+    std::cout << "  TemporalMedian clip + bypass OK (no recovery)" << std::endl;
+}
+
+// Same scenario as above but WITH highlight recovery applied first.
+// Verifies that RecoverHighlights + TemporalMedian clip detection interact
+// correctly: recovered green values don't break the bypass/reject logic.
+static void test_temporal_median_clip_with_recovery()
+{
+    std::cout << "[test] temporal median clip + bypass (with recovery)..." << std::endl;
+
+    const uint32_t width = 4;
+    const uint32_t height = 4;
+    const uint32_t channels = 4;
+    const float white = 1023.0f;
+
+    // Reference: R+B clipped at (0,0), G1 bright → recovery will raise G1
+    burstmerge::FloatImage ref = make_float_image(width, height, channels, 100.0f);
+    ref.At(0, 0, 0) = 1020.0f;  // R clipped
+    ref.At(0, 0, 1) = 850.0f;   // G1 bright (ratio 0.83 > 0.8)
+    ref.At(0, 0, 3) = 1020.0f;  // B clipped
+    ref.At(1, 0, 0) = 1020.0f;  // right neighbour R (for G1 extrapolation)
+
+    burstmerge::FloatImage comp1 = make_float_image(width, height, channels, 120.0f);
+    burstmerge::FloatImage comp2 = make_float_image(width, height, channels, 120.0f);
+    comp2.At(0, 0, 0) = 1020.0f;  // clipped → should be rejected
+    burstmerge::FloatImage comp3 = make_float_image(width, height, channels, 110.0f);
+
+    // Apply highlight recovery
+    {
+        std::vector<burstmerge::FloatImage> rec_imgs = {ref, comp1, comp2, comp3};
+        const uint16_t rggb[4] = {0, 1, 1, 2};
+        auto mk = [&]() {
+            burstmerge::RawImage ri;
+            ri.metadata.white_level = static_cast<uint32_t>(white);
+            ri.metadata.mosaic_pattern_width = 2;
+            for (int i = 0; i < 4; ++i) ri.metadata.mosaic_pattern[i] = rggb[i];
+            ri.metadata.ev_value = 1.0f;
+            return ri;
+        };
+        std::vector<burstmerge::RawImage> rec_raws;
+        for (int i = 0; i < 4; ++i) rec_raws.push_back(mk());
+        burstmerge::RecoverHighlights(rec_imgs, rec_raws, 0);
+        ref = std::move(rec_imgs[0]);
+        comp1 = std::move(rec_imgs[1]);
+        comp2 = std::move(rec_imgs[2]);
+        comp3 = std::move(rec_imgs[3]);
+    }
+
+    // Recovery should have raised G1 at (0,0) from 850 towards ~874
+    float recovered_g1 = ref.At(0, 0, 1);
+    CHECK(recovered_g1 > 860.0f,
+          "Recovery raised ref G1 (got " + std::to_string(recovered_g1) + ")");
+
+    burstmerge::TemporalDenoiseParams params{};
+    params.white_level = white;
+    params.black_level = 0.0f;
+
+    std::vector<burstmerge::FloatImage> comps = {comp1, comp2, comp3};
+    burstmerge::FloatImage out = burstmerge::TemporalMedian(ref, comps, params);
+
+    // Pixel 0, ch0: ref=1020 ≥ threshold → bypass → output = 1020
+    CHECK(out.At(0, 0, 0) == 1020.0f,
+          "With recovery: clipped ref ch0 still bypassed (got "
+          + std::to_string(out.At(0, 0, 0)) + ")");
+
+    // Pixel 0, ch1: ref=~874, comp2 rejected (clipped ch0).
+    // Remaining: [~874(ref), 120(comp1), 110(comp3)] → median = 120
+    // (Without recovery it was 110 — recovery changed the median by raising ref G1.)
+    CHECK(out.At(0, 0, 1) == 120.0f,
+          "With recovery: median reflects raised ref G1 (got "
+          + std::to_string(out.At(0, 0, 1)) + ")");
+
+    // Pixel 1, ch0: ref=1020 (set as neighbour, also clipped) → bypass
+    CHECK(out.At(1, 0, 0) == 1020.0f,
+          "With recovery: neighbour pixel also bypassed (got "
+          + std::to_string(out.At(1, 0, 0)) + ")");
+
+    // Pixel 2: no clipping anywhere. [100, 120, 120, 110] → median = 115
+    CHECK(out.At(2, 0, 0) == 115.0f,
+          "With recovery: normal pixel unaffected (got "
+          + std::to_string(out.At(2, 0, 0)) + ")");
+
+    std::cout << "  TemporalMedian clip + bypass OK (with recovery)" << std::endl;
 }
 
 int main()
@@ -776,7 +890,8 @@ int main()
     test_module_params();
     test_frequency_wiener_highlights();
     test_temporal_median();
-    test_temporal_median_clip();
+    test_temporal_median_clip_no_recovery();
+    test_temporal_median_clip_with_recovery();
 
     std::cout << "\n================================" << std::endl;
     std::cout << "Stage 0: " << g_tests << " checks, "

@@ -23,6 +23,8 @@ target_sources(test_deps PRIVATE "${POCKETFFT_INCLUDE}/pocketfft.c")
 
 add_burstmerge_test(test_dng_io)
 
+add_burstmerge_test(test_highlight)
+
 add_burstmerge_test(test_stage0)
 set_tests_properties(test_stage0 PROPERTIES TIMEOUT 300)
 

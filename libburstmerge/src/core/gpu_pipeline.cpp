@@ -535,6 +535,14 @@ AlignmentResult GpuEstimateTranslation(const FloatImage& ref_gray,
     AlignmentResult out;
     if (ref_gray.width != cmp_gray.width || ref_gray.height != cmp_gray.height || ref_gray.channels != 1)
         return out;
+    if (params.mode == AlignmentMode::Skip)
+    {
+        out.shift_x = 0;
+        out.shift_y = 0;
+        out.confidence = 1.0f;
+        out.cfa_period = std::max<uint32_t>(1, params.cfa_period);
+        return out;
+    }
     VulkanBackend vk;
     if (!vk.Initialize()) return out;
 
@@ -715,6 +723,21 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
     {
         if (i == ref_idx) continue;
         Report(progress, 0.6f, "GPU: aligning frame " + std::to_string(i));
+
+        if (settings.alignment_mode == AlignmentMode::Skip)
+        {
+            uint64_t warped = vk.CreateBuffer(size_t(pw) * ph * ch);
+            vk.BeginFrame();
+            ShaderPC cpc{}; cpc.w = pw; cpc.h = ph; cpc.channels = ch;
+            Binding cb[2] = {{0, plane[i], 0}, {1, warped, 0}};
+            vk.Dispatch("copy", cpc, (size_t(pw) * ph * ch + 255) / 256, 1, 1, cb, 2);
+            vk.FlushFrame();
+            vk.DestroyBuffer(gray[i]);
+            vk.DestroyBuffer(plane[i]);
+            aligned.push_back(warped);
+            continue;
+        }
+
         auto cmp_pyr = BuildGrayPyramid(vk, gray[i], pw, ph, tile_size);
         int z2[2] = {0, 0};
         vk.UploadFloats(align_state, reinterpret_cast<float*>(z2), 2);
@@ -935,6 +958,22 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
     std::vector<uint64_t> plane(N);
     std::vector<float> mean_bl(N);
     { ProfileScope _ps("time.gpu.prepare");
+
+    if (images[ref_idx].metadata.mosaic_pattern_width > 0)
+    {
+        uint32_t pw2 = images[ref_idx].metadata.mosaic_pattern_width;
+        char buf[128];
+        int n = std::snprintf(buf, sizeof(buf), "CFA pattern (%ux%u):", pw2, pw2);
+        for (uint32_t i = 0; i < pw2 * pw2; ++i)
+        {
+            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %u",
+                static_cast<unsigned>(images[ref_idx].metadata.mosaic_pattern[i]));
+        }
+        Report(progress, PipelineConstants::kProgressCfaLog, std::string(buf));
+    }
+
+    Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
+
     std::vector<uint64_t> rawbufs;
     rawbufs.reserve(N);
     // === Input format selection ===
@@ -975,6 +1014,57 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
         pc.i9 = use_cpu_fp32_convert ? 1 : 0;  // 0=uint16 input, 1=float32 input
         Binding b[2] = {{0, rawbufs.back(), 0}, {1, plane[i], 0}};
         vk.Dispatch("prepare_texture", pc, (pw + 7) / 8, (ph + 7) / 8, int(ch), b, 2);
+    }
+
+    // Highlight recovery: extrapolate clipped green photosites from nearby
+    // R/B values. Bayer-only (period==2, 4-channel plane). Dispatched in the
+    // SAME frame as prepare_texture to avoid an extra FlushFrame sync point.
+    if (settings.highlight_recovery && period == 2 && ch == 4)
+    {
+        Report(progress, PipelineConstants::kProgressNormalize, "Recovering clipped highlights");
+        for (size_t i = 0; i < N; ++i)
+        {
+            float dyn_range = static_cast<float>(images[i].metadata.white_level) - mean_bl[i];
+            if (dyn_range <= 0.0f) continue;
+            float effective_range = dyn_range * ev_scale[i];
+            if (effective_range <= 0.0f) continue;
+
+            float cf_g = images[i].metadata.color_factors[1] > 0.0f
+                       ? images[i].metadata.color_factors[1] : 1.0f;
+            float factor_r = images[i].metadata.color_factors[0] > 0.0f
+                           ? images[i].metadata.color_factors[0] / cf_g : 1.0f;
+            float factor_b = images[i].metadata.color_factors[2] > 0.0f
+                           ? images[i].metadata.color_factors[2] / cf_g : 1.0f;
+
+            float factor_for_ch[4];
+            int g_ch[2];
+            int n_g = 0;
+            for (int c = 0; c < 4; ++c)
+            {
+                uint16_t color = images[i].metadata.mosaic_pattern[static_cast<size_t>(c)];
+                if (color == 0) factor_for_ch[c] = factor_r;
+                else if (color == 2) factor_for_ch[c] = factor_b;
+                else
+                {
+                    factor_for_ch[c] = 1.0f;
+                    if (n_g < 2) g_ch[n_g++] = c;
+                }
+            }
+            if (n_g < 2) continue;
+
+            ShaderPC pc{};
+            pc.w2 = pw;
+            pc.h2 = ph;
+            pc.i0 = g_ch[0];
+            pc.i1 = g_ch[1];
+            pc.f0 = effective_range;
+            pc.f1 = factor_for_ch[0];
+            pc.f2 = factor_for_ch[1];
+            pc.f3 = factor_for_ch[2];
+            pc.f4 = factor_for_ch[3];
+            Binding b[1] = {{0, plane[i], 0}};
+            vk.Dispatch("highlight_recovery", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 1);
+        }
     }
     vk.FlushFrame();
     for (auto r : rawbufs) vk.DestroyBuffer(r);

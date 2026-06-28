@@ -137,6 +137,8 @@ namespace io
 {
 void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level);
 void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4]);
+void SetDngBaselineExposure(DngNegativeHolder* holder, double exposure);
+void ClearDngMosaicInfo(DngNegativeHolder* holder);
 }
 
 } // namespace burstmerge

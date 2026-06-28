@@ -135,6 +135,87 @@ int main()
 {
     std::cout << "test_stage2: GPU alignment unit tests" << std::endl;
 
+    // ---- Synthetic Skip-alignment unit tests (always run, no deps) ----
+    std::cout << "\n--- Skip alignment unit tests (synthetic) ---" << std::endl;
+    {
+        bm::FloatImage ref;
+        ref.width = 32; ref.height = 32; ref.channels = 1;
+        ref.data.resize(32u * 32u);
+        for (size_t i = 0; i < ref.data.size(); ++i)
+            ref.data[i] = static_cast<float>(i % 1024);
+
+        bm::FloatImage cmp = ref;
+
+        bm::AlignParams params;
+        params.tile_size = 16;
+        params.search_distance = 64;
+        params.mode = bm::AlignmentMode::Skip;
+        params.cfa_period = 1;
+        params.align_gamma = 1.0f;
+        params.smooth_tile_field = false;
+
+        auto ar = bm::EstimateTranslation(ref, cmp, params);
+        CHECK(ar.shift_x == 0, "skip shift_x == 0");
+        CHECK(ar.shift_y == 0, "skip shift_y == 0");
+        CHECK(ar.tiles_x == 0, "skip tiles_x == 0");
+        CHECK(ar.tiles_y == 0, "skip tiles_y == 0");
+        CHECK(ar.tile_shift_x.empty(), "skip tile_shift_x empty");
+        CHECK(ar.tile_shift_y.empty(), "skip tile_shift_y empty");
+        CHECK(ar.confidence > 0.0f, "skip confidence > 0");
+
+        {
+            auto warped = bm::WarpAligned(ref, ar);
+            CHECK(warped.width == ref.width && warped.height == ref.height,
+                  "skip warp preserves geometry (1ch)");
+            bool identity = true;
+            for (size_t i = 0; i < ref.data.size(); ++i)
+                if (warped.data[i] != ref.data[i]) { identity = false; break; }
+            CHECK(identity, "skip WarpAligned identity (1ch)");
+        }
+
+        {
+            bm::FloatImage rgb;
+            rgb.width = 16; rgb.height = 16; rgb.channels = 3;
+            rgb.data.resize(16u * 16u * 3u);
+            for (size_t i = 0; i < rgb.data.size(); ++i)
+                rgb.data[i] = static_cast<float>(i);
+            auto warped = bm::WarpAligned(rgb, ar);
+            CHECK(warped.width == rgb.width && warped.height == rgb.height &&
+                  warped.channels == rgb.channels,
+                  "skip warp preserves geometry (3ch)");
+            bool identity = true;
+            for (size_t i = 0; i < rgb.data.size(); ++i)
+                if (warped.data[i] != rgb.data[i]) { identity = false; break; }
+            CHECK(identity, "skip WarpAligned identity (3ch)");
+        }
+
+        {
+            bm::FloatImage shifted;
+            shifted.width = 32; shifted.height = 32; shifted.channels = 1;
+            shifted.data.resize(32u * 32u, 0.0f);
+            for (int y = 0; y < 32; ++y)
+                for (int x = 0; x < 32; ++x)
+                {
+                    int sx = x - 3, sy = y - 2;
+                    if (sx >= 0 && sx < 32 && sy >= 0 && sy < 32)
+                        shifted.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0) =
+                            ref.At(static_cast<uint32_t>(sx), static_cast<uint32_t>(sy), 0);
+                }
+
+            bm::AlignParams skip_p = params;
+            auto skip_ar = bm::EstimateTranslation(ref, shifted, skip_p);
+            CHECK(skip_ar.shift_x == 0 && skip_ar.shift_y == 0,
+                  "skip on offset frames: shift still 0");
+
+            bm::AlignParams std_p = params;
+            std_p.mode = bm::AlignmentMode::Standard;
+            auto std_ar = bm::EstimateTranslation(ref, shifted, std_p);
+            CHECK(std_ar.shift_x != 0 || std_ar.shift_y != 0,
+                  "standard on offset frames: detects motion (regression guard)");
+        }
+    }
+    std::cout << g_checks << " checks so far, " << g_failed << " failed" << std::endl;
+
     fs::path samples = fs::path(TEST_DATA_DIR) / "libburstmerge" / "test" / "samples";
     auto seq1 = FindSamples(samples / "Seq1", ".arw", 2);
     auto seq3 = FindSamples(samples / "Seq3", ".arw", 2);
@@ -185,6 +266,7 @@ int main()
         {64, 64, bm::AlignmentMode::DenseTile},
         {32, 32, bm::AlignmentMode::DenseTile},
         {32, 128, bm::AlignmentMode::DenseTile},
+        {32, 64, bm::AlignmentMode::Skip},
     };
 
     for (auto& pair : pairs)
@@ -201,7 +283,10 @@ int main()
             params.smooth_tile_field = false;
             params.mode = cfg.mode;
 
-            const char* mode_str = (cfg.mode == bm::AlignmentMode::DenseTile) ? "dense" : "std";
+            const char* mode_str;
+            if (cfg.mode == bm::AlignmentMode::DenseTile) mode_str = "dense";
+            else if (cfg.mode == bm::AlignmentMode::Skip) mode_str = "skip";
+            else mode_str = "std";
             std::string tag = pair.tag + "/" + mode_str + "/ts" +
                 std::to_string(cfg.tile_size) + "/sd" + std::to_string(cfg.search_distance);
 

@@ -20,34 +20,81 @@ namespace
 
 constexpr bool kEnableAlignmentGrayDump = false;
 
-inline void ApplyGammaGray(FloatImage& img, float white_level, float gamma)
+FloatImage ConvertToGrayAndGamma(const FloatImage& src,
+                                  float white_level,
+                                  float gamma)
 {
-    if (img.channels != 1 || white_level <= 0.0f) return;
-    if (std::abs(gamma - 1.0f) < 0.001f) return;
+    FloatImage dst;
+    dst.width = src.width;
+    dst.height = src.height;
+    dst.channels = 1;
+    dst.data.assign(static_cast<size_t>(dst.width) * dst.height, 0.0f);
+
+    const uint32_t ch = std::max<uint32_t>(1, src.channels);
+    const float inv_ch = 1.0f / static_cast<float>(ch);
+
+    const bool gamma_identity = (white_level <= 0.0f) ||
+                                (std::abs(gamma - 1.0f) < 0.001f);
+    if (gamma_identity)
+    {
+        ParallelForRows(src.height,
+                        RecommendedImageRowGrain(src.width, ch, kRowGrainMinPixels, kRowGrainCoarseRows),
+                        [&](uint32_t y_begin, uint32_t y_end)
+        {
+            const size_t row_stride = static_cast<size_t>(src.width) * ch;
+            const float* sp = src.data.data() + static_cast<size_t>(y_begin) * row_stride;
+            float* dp = dst.data.data() + static_cast<size_t>(y_begin) * src.width;
+            for (uint32_t y = y_begin; y < y_end; ++y)
+            {
+                for (uint32_t x = 0; x < src.width; ++x)
+                {
+                    const float* px = sp + static_cast<size_t>(x) * ch;
+                    float sum = 0.0f;
+                    for (uint32_t c = 0; c < ch; ++c)
+                        sum += px[c];
+                    dp[x] = sum * inv_ch;
+                }
+                sp += row_stride;
+                dp += src.width;
+            }
+        }, "gray_gamma_id");
+        return dst;
+    }
 
     const float scale = std::pow(white_level, 1.0f - gamma);
+    const bool use_sqrt = (std::abs(gamma - 0.5f) < 0.001f);
 
-    if (std::abs(gamma - 0.5f) < 0.001f)
+    ParallelForRows(src.height,
+                    RecommendedImageRowGrain(src.width, ch, kRowGrainMinPixels, kRowGrainCoarseRows),
+                    [&](uint32_t y_begin, uint32_t y_end)
     {
-        for (auto& v : img.data)
+        const size_t row_stride = static_cast<size_t>(src.width) * ch;
+        const float* sp = src.data.data() + static_cast<size_t>(y_begin) * row_stride;
+        float* dp = dst.data.data() + static_cast<size_t>(y_begin) * src.width;
+        for (uint32_t y = y_begin; y < y_end; ++y)
         {
-            // clamp to [0, white_level]
-            float vin = v;
-            if (vin <= 0.0f) { v = 0.0f; continue; }
-            if (vin >= white_level) { v = white_level; continue; }
-            v = scale * std::sqrt(vin);
+            for (uint32_t x = 0; x < src.width; ++x)
+            {
+                const float* px = sp + static_cast<size_t>(x) * ch;
+                float sum = 0.0f;
+                for (uint32_t c = 0; c < ch; ++c)
+                    sum += px[c];
+                float v = sum * inv_ch;
+                if (v <= 0.0f) { v = 0.0f; }
+                else if (v >= white_level) { v = white_level; }
+                else
+                {
+                    v = use_sqrt ? (scale * std::sqrt(v))
+                                 : (scale * std::pow(v, gamma));
+                }
+                dp[x] = v;
+            }
+            sp += row_stride;
+            dp += src.width;
         }
-    }
-    else
-    {
-        for (auto& v : img.data)
-        {
-            float vin = v;
-            if (vin <= 0.0f) { v = 0.0f; continue; }
-            if (vin >= white_level) { v = white_level; continue; }
-            v = scale * std::pow(vin, gamma);
-        }
-    }
+    }, "gray_gamma");
+
+    return dst;
 }
 
 // Progress callback shim kept local to the pipeline alignment partition.
@@ -85,6 +132,7 @@ const char* AlignmentModeTag(AlignmentMode mode)
     {
         case AlignmentMode::DenseTile: return "dense";
         case AlignmentMode::Frequency: return "freq";
+        case AlignmentMode::Skip: return "skip";
         case AlignmentMode::Standard:
         default: return "standard";
     }
@@ -273,16 +321,31 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     params.smooth_tile_field = settings.smooth_tile_field;
 
     const float wl = static_cast<float>(raw_images[ref_idx].metadata.white_level);
-    FloatImage gray_ref_full = ConvertPlanesToGrayscale(float_images[ref_idx]);
-    ApplyGammaGray(gray_ref_full, wl, settings.align_gamma);
-    DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), ref_idx, AlignmentModeTag(params.mode), true, wl);
+
+    const bool cheap_gamma = (wl <= 0.0f) ||
+                             (std::abs(settings.align_gamma - 1.0f) < 0.001f) ||
+                             (std::abs(settings.align_gamma - 0.5f) < 0.001f);
+
     std::vector<FloatImage> gray_inputs;
-    gray_inputs.reserve(float_images.size());
-    for (const auto& img : float_images)
+    gray_inputs.resize(float_images.size());
+
+    if (cheap_gamma && float_images.size() > 1)
     {
-        gray_inputs.push_back(ConvertPlanesToGrayscale(img));
-        ApplyGammaGray(gray_inputs.back(), wl, settings.align_gamma);
+        ParallelFor(0, float_images.size(), 1, [&](size_t i_begin, size_t i_end)
+        {
+            for (size_t i = i_begin; i < i_end; ++i)
+                gray_inputs[i] = ConvertToGrayAndGamma(float_images[i], wl, settings.align_gamma);
+        }, "gray_gamma_frames");
     }
+    else
+    {
+        for (size_t i = 0; i < float_images.size(); ++i)
+            gray_inputs[i] = ConvertToGrayAndGamma(float_images[i], wl, settings.align_gamma);
+    }
+
+    FloatImage gray_ref_full = std::move(gray_inputs[ref_idx]);
+    gray_inputs[ref_idx] = {};
+    DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), ref_idx, AlignmentModeTag(params.mode), true, wl);
 
     // Lazily-built reference pyramid: constructed once on first use in the
     // fixed-reference path, then reused for all subsequent frames. In the
@@ -331,15 +394,13 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     };
 
     auto align_and_warp = [&](const FloatImage& guide_ref,
-                              const FloatImage& source,
-                              size_t source_idx,
-                              size_t progress_idx,
-                              size_t total_count) -> FloatImage
+                               const FloatImage& source,
+                               size_t source_idx,
+                               size_t progress_idx,
+                               size_t total_count) -> FloatImage
     {
-        FloatImage gr = ConvertPlanesToGrayscale(guide_ref);
-        FloatImage gs = ConvertPlanesToGrayscale(source);
-        ApplyGammaGray(gr, wl, settings.align_gamma);
-        ApplyGammaGray(gs, wl, settings.align_gamma);
+        FloatImage gr = ConvertToGrayAndGamma(guide_ref, wl, settings.align_gamma);
+        FloatImage gs = ConvertToGrayAndGamma(source, wl, settings.align_gamma);
         return align_and_warp_pregrays(gr, gs, source, source_idx, progress_idx, total_count);
     };
 

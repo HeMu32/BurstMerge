@@ -221,6 +221,13 @@ void ExtractRawMetadata(DngNegativeHolder* holder,
             mosaic_pattern[i] = minfo.fCFAPattern[row][col];
         }
     }
+    else
+    {
+        // No mosaic info => LinearRaw (e.g. DxO DeepPRIME, demosaiced RGB).
+        // Signal "no CFA" with pattern_width 0 so the pipeline skips
+        // mosaic deinterleave / reinterleave and treats the data as planar RGB.
+        pattern_width = 0;
+    }
 
     for (uint32_t c = 0; c < 4 && c < neg.ColorChannels(); c++)
     {
@@ -289,6 +296,18 @@ void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4])
         static_cast<real64>(black_level[1]),
         static_cast<real64>(black_level[2]),
         static_cast<real64>(black_level[3]));
+}
+
+void SetDngBaselineExposure(DngNegativeHolder* holder, double exposure)
+{
+    if (!holder || !holder->negative) return;
+    holder->negative->SetBaselineExposure(static_cast<real64>(exposure));
+}
+
+void ClearDngMosaicInfo(DngNegativeHolder* holder)
+{
+    if (!holder || !holder->negative) return;
+    holder->negative->ClearMosaicInfo();
 }
 
 } // namespace io

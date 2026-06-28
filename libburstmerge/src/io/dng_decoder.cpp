@@ -39,10 +39,13 @@ public:
                                 : 16;
         result.info.is_float    = (raw.metadata.dng_pixel_type == DngPixelType::Float32);
         // pix_fmt must match the actual channel count from the HostBuffer format.
+        // R16_Uint_RGB                 → 3 channels → kPixelRGB (LinearRaw DNG).
+        // RGBA32_Float                 → 4 channels → kPixelRGBA.
         // R16_Uint / R8_Uint / R32_Float → 1 channel → kPixelGray.
-        // RGBA32_Float                → 4 channels → kPixelRGBA.
         result.info.pix_fmt     = (raw.pixels.format == PixelFormat::RGBA32_Float)
-                                ? kPixelRGBA : kPixelGray;
+                                ? kPixelRGBA
+                                : (raw.pixels.format == PixelFormat::R16_Uint_RGB)
+                                    ? kPixelRGB : kPixelGray;
         result.info.is_raw      = true;
 
         result.info.ev_value = raw.metadata.ev_value;
@@ -62,16 +65,19 @@ public:
             });
         }
 
-        uint32_t src_channels = (raw.pixels.format == PixelFormat::RGBA32_Float) ? 4 : 1;
+        uint32_t src_channels = (raw.pixels.format == PixelFormat::RGBA32_Float) ? 4
+                              : (raw.pixels.format == PixelFormat::R16_Uint_RGB) ? 3
+                              : 1;
         size_t src_pixel_count = static_cast<size_t>(raw.metadata.width) * raw.metadata.height;
         size_t total_pixels = src_pixel_count * src_channels;
 
         result.pixels.resize(total_pixels);
 
-        if (raw.pixels.format == PixelFormat::R16_Uint)
+        if (raw.pixels.format == PixelFormat::R16_Uint ||
+            raw.pixels.format == PixelFormat::R16_Uint_RGB)
         {
             const uint16_t* src = reinterpret_cast<const uint16_t*>(raw.pixels.data);
-            for (size_t i = 0; i < src_pixel_count; ++i)
+            for (size_t i = 0; i < total_pixels; ++i)
             {
                 result.pixels[i] = static_cast<float>(src[i]);
             }
