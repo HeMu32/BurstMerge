@@ -184,7 +184,7 @@ size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
         }
     }
 
-    if (has_exposure && max_exp > min_exp * 1.25f)
+    if (has_exposure && max_exp > min_exp * PipelineConstants::kBracketEvRatioThreshold)
     {
         std::vector<std::pair<float, size_t>> exposure_order;
         exposure_order.reserve(images.size());

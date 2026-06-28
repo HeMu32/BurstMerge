@@ -958,6 +958,22 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
     std::vector<uint64_t> plane(N);
     std::vector<float> mean_bl(N);
     { ProfileScope _ps("time.gpu.prepare");
+
+    if (images[ref_idx].metadata.mosaic_pattern_width > 0)
+    {
+        uint32_t pw2 = images[ref_idx].metadata.mosaic_pattern_width;
+        char buf[128];
+        int n = std::snprintf(buf, sizeof(buf), "CFA pattern (%ux%u):", pw2, pw2);
+        for (uint32_t i = 0; i < pw2 * pw2; ++i)
+        {
+            n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " %u",
+                static_cast<unsigned>(images[ref_idx].metadata.mosaic_pattern[i]));
+        }
+        Report(progress, PipelineConstants::kProgressCfaLog, std::string(buf));
+    }
+
+    Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
+
     std::vector<uint64_t> rawbufs;
     rawbufs.reserve(N);
     // === Input format selection ===
@@ -1007,6 +1023,7 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
     // LinearRAW inputs are handled by the CPU path (or skip on GPU).
     if (settings.highlight_recovery && period == 2 && ch == 4)
     {
+        Report(progress, PipelineConstants::kProgressNormalize, "Recovering clipped highlights");
         for (size_t i = 0; i < N; ++i)
         {
             float dyn_range = static_cast<float>(images[i].metadata.white_level) - mean_bl[i];

@@ -321,14 +321,31 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     params.smooth_tile_field = settings.smooth_tile_field;
 
     const float wl = static_cast<float>(raw_images[ref_idx].metadata.white_level);
-    FloatImage gray_ref_full = ConvertToGrayAndGamma(float_images[ref_idx], wl, settings.align_gamma);
-    DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), ref_idx, AlignmentModeTag(params.mode), true, wl);
+
+    const bool cheap_gamma = (wl <= 0.0f) ||
+                             (std::abs(settings.align_gamma - 1.0f) < 0.001f) ||
+                             (std::abs(settings.align_gamma - 0.5f) < 0.001f);
+
     std::vector<FloatImage> gray_inputs;
-    gray_inputs.reserve(float_images.size());
-    for (const auto& img : float_images)
+    gray_inputs.resize(float_images.size());
+
+    if (cheap_gamma && float_images.size() > 1)
     {
-        gray_inputs.push_back(ConvertToGrayAndGamma(img, wl, settings.align_gamma));
+        ParallelFor(0, float_images.size(), 1, [&](size_t i_begin, size_t i_end)
+        {
+            for (size_t i = i_begin; i < i_end; ++i)
+                gray_inputs[i] = ConvertToGrayAndGamma(float_images[i], wl, settings.align_gamma);
+        }, "gray_gamma_frames");
     }
+    else
+    {
+        for (size_t i = 0; i < float_images.size(); ++i)
+            gray_inputs[i] = ConvertToGrayAndGamma(float_images[i], wl, settings.align_gamma);
+    }
+
+    FloatImage gray_ref_full = std::move(gray_inputs[ref_idx]);
+    gray_inputs[ref_idx] = {};
+    DumpWarpedGrayBmp(gray_ref_full, AlignmentResult{}, float_images.size(), ref_idx, AlignmentModeTag(params.mode), true, wl);
 
     // Lazily-built reference pyramid: constructed once on first use in the
     // fixed-reference path, then reused for all subsequent frames. In the

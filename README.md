@@ -28,7 +28,8 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Motion-robust merge in the spatial domain
 - Motion-robust merge in the frequency domain
 - Highlight recovery for clipped green channels (extrapolated from R/B neighbours)
-- Optional exposure correction for improved shadow tonality
+    - Highlight recovery was for internal processing only and was not intended for extending dynamic range for outputs.
+- Optional non-linear exposure mapping for improved shadow tonality
 - Burst support with bracketed exposure (not applicable for common RGB formats)
 
 ### Output precision

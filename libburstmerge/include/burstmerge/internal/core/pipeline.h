@@ -48,31 +48,38 @@ struct PipelineConstants
     // Lower bound for Settings::tile_size; the orchestrator clamps undersized
     // user input so every downstream stage (alignment + merge) gets a geometry
     // that preserves sub-pixel matching fidelity.
-    static constexpr int32_t kMinTileSize = 16;
+    static constexpr int32_t kMinTileSize       = 16;
     // NOTE: kTemporalNrThreshold (22.5) was removed; "frame average" is now selected
     // by --merge-algo, not by noise_reduction threshold.
+
+    /// @note exposure vaule range within 2 * BracketTransmissionFallbackEv will not
+    ///       trigger chained alignment
     static constexpr float kBracketTransmissionFallbackEv = 1.0f;
-    static constexpr int32_t kProgressStart = 0;
-    static constexpr float kProgressValidate = 0.03f;
-    static constexpr float kProgressConvertStart = 0.08f;
-    static constexpr float kProgressConvertEnd = 0.16f;
-    static constexpr float kProgressDecodeStart = 0.18f;
-    static constexpr float kProgressDecodeRange = 0.30f;
-    static constexpr float kProgressRefFrame = 0.50f;
-    static constexpr float kProgressRefSelected = 0.52f;
-    static constexpr float kProgressHotpixel = 0.54f;
-    static constexpr float kProgressCfaLog = 0.541f;
-    static constexpr float kProgressNormalize = 0.545f;
-    static constexpr float kProgressAlignStart = 0.56f;
-    static constexpr float kProgressAlignRange = 0.06f;
-    static constexpr float kProgressWarpStart = 0.62f;
-    static constexpr float kProgressWarpRange = 0.06f;
-    static constexpr float kProgressMerge = 0.70f;
-    static constexpr float kProgressExposure = 0.78f;
-    static constexpr float kProgressQuantize = 0.80f;
-    static constexpr float kProgressContainer = 0.82f;
-    static constexpr float kProgressWrite = 0.90f;
-    static constexpr float kProgressDone = 1.0f;
+    /// @note exposure value range within kBracketEvRatioThreshold will be treated as
+    ///       same exposure in alignment and merge
+    static constexpr float kBracketEvRatioThreshold = 1.4f;
+
+    static constexpr int32_t kProgressStart         = 0;
+    static constexpr float kProgressValidate        = 0.03f;
+    static constexpr float kProgressConvertStart    = 0.08f;
+    static constexpr float kProgressConvertEnd      = 0.16f;
+    static constexpr float kProgressDecodeStart     = 0.18f;
+    static constexpr float kProgressDecodeRange     = 0.30f;
+    static constexpr float kProgressRefFrame        = 0.50f;
+    static constexpr float kProgressRefSelected     = 0.52f;
+    static constexpr float kProgressHotpixel        = 0.54f;
+    static constexpr float kProgressCfaLog          = 0.541f;
+    static constexpr float kProgressNormalize       = 0.545f;
+    static constexpr float kProgressAlignStart      = 0.56f;
+    static constexpr float kProgressAlignRange      = 0.06f;
+    static constexpr float kProgressWarpStart       = 0.62f;
+    static constexpr float kProgressWarpRange       = 0.06f;
+    static constexpr float kProgressMerge           = 0.70f;
+    static constexpr float kProgressExposure        = 0.78f;
+    static constexpr float kProgressQuantize        = 0.80f;
+    static constexpr float kProgressContainer       = 0.82f;
+    static constexpr float kProgressWrite           = 0.90f;
+    static constexpr float kProgressDone            = 1.0f;
     static constexpr std::chrono::hours kOrphanMaxAge = std::chrono::hours(24);
 };
 
