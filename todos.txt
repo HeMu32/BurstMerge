@@ -8,14 +8,6 @@ CLI应用: 指定搜索位移限制
 
 Hotpixel Spuression: 目前的算法好像是坏的
 
-NormalizeFrames: 好像只考虑ISO速度和快门速度 不考虑其他任何因素也不考虑曝光EXIF不准确的问题
-
 ImageMetadata::tags: 从未被写入
 
 参考帧选取: 暂未实现/移植
-
-[已完成] 高光恢复 (Highlight Recovery): 已从 hdr-plus-swift 移植 (texture.metal:add_texture_highlights).
-  - CPU: pipeline_frame.cpp::RecoverHighlights, 三层分发 (Bayer/LinearRAW/其他mosaic)
-  - GPU: highlight_recovery.comp (Bayer-only, 第34个shader)
-  - CLI: --highlight-recovery (默认开启)
-  - 测试: test_highlight.cpp (23 checks), test_stage0 频率合并+时域中值交互测试, test_stage1 包围曝光中心饱和测试

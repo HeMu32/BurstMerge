@@ -51,7 +51,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
     - merging
     - highlight recovery
 - Folder-based sequence reading
-- Windows 10 support (via MinGW-W64 9.0.0)
+- Windows 10 support (via MinGW-W64)
 
 ## TODOs
 
@@ -208,7 +208,7 @@ burstmerge_cli.exe --list-gpus
 - Compatibility with MSVC was not tested
 - Default generator used by the current project: `MinGW Makefiles`
 
-The top-level build is driven by `CMakeLists.txt`. The actual dependency paths are centralized in `local_config.cmake`, and the core build currently expects several libraries to be available under `C:/MinGW`.
+The top-level build is driven by `CMakeLists.txt`. The repository vendors most of its dependencies directly under `3rdparty/` (dng\_sdk, pocketfft, cxxopts, Vulkan headers/import library, glslang, and the libtiff source), so those require no extra configuration. Four libraries are **external** and must be installed by you, then located via `local_config.cmake`: **libjpeg-turbo, libpng, zlib, and libtiff**. They are all treated uniformly — there is no assumption that any of them is already present on your system.
 
 ### Required tools
 
@@ -216,48 +216,59 @@ The top-level build is driven by `CMakeLists.txt`. The actual dependency paths a
 - MinGW-w64 with `gcc`, `g++`, `mingw32-make`, and OpenMP support
 - A working shell environment where the MinGW `bin` directory is on `PATH`
 
-Example expected compiler paths in the current repository setup:
+### Dependencies layout
 
-```text
-C:/MinGW/bin/gcc.exe
-C:/MinGW/bin/g++.exe
-C:/MinGW/bin/mingw32-make.exe
-```
+**Vendored (repo-relative, no configuration needed):**
 
-### Third-party layout expected by the project
+- `3rdparty/dng_sdk` — Adobe DNG SDK (built as an internal static library)
+- `3rdparty/pocketfft` — FFT (compiled into the core library)
+- `3rdparty/cxxopts` — CLI options parser (header-only)
+- `3rdparty/vulkan` — Vulkan headers, import library (`libvulkan-1.a`), and runtime DLL
+- `3rdparty/glslang` — SPIR-V shader compiler (`glslangValidator.exe`, used at CMake configure time)
+- `3rdparty/libtiff` — libtiff source tree (see below for building it)
 
-The repository already vendors several dependencies under `3rdparty/`, including:
+**External (you must install and point `local_config.cmake` at them):**
 
-- `3rdparty/dng_sdk`
-- `3rdparty/pocketfft`
-- `3rdparty/cxxopts`
-- `3rdparty/libtiff`
+- libjpeg-turbo
+- libpng
+- zlib
+- libtiff
 
-`local_config.cmake` currently assumes the following locations:
-
-- `libjpeg-turbo`: `C:/MinGW/include` and `C:/MinGW/lib/libjpeg.a`
-- `libpng`: `C:/MinGW/include` and `C:/MinGW/lib/libpng.a`
-- `zlib`: `C:/MinGW/include` and `C:/MinGW/lib/libz.a`
-- `libtiff`: `3rdparty/libtiff/install/include` and `3rdparty/libtiff/install/lib/libtiff.dll.a`
-
-Still, you can modify the CMake configs to find the dependencies if you've alreadly configured them in your environment. 
-
-### Build libtiff first
-
-The main project treats TIFF support as optional, but `local_config.cmake` is already configured to consume a local install under `3rdparty/libtiff/install`. Building and installing `libtiff` there keeps the repository layout consistent with the current code.
-
-Configure and install `libtiff` with MinGW:
+Obtain them through whatever channel fits your environment (a MinGW/MSYS2 package manager, a self-build, etc.). For libtiff, one convenient option is to build and install the vendored source tree into a repo-relative prefix, which matches what `local_config.cmake` expects by default:
 
 ```powershell
 cmake -S 3rdparty/libtiff -B 3rdparty/libtiff/build_cmake -G "MinGW Makefiles" `
   -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_INSTALL_PREFIX="C:/Users/HeMu/Desktop/BurstMerge/3rdparty/libtiff/install"
+  -DCMAKE_INSTALL_PREFIX="${PWD}/3rdparty/libtiff/install"
 
 cmake --build 3rdparty/libtiff/build_cmake --config Release
 cmake --install 3rdparty/libtiff/build_cmake
 ```
 
-If `libtiff` is not installed in that location, the main build still configures, but TIFF input/output support is disabled.
+Create a `local_config.cmake` at the repository root (it is `.gitignore`d and is the only place dependency paths are centralized) pointing at your installs of the four external libraries. A minimal template:
+
+```cmake
+# ===== burstmerge/local_config.cmake =====
+# Point these at YOUR installs of the four external libraries.
+
+# ---- libjpeg-turbo ----
+set(JPEG_INCLUDE_DIR  "<jpeg-root>/include")
+set(JPEG_LIBRARY      "<jpeg-root>/lib/libjpeg.a")
+
+# ---- libpng ----
+set(PNG_INCLUDE_DIR   "<png-root>/include")
+set(PNG_LIBRARY       "<png-root>/lib/libpng.a")
+
+# ---- zlib ----
+set(ZLIB_INCLUDE_DIR  "<zlib-root>/include")
+set(ZLIB_LIBRARY      "<zlib-root>/lib/libz.a")
+
+# ---- libtiff ----
+set(TIFF_INCLUDE_DIR  "<tiff-root>/include")
+set(TIFF_LIBRARY      "<tiff-root>/lib/libtiff.dll.a")
+```
+
+The vendored dependencies above are resolved automatically (via `${PROJECT_ROOT}/3rdparty/...`), so they do not need to appear in this file. If any of the four external libraries is not found, the corresponding format's encode/decode support is disabled at build time.
 
 ### Configure the main project
 
@@ -266,8 +277,6 @@ From the repository root:
 ```powershell
 cmake -S . -B build -G "MinGW Makefiles" `
   -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_C_COMPILER="C:/MinGW/bin/gcc.exe" `
-  -DCMAKE_CXX_COMPILER="C:/MinGW/bin/g++.exe" `
   -DBUILD_TESTS=ON
 ```
 
@@ -276,6 +285,7 @@ Notes:
 - `BUILD_TESTS` defaults to `ON` in the top-level `CMakeLists.txt`.
 - The build enables OpenMP with `find_package(OpenMP REQUIRED)`.
 - The codebase is written for C++17 and sets `CMAKE_CXX_STANDARD 17`.
+- `gcc` / `g++` / `mingw32-make` are discovered from `PATH`; override only if you need a specific toolchain instance.
 
 ### Build targets
 
