@@ -21,10 +21,11 @@ enum class BackendType
 { CPU, Vulkan };
 enum class MergeAlgorithm
 {
-    Spatial,         // Pixel-domain weighted blending (Standard or Linear sub-mode)
-    Frequency,       // Frequency-domain merge (Laplacian or WienerFft sub-mode)
-    TemporalAverage, // Simple exposure-weighted frame average; ignores noise_reduction
-    TemporalMedian   // Simple per-pixel median across frames; ignores noise_reduction
+    Spatial,            // Pixel-domain weighted blending (Standard or Linear sub-mode)
+    Frequency,          // Frequency-domain merge (Laplacian or WienerFft sub-mode)
+    TemporalAverage,    // Simple exposure-weighted frame average; ignores noise_reduction
+    TemporalMedian,     // Simple per-pixel median across frames; ignores noise_reduction
+    ExpBracketAverage   // Bracket-aware average: EV weight numbers + clip gate; assumes bracketed input
 };
 enum class ExposureMode
 { Off, Linear, Curve };

@@ -3,18 +3,23 @@
 #include "common.glsl"
 
 // freq_laplacian: default FrequencyMode::Laplacian. Per-element:
-//   low_sum = ref_low + sum(cmp_low); high starts = ref - ref_low;
-//   for each comp: ch = cmp - cmp_low; low_sum += cmp_low; if |ch|>|high| high=ch
-//   out = low_sum/(N+1) + high
+//   low_sum = ref_low + sum(cmp_low * trust); high starts = ref - ref_low;
+//   for each comp: ch = cmp - cmp_low; low_sum += cmp_low*trust; if |ch|>|high| high=ch
+//   out = low_sum/(1+sum(trust)) + high
+//   trust[k] is the per-comparison exposure weight number wn (1.0 for the
+//   non-bracketed path -> bit-identical equal-weight average; high-freq max-abs
+//   selection is unchanged).
 //   binding 0: ref (NHWC), 1: ref_low (NHWC)
 //   binding 2: cmps (packed NHWC, i0 frames, stride i1 floats)
 //   binding 3: cmps_low (packed NHWC)
 //   binding 4: out (NHWC)
+//   binding 5: trust (per-comparison float weight numbers)
 layout(binding = 0) readonly buffer Ref { float refp[]; };
 layout(binding = 1) readonly buffer RefL { float refl[]; };
 layout(binding = 2) readonly buffer Cmps { float cmps[]; };
 layout(binding = 3) readonly buffer CmpL { float cmpl[]; };
 layout(binding = 4) buffer Out { float outv[]; };
+layout(binding = 5) readonly buffer Trust { float trust[]; };
 
 layout(local_size_x = 256) in;
 void main()
@@ -31,8 +36,9 @@ void main()
     {
         int off = k * ff + int(i);
         float comp_high = cmps[off] - cmpl[off];
-        low_sum += cmpl[off];
-        low_weight += 1.0;
+        float wn = trust[k];
+        low_sum += cmpl[off] * wn;
+        low_weight += wn;
         float ah = high < 0.0 ? -high : high;
         float ch = comp_high < 0.0 ? -comp_high : comp_high;
         if (ch > ah) high = comp_high;

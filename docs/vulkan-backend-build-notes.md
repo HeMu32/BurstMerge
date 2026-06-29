@@ -200,10 +200,10 @@ build-time 生成头会让 `vulkan_backend.cpp` 依赖一个 generated 文件, C
 `ShaderPC` (C++, `vulkan_backend.h`) 和 `common.glsl` 里的 `PC` block 必须字段顺序、类型、大小完全一致:
 
 ```
-14 个 int32 (w, h, channels, w2, h2, channels2, i0..i7) + 8 个 float (f0..f7) = 88 字节
+16 个 int32 (w, h, channels, w2, h2, channels2, i0..i9) + 8 个 float (f0..f7) = 96 字节
 ```
 
-全是 4 字节标量, 无 std140 对齐陷阱 (没有 vec3/mat). push constant 在 Vulkan 里保证至少 128 字节, 88 字节安全.
+全是 4 字节标量, 无 std140 对齐陷阱 (没有 vec3/mat). push constant 在 Vulkan 里保证至少 128 字节, 96 字节安全.
 
 通用字段复用: 不同 shader 用同一组 `i*` / `f*` 槽位表达不同含义 (在 shader 头注释里标注, 如 `pc.i0 = radius, pc.f0 = robustness`). 避免为每个 shader 定义单独的 PC struct, 否则 pipeline layout 会膨胀.
 
@@ -216,7 +216,7 @@ build-time 生成头会让 `vulkan_backend.cpp` 依赖一个 generated 文件, C
 - binding 7: storage buffer (复用做 binomial 权重, 见第 4 节)
 - (早期方案曾用 binding 8 = uniform, 但为统一性最终全部 storage)
 
-每个 pipeline 用同一个 `VkPipelineLayout` (1 个 set + 88B push constant). pipeline cache 按 shader 名懒创建 (`get_pipeline`). 这样:
+每个 pipeline 用同一个 `VkPipelineLayout` (1 个 set + 96B push constant). pipeline cache 按 shader 名懒创建 (`get_pipeline`). 这样:
 - 不用为每个 shader 维护单独的 set layout / pipeline layout.
 - 每 dispatch 只需 `vkAllocateDescriptorSets` + `vkUpdateDescriptorSets` 写**该 shader 实际用到的那几个 binding**, 未用到的 binding 留空 (Vulkan 允许, 只要 shader 不访问).
 

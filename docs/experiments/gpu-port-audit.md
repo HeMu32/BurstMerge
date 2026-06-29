@@ -1,5 +1,10 @@
 # GPU 移植代码行为审计 (逐项记录)
 
+> **注 (后续更新)**: 本文档记录的是初始移植阶段的审计. 此后 `dense_level.comp` 增加了
+> strided M=16 累加 + FMA 以减少 float 舍入误差, 并新增了可选的 `dense_level_fp64.comp`
+> (double 累加, `BURSTMERGE_GPU_FP64=ON`). 详见 `docs/experiments/exposure-weighted-merge.md`
+> §5-§6. 本文档中 "全单精度, 无 double" 等描述反映的是当时的状态.
+
 > 方法论: 每发现一个疑点, 先用 subagent 核对 CPU 路径**实际执行且稳定**的代码逻辑
 > (不信 AGENTS.md / 注释, 只信源码 + 实际编译的宏值), 再改 GPU; 每改一个点记录一次.
 

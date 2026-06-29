@@ -52,11 +52,18 @@ struct PipelineConstants
     // NOTE: kTemporalNrThreshold (22.5) was removed; "frame average" is now selected
     // by --merge-algo, not by noise_reduction threshold.
 
-    /// @note exposure vaule range within 2 * BracketTransmissionFallbackEv will not
-    ///       trigger chained alignment
+    /// @note Exposure spread up to 2^kBracketTransmissionFallbackEv (2.0x,
+    ///       +1 stop) does NOT trigger chained alignment. Above it the spread is
+    ///       large enough that fixed-reference alignment becomes unreliable and
+    ///       the chained ("transmission") path takes over. Consumed by
+    ///       ClassifyExposureSequence as the `needs_chained_alignment` gate.
     static constexpr float kBracketTransmissionFallbackEv = 1.0f;
-    /// @note exposure value range within kBracketEvRatioThreshold will be treated as
-    ///       same exposure in alignment and merge
+    /// @note Exposure spread up to kBracketEvRatioThreshold (1.4x, ~+0.49 stops)
+    ///       is treated as a constant-exposure burst (same reference handling,
+    ///       no exposure-weighted merge). Above it the burst is bracketed.
+    ///       Consumed by ClassifyExposureSequence as the `is_bracketed` gate.
+    ///       Note the 1.4x..2.0x band: bracketed for reference/merge purposes
+    ///       but still aligned with a fixed reference.
     static constexpr float kBracketEvRatioThreshold = 1.4f;
 
     static constexpr int32_t kProgressStart         = 0;

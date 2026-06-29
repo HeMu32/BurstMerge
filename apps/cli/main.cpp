@@ -27,6 +27,8 @@ bool ParseMergeAlgorithm(const std::string& value, burstmerge::MergeAlgorithm& o
     if (v == "frequency" || v == "freq") { out = burstmerge::MergeAlgorithm::Frequency; return true; }
     if (v == "temporal" || v == "temporal-average" || v == "average" || v == "avg") {
         out = burstmerge::MergeAlgorithm::TemporalAverage; return true; }
+    if (v == "exp-bkt-average" || v == "expbkt-avg" || v == "expbkt" || v == "bracket-average") {
+        out = burstmerge::MergeAlgorithm::ExpBracketAverage; return true; }
     if (v == "median" || v == "temporal-median") {
         out = burstmerge::MergeAlgorithm::TemporalMedian; return true; }
     return false;
@@ -38,6 +40,7 @@ const char* MergeAlgoName(burstmerge::MergeAlgorithm algo) {
         case burstmerge::MergeAlgorithm::Frequency: return "Frequency";
         case burstmerge::MergeAlgorithm::TemporalAverage: return "TemporalAverage";
         case burstmerge::MergeAlgorithm::TemporalMedian: return "TemporalMedian";
+        case burstmerge::MergeAlgorithm::ExpBracketAverage: return "ExpBracketAverage";
     }
     return "Unknown";
 }
@@ -134,8 +137,8 @@ int main(int argc, char* argv[]) {
         ("t,tile", "Tile size", cxxopts::value<int>()->default_value("32"))
         ("b,bit-depth", "Output bit depth (8, 10, 12, 14, or 16)", cxxopts::value<int>()->default_value("14"))
         ("frequency", "Shorthand for --merge-algo frequency (deprecated, use --merge-algo)")
-        ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal/median)", cxxopts::value<float>())
-        ("m,merge,merge-algo", "Merge algorithm: spatial, frequency, temporal (average), median", cxxopts::value<std::string>())
+        ("n,noise-reduction", "Noise reduction strength (ignored when merge-algo = temporal/exp-bkt-average/median)", cxxopts::value<float>())
+        ("m,merge,merge-algo", "Merge algorithm: spatial, frequency, temporal (average), exp-bkt-average (expbkt-avg), median", cxxopts::value<std::string>())
         ("a,alignment", "Alignment mode: standard, dense, freq, skip (alias: none)", cxxopts::value<std::string>()->default_value("standard"))
         ("spa-mode,spatial-mode", "Spatial merge mode: standard, linear", cxxopts::value<std::string>()->default_value("standard"))
         ("freq-mode,frequency-mode", "Frequency mode: laplacian, wiener, wiener-robust", cxxopts::value<std::string>()->default_value("laplacian"))
@@ -232,7 +235,7 @@ int main(int argc, char* argv[]) {
     settings.merge_algo = burstmerge::MergeAlgorithm::Spatial;
     if (args.count("merge-algo") &&
         !ParseMergeAlgorithm(args["merge-algo"].as<std::string>(), settings.merge_algo)) {
-        std::cerr << "Invalid merge algorithm (use spatial, frequency, temporal, or median)" << std::endl;
+        std::cerr << "Invalid merge algorithm (use spatial, frequency, temporal, exp-bkt-average, or median)" << std::endl;
         return 2;
     }
     // --frequency is a deprecated shorthand for --merge-algo frequency.

@@ -3,6 +3,7 @@
 #include "common.glsl"
 
 // sad_global: compute mean SAD (subsampled) for ONE candidate shift.
+// Uses float accumulation (standard path, not consumed by dense alignment).
 //   binding 0: ref   (1ch gray, pc.w x pc.h)
 //   binding 1: cmp   (1ch gray, same dims)
 //   binding 2: seed  (int[2]: center_x, center_y) - persistent across levels
