@@ -55,9 +55,11 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	4. RAW 分支:
 		- `PrepareDngInputs` (`pipeline_io.cpp:106`): 非 DNG 的 RAW 在 Windows 上调 Adobe DNG Converter 转换. 
 		- 两阶段读取: 先顺序读到内存, 再 `ReadDngFromBuffer` 并行解码 (`ParallelFor` 带 `decode_dng` tag). 
-		- `SelectExposureRefIndex` (`pipeline_frame.cpp:147`): 包围曝光 (max_ev > 1.25×min_ev) 取最暗帧, 否则取中间帧. 
-		- `RepairHotPixels` → `NormalizeFrames` (减黑电平, 按 EV 比例缩放) → `BuildAlignedComparisons`. 
-		- 三选一合并: `TemporalAverage` / `FrequencyMerge` / `SpatialMerge`. 
+		- `ClassifyExposureSequence` (`pipeline_frame.cpp`): 统一的包围曝光判定, 单次扫描 ev_value 同时应用两个阈值 — `is_bracketed` (>1.4×, ~+0.49EV) 与 `needs_chained_alignment` (>2^kBracketTransmissionFallbackEv=2×, +1EV). 在编排器 `Process` 中**计算一次**, 作为参数线程传递给 `SelectExposureRefIndex` / `BuildAlignedComparisons` / 合并加权门控, 取代此前各处重复的 min/max-EV 循环. `IsBracketedSequence` 是仅返回布尔的便捷包装.
+		- `SelectExposureRefIndex` (`pipeline_frame.cpp`): 包围曝光 (`ec.is_bracketed`) 取最暗帧 (`ec.exposure_order.front()`), 否则取中间帧. 消费预计算的 `ExposureClassification` (不再自行扫描 ev_value).
+		- `RepairHotPixels` → `NormalizeFrames` (减黑电平, 按 EV 比例缩放) → `BuildAlignedComparisons` (链式对齐门控改用 `ec.needs_chained_alignment`, 直接复用已排序的 `ec.exposure_order`).
+		- [新增] `RecoverHighlights` (`pipeline_frame.cpp`): 在 `NormalizeFrames` 之后、`BuildAlignedComparisons` 之前执行. 对被裁切的绿色通道进行高光恢复 (从邻近 R/B 像素外推). 三层分发: Bayer (全空间邻居算法, 匹配 Swift `texture.metal:add_texture_highlights`), LinearRAW (逐像素同像素 R/B 外推), 其他 mosaic (同超级像素 R/B 外推). 常量定义在 `HighlightRecoveryParams` (`pipeline_frame.h`). GPU 端仅 Bayer (`highlight_recovery.comp`). CLI `--highlight-recovery` (默认开启).
+		- 四选一合并: `TemporalAverage` / `ExpBracketAverage` / `FrequencyMerge` / `SpatialMerge`. **[新增]** 包围曝光 (`ec.is_bracketed`) 时, Spatial / Laplacian / WienerFft(标准) 启用基于 EV 权数的增强加权 (见下方"曝光加权合并"); WienerFftRobust 保留自有 Swift 式曝光处理 (忽略该开关); TemporalAverage/Median 不受影响. `ExpBracketAverage` **始终**使用 EV 权数 (`wn = 1/scale`) + 硬裁切门 (max-across-channels, 同 spatial), 不检查 `is_bracketed`; 当所有帧 EV 完全相同时 `scale ≡ 1 → wn ≡ 1` (等权). 近包围序列 (EV 差异 < 1.4× 但帧间不完全一致) 仍会按实际 EV 分配不同权重.
 		- 位深缩放 (`pipeline.cpp:531-606`): ≤10bit 走 "黑电平置零" 路径, >10bit 路径还原黑电平. 此处注释记录了 ACR/Lightroom 低 bit 黑电平渲染 bug 的规避. 
 		- 可选 `ApplyExposure` → 逐通道黑电平 delta → `ConvertPlaneImageToMosaic` → 写出. 
 	5. 清理: 删除转换临时目录; 若设置了 `BURSTMERGE_PROFILE` 打印 profile 报告. 
@@ -65,12 +67,23 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 ## 模块职责与对应参考实现 (hdr-plus-swift)
 	- `core/`: 管线编排/线程/性能/缓冲/FFT. 对应 Swift 的 `denoise.swift` (TileInfo/progress/Metal device) 和 `texture.swift`. 
 	- `align/`: 金字塔 + 三种估计器 (Standard/Dense/Frequency) + warp. 对应 `align/align.swift` + `align.metal`. 
-	- `merge/`: spatial (像素域加权) 与 frequency (Laplacian / WienerFft / WienerFftRobust). 对应 `merge/spatial.swift` 和 `merge/frequency.swift` + `.metal`. 
-	- `denoise/temporal.cpp`: 热像素修复 + 时域平均. 
+	- `merge/`: spatial (像素域加权) 与 frequency (Laplacian / WienerFft / WienerFftRobust). 对应 `merge/spatial.swift` 和 `merge/frequency.swift` + `.metal`. **[新增]** 包围曝光时 Spatial / Laplacian / WienerFft(标准) 在既有加权之上**叠加** EV 权数 `wn = 1/exposure_scales[idx]` (增强, 非替换); WienerFftRobust 保持自有 Swift 式曝光处理不变; TemporalAverage/Median 不受影响. 详见下方"曝光加权合并".
+	- `denoise/temporal.cpp`: 热像素修复 + 时域平均 + [新增] `ExpBracketAverage` (包围曝光平均: EV 权数 `wn = 1/scale` + max-across-channels 硬裁切门, 匹配 spatial clip gate; 参考 frame 始终 weight 1, 无 BoxBlur 开销).
+	- [新增] `pipeline_frame.cpp::RecoverHighlights`: 高光恢复 (裁切绿色通道外推). 对应 Swift `texture.swift:add_texture_highlights` + `texture.metal:add_texture_highlights`. 常量 `HighlightRecoveryParams` 与 GPU shader `highlight_recovery.comp` 必须一致.
 	- `exposure/exposure.cpp`: 线性 / Reinhard 曲线提亮. 对应 `exposure/exposure.swift`. 
-	- `io/dng_sdk_bridge.cpp`: 用不透明指针持有 `dng_negative`, 完整保留 Opcode/CameraProfile/EXIF/XMP. 对应 Swift 的 `dng_sdk_wrapper.cpp` Obj-C++ 桥. 
+	- `io/dng_sdk_bridge.cpp`: 用不透明指针持有 `dng_negative`, 完整保留 Opcode/CameraProfile/EXIF/XMP. 对应 Swift 的 `dng_sdk_wrapper.cpp` Obj-C++ 桥.
+	- `io/dng_reader.cpp`: DNG 读取入口. 读 Stage1Image (Bayer CFA) 后, 若 `info.fEnhancedIndex != -1` 则调 `ReadEnhancedImage` (默认 host = mode 2 "linear-only": 将 enhanced LinearRaw 解码到 `fStage3Image`, 清除 MosaicInfo/OpcodeLists/`fEnhanceParams`), 再 `ClearStage1Image` 丢弃 Bayer, 使 `RawImage()` 回退到 Stage3. `is_linear_rgb` (planes==3) 检测将其标记为 `R16_Uint_RGB`, 走现有 LinearRaw 管线. 支持 ACR NR / Enhanced-Image (`sfEnhancedImage`) DNG (典型为 JPEG XL 压缩的 LinearRaw SubIFD). 对应 Swift `dng_sdk_wrapper.cpp` 的 `ReadDNG`.
 	- `io/dng_converter.cpp` (Windows-only): 包装 Adobe DNG Converter CLI. 对应 `io_dng_sdk.swift::convert_raws_to_dngs`. 
 	- `core/fft_util.cpp`: 用 PocketFFT 替代 Metal FFT shader; **必须 thread-local 持有 plan** (pocketfft plan 内部有工作缓冲, 不可多线程共享). 
+
+## 曝光加权合并 (Exposure-Weighted Merge) — [新增] CPU 路径
+包围曝光序列下, 既有合并算法对各帧等权处理, 无法体现"高 EV 帧主导暗部、低 EV 帧主导亮部"的 HDR 目的. 本特性在不破坏既有加权 (robustness / Wiener 收缩 / 高光门 / 裁切门) 的前提下, 为每帧叠加一个基于曝光的**权数** (weight number):
+	- `wn_i = 1 / exposure_scales[i]` (比较帧); 合并参考帧 (`ref_idx`, 包围序列里也是最暗的曝光参考帧) 隐式取 `wn = 1`. 缺失 EV 数据时 `wn = 1` (中性).
+	- 各算法的**既有每像素权重保持不变**, 仅在累加时再乘以 `wn` (增强, 非替换). 规范化 (÷Σ权重) 自然变为按权数加权.
+	- 裁切门 (`value/scale ≥ clip_threshold → 权重 0`) 不变 — 这正是"按恢复前白值判定溢出"的实现, 也充当 wn 的天然上限: 高 EV 帧虽 `wn` 大, 但其溢出像素直接归零, 不会污染高光.
+	- 激活: 自动 — 编排器对包围序列 (`ec.is_bracketed`) 置 `SpatialMergeParams::exposure_weighted` / `FrequencyMergeParams::exposure_weighted` 为 true; 等曝光连拍 `wn ≡ 1`, 输出与旧路径**逐位一致** (无回归).
+	- 覆盖: `SpatialMerge` (单通道 + 多通道), `FrequencyMerge::Laplacian` (低频加权, 高频 max-abs 不变), `FrequencyMerge::WienerFft` (每帧频谱 blend × wn, 归一化改 1/(1+Σwn)), `ExpBracketAverage` (累加 × wn, 硬裁切门). **不覆盖** `WienerFftRobust` (自有 Swift 式曝光处理) 与 `TemporalAverage/Median`.
+	- GPU 路径**已实现**: spatial shader (`spatial_acc_multi/1ch`) 经 `pc.f6` 乘 wn; `freq_laplacian` / `freq_wiener_tile` 经 trust SSBO + 预计算 `inv_stack`; `expbkt_acc` (`pc.f0`=clip_scaled, `pc.f1`=scale) 逐帧 accumulate + `normalize_div` 收尾 (无 BoxBlur). 等曝光连拍 `wn ≡ 1` 时与旧路径逐位一致 (无回归). 见 `docs/experiments/exposure-weighted-merge.md`.
 
 ## 关键数据结构
 	- `FloatImage` (`core/float_image.h`): `width/height/channels + std::vector<float>`, NHWC 布局, 贯穿整个管线. 
@@ -83,7 +96,7 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 
 ## 后端现状
 	- **CPU (OpenMP)** 和 **Vulkan (GPU compute)** 双后端均可用. CLI 通过 `--backend cpu|vulkan` 选择 (默认 cpu, `apps/cli/main.cpp`). 
-	- **Vulkan 后端** (已实现): 见下方 "Vulkan GPU 后端" 章节. 在 RTX 3080 / 5060 Ti 上验证, 全部合并模式与 CPU 近像素级一致 (spatial/temporal/freq-laplacian/wiener-fft MAD < 0.02%; 包围曝光序列 < 0.25%). 对齐 standard+dense bit-identical (max 0px). **全单精度 float, 无 double**. 
+	- **Vulkan 后端** (已实现): 见下方 "Vulkan GPU 后端" 章节. 在 RTX 3080 / 5060 Ti 上验证, 全部合并模式与 CPU 近像素级一致 (等曝光 + 包围曝光 MAD < 0.02%; 包围曝光此前 < 0.25%, 引入 GPU 链式对齐 + EV 加权后降至 < 0.01%). 对齐 standard+dense bit-identical (max 0px); 包围曝光链式对齐 (transmission) 已在 GPU 实现. **默认全单精度 float; `dense_level.comp` 使用 strided M=16 累加 + FMA 减少 float 舍入误差; 可选 fp64** (`BURSTMERGE_GPU_FP64=ON`, 仅 `dense_level_fp64.comp` 的 `tileCost` 累加使用 double, 进一步提升极端包围曝光 dense 对齐精度).
 	- `pipeline.cpp` 的 RAW 分支在 `SelectExposureRefIndex` 之后按 `backend_` 分流: Vulkan 走 `GpuRunBurstPipeline` (prepare/align/merge 全在 GPU), CPU 走原有路径; 二者共用后续 bit-depth/exposure/DNG 写出尾部. 
 	- `SubGraph` / `IComputeBackend` 仍保留为接口, 当前未被 Vulkan 后端使用 (Vulkan 用 GPU-native 管线直接调度, 非通用节点图). 
 
@@ -95,9 +108,11 @@ Vulkan GPU 后端 (已实现)
 	- 数据布局: 所有 GPU 图像数据为 `std430` storage buffer 的 `float[]` (NHWC, 与 `FloatImage` 一致). 输入 uint16 mosaic 默认由 `CreateBufferFromU16` 上传原始 uint16 数据, `prepare_texture` shader 在 GPU 端完成 uint16→float+deinterleave+减黑电平+曝光缩放 (消除 CPU 端转换瓶颈). Shader 支持双模式 (`pc.i9`): 0=uint16 输入 (默认), 1=float32 输入 (CPU 转换, 保留为回退路径).
 	- 系统内存管理: GPU 上传完成后立即释放比较帧的系统 RAM — RAW 路径释放 `pixels` (HostBuffer) 和 `dng_negative` (DNG SDK 对象, 通过 RawMetadata move-assignment 触发 DestroyNegativeHolder); RGB 路径清空 `float_images[i].data`. 仅保留参考帧. DNG 文件字节 (`file_buffers`) 在解码后立即清空. 实测 15 帧 65MP RAW 在 GPU 对齐/合并期间工作集从 ~4.7 GB 降至 ~1.8 GB.
 	- 下载优化: 持久化 staging buffer 优先使用 `HOST_CACHED` 内存类型 (NVIDIA RTX 3080: type 4), 避免 DEVICE_LOCAL BAR 的 uncached 读取 (56MB 读取: 586ms→3ms). 
-	- Shader 集 (33 个 `.comp`, `src/compute/vulkan/shaders/`): 覆盖全部算法 — texture ops (prepare/downsample/box_blur/binomial_sep/to_grayscale/block_mean_guide/plane_to_mosaic/copy/fill/scale/add), align (sad_global/select_min/upscale_seed/tile_sad/tile_select/tile_refine_diag/dense_level/warp_tilefield/warp_translate), spatial (spatial_acc_multi/spatial_acc_1ch/normalize_div), temporal (temporal_acc_exposure/temporal_median), frequency (freq_laplacian/freq_wiener_tile — 后者含直接 8×8 DFT + 7×7 相位搜索 + Wiener 收缩, 4-phase 非重叠 dispatch), exposure (exposure_curve_global/exposure_reinhard_local/max_to_gray), reductions (extract/reduce_scalar), format (float_to_uint16). 共用 push-constant 块 `ShaderPC` (14 int + 8 float = 88B, 见 `common.glsl`). **全部单精度 float, 无 double, shaderFloat64 不启用**.
-	- 对齐 (全 GPU, 零读回): 灰度金字塔 (2-then-4 模式) → 逐层 coarse-to-fine SAD 搜索 (sad_global 每 candidate 一个 workgroup, 256 线程 reduce; select_min 在 SSBO 内更新 seed, 无 CPU 读回; tie-breaking 匹配 CPU 字典序) → standard 路径 diagonal-wavefront tile 细化 (tile_refine_diag) 或 dense 路径逐层 propagate/correct/search (dense_level) → warp_tilefield 双线性混合 4 角 tile 位移. 
-	- Descriptor set: 统一 layout, binding 0..7 = STORAGE_BUFFER, binding 7 复用于 binomial 权重 (std430, 无 padding). Push constants 88B. Pipeline cache 按 shader 名懒创建. 
+	- Shader 集 (35 个 `.comp` 默认 / 36 个 `BURSTMERGE_GPU_FP64=ON`, `src/compute/vulkan/shaders/`): 覆盖全部算法 — texture ops (prepare/downsample/box_blur/binomial_sep/to_grayscale/block_mean_guide/plane_to_mosaic/copy/fill/scale/add), align (sad_global/select_min/upscale_seed/tile_sad/tile_select/tile_refine_diag/dense_level/dense_level_fp64/warp_tilefield/warp_translate), spatial (spatial_acc_multi/spatial_acc_1ch/normalize_div), temporal (temporal_acc_exposure/temporal_median/expbkt_acc), frequency (freq_laplacian/freq_wiener_tile — 后者含直接 8×8 DFT + 7×7 相位搜索 + Wiener 收缩, 4-phase 非重叠 dispatch), exposure (exposure_curve_global/exposure_reinhard_local/max_to_gray), highlight_recovery, reductions (extract/reduce_scalar), format (float_to_uint16). 共用 push-constant 块 `ShaderPC` (16 int + 8 float = 96B, 见 `common.glsl`). **全部使用 float (shaderFloat64 默认不启用); `dense_level.comp` 使用 strided M=16 累加器 (pairwise merge) + FMA (SSD) 减少 float 舍入误差, 改善小 tile (t=32) 极端包围曝光对齐; `BURSTMERGE_GPU_FP64=ON` 时额外编译 `dense_level_fp64.comp` (double 累加, shaderFloat64 按需启用)**.
+	- `highlight_recovery.comp`: Bayer-only 高光恢复, 在 `prepare_texture` 之后 dispatch. 操作 4 通道 plane buffer (in-place), 仅修改绿色通道. Push constant: `pc.w2/h2`=plane 尺寸, `pc.i0/i1`=两个绿色通道索引, `pc.f0`=effective_range, `pc.f1..f4`=各通道 colour factor. 常量必须与 `HighlightRecoveryParams` (`pipeline_frame.h`) 一致. 非 Bayer (X-Trans 等) 在 GPU 路径跳过 (CPU 路径覆盖).
+	- `expbkt_acc.comp`: 包围曝光平均逐帧 accumulate. 读取 4 通道 cmp, 计算 max-across-channels 作裁切门 (`pc.f0`=clip_scaled=clip×scale), 未裁切时 `wn = 1/pc.f1` 累加 acc/wsum. 参考 frame 由 `copy` dispatch 预置 (weight 1), 收尾 `normalize_div`.
+	- 对齐 (全 GPU, 零读回): 灰度金字塔 (2-then-4 模式) → 逐层 coarse-to-fine SAD 搜索 (sad_global 每 candidate 一个 workgroup, 256 线程 reduce; select_min 在 SSBO 内更新 seed, 无 CPU 读回; tie-breaking 匹配 CPU 字典序) → standard 路径 diagonal-wavefront tile 细化 (tile_refine_diag) 或 dense 路径逐层 propagate/correct/search (dense_level, strided M=16 float 累加 + FMA) → warp_tilefield 双线性混合 4 角 tile 位移. **[新增] 包围曝光链式对齐 (transmission)**: `ec.needs_chained_alignment` (spread > 2×) 时, `GpuPipelineCore` 按 EV 序顺序处理, 每帧对其到 EV 相邻邻居 (已 warp 进参考坐标系, 经 `to_grayscale` 重建灰度+金字塔), 而非直接对齐到参考帧. 与 CPU `BuildAlignedComparisons` 链式路径对应; 对齐 primitive (`align_to_parent` lambda) 固定参考/链式路径共用.
+	- Descriptor set: 统一 layout, binding 0..7 = STORAGE_BUFFER, binding 7 复用于 binomial 权重 (std430, 无 padding). Push constants 96B. Pipeline cache 按 shader 名懒创建.
 	- 调试要点 (曾踩的坑): 每个 2D shader 必须声明 `layout(local_size_x=8,local_size_y=8)` 以匹配 `/8` 的 dispatch (否则只覆盖 1/64 像素); `FillFloat` 必须设 `pc.h=1` (否则 `n=w*h*ch=0` 不写入); binomial 权重必须用 std430 storage buffer 而非 std140 UBO (后者 float[] 步长 16B). 
 
 ==============================
@@ -116,12 +131,13 @@ Vulkan GPU 后端 (已实现)
 		- `BURSTMERGE_HAVE_JPEG` / `BURSTMERGE_HAVE_PNG` / `BURSTMERGE_HAVE_TIFF` 
 		- 缺少对应库时, 该格式编解码器源文件不参与编译, 运行时解码/编码会抛 "... not available (... not linked)". 
 	- `WIN32` 时额外编译 `src/io/dng_converter.cpp` (Adobe DNG Converter 包装). 
+	- `BURSTMERGE_GPU_FP64` (默认 **OFF**): 编译 GPU fp64 dense 对齐着色器 (`dense_level_fp64.comp`). 开启时 SPIR-V 含 36 个着色器, 关闭时 35 个. 需要运行时 GPU 支持 `shaderFloat64` (所有 NVIDIA/AMD 桌面 GPU 均支持). 运行时通过 `VulkanBackend::HasFloat64()` 检测, 不支持时自动回退到 float 着色器. **功能差异**: 默认 fp32 路径 `dense_level.comp` 已使用 strided M=16 累加缓解大部分分歧 (ExBkt t=32 max 74→46px); 开启 fp64 后进一步改善 (t=32 max →19px), 但在新 GPU (5060 Ti) 上代价较高 (+74~132% 对齐耗时 vs 默认 +37%). **性能**: fp64 dense 路径开销架构依赖 (3080: +4~74%; 5060 Ti: +74~132%); standard 路径不受影响. 构建命令: `cmake -S . -B build -DBURSTMERGE_GPU_FP64=ON`.
 
 ## 三方依赖状态
-	- `dng_sdk`: 完整 vendored 源码, 编译为内部静态库, 符号隐藏 (`-fvisibility=hidden`). 构建 fighting 见 `docs/plan-dsv4.md` (`qWinOS` 宏, XMP INT64 宏冲突, SEH 移除等). `dng_host` 非线程安全, 并行解码需每线程独立构造. 
+	- `dng_sdk`: 完整 vendored 源码, 编译为内部静态库, 符号隐藏 (`-fvisibility=hidden`). 构建 fighting 见 `docs/plan-dsv4.md` (`qWinOS` 宏, XMP INT64 宏冲突, SEH 移除等). `dng_host` 非线程安全, 并行解码需每线程独立构造. **JPEG XL 已启用**: `3rdparty/dng_sdk/CMakeLists.txt` 以 `add_subdirectory` 方式编译 vendored libjxl (含 highway + brotli + skcms 子目录), 链接 `jxl` + `jxl_threads` 到 `dng_sdk` (PRIVATE); 编译真实 `dng_jxl.cpp` 而非 `dng_jxl_stubs.cpp`. `dng_jxl.cpp` 中两处 XMP 使用 (EncodeJXL_Common 的 XMP box + ProcessXMPBox 的 `dng_xmp` 构造) 用 `#if qDNGUseXMP` 守护 (本机构建 `qDNGUseXMP=0`). **MinGW 限制**: Highway 的 AVX2 target 在 MinGW 下因函数多版本派发与 16 字节栈对齐 Windows ABI 冲突而 SIGSEGV, libjxl CMakeLists 中 `MINGW` 分支禁用 `HWY_AVX2` (SSE4 回退, 解码仍然正确); libjxl 子目录的 `CMAKE_CXX_FLAGS_RELEASE` 临时剥离 `-ffast-math` 和 `-march=native` (Highway 需精确 IEEE-754, 自管 ISA 派发).
 	- `pocketfft`: 单文件 `.c` + `.h`, MIT. 直接编进 `burstmerge` 静态库. 
 	- `cxxopts`: header-only, 仅 CLI 使用. 
-	- `libtiff`: 完整源码 + 预编译 install (`3rdparty/libtiff/install/`). 需要运行时 `libtiff.dll` 在 PATH (ctest 已为 `test_common_rgb_fmt` 配置). 
+	- `libtiff`: 完整源码 + 预编译 install (`3rdparty/libtiff/install/`). 需要运行时 `libtiff.dll` 在 PATH (`libburstmerge/test/CMakeLists.txt` 的 `add_burstmerge_test` 函数已为所有测试统一前置 `3rdparty/libtiff/install/bin` 到 `PATH`).
 	- `vulkan`: 头/库/dll 齐全. **已启用** — `libburstmerge/CMakeLists.txt` 对所有编译器 (GCC/MinGW + MSVC) 链接 `libvulkan-1.a` (PUBLIC, 传播给所有可执行目标). 原始 `.a` 是不完整子集 (573 符号), 已用 `dlltool` 从 `vulkan_core.h` 导出的 767 个函数名重新生成完整导入库 (`cmake` 无此步骤, `.a` 已在 `3rdparty/vulkan/Lib/` 落地). 运行时需 `vulkan-1.dll` (系统已装). 
 	- `glslang`: `3rdparty/glslang/glslangValidator.exe` (v7.8, GLSL 4.60). **configure-time** 由 `cmake/embed_shaders.ps1` 将 `src/compute/vulkan/shaders/*.comp` 编译为 SPIR-V 并嵌入到 `${CMAKE_BINARY_DIR}/generated/spirv_embedded.inl` (uint32 字节数组), `vulkan_backend.cpp` 直接 `#include`. 修改 shader 后需重新 `cmake configure`. 
 	- `openmp`: 当前 MinGW 静态链接 `libgomp.a`, 无需分发 DLL; 仅含 readme. 
@@ -152,6 +168,11 @@ Vulkan GPU 后端 (已实现)
 	- `apps/console/main.cpp:6`: `burstmerge_console` 是 placeholder, 只认 `process`/`exit`, 输出硬编码到 `./out`. 
 	- `dng_writer_adapter.cpp:31`: DNG 通过通用 `ImageWriter` 写出会抛 `"use the dedicated RAW pipeline for DNG output"`. 这是**故意的误用防护**, 不是缺陷. 
 
+## Enhanced-Image DNG 读取 (重要修复)
+	- ACR NR / Enhanced-Image DNG (含 `sfEnhancedImage` SubIFD, 典型为 JPEG XL 压缩的 LinearRaw) 曾在输出阶段崩溃: `WriteDNGWithMetadata` 中 `hasEnhancedImage = (&RawImage() != Stage3Image()) && EnhanceParams().NotEmpty()` 为 true (因 `negative.Parse` 从 enhanced IFD 设置了 `fEnhanceParams`, 但读取器只调 `ReadStage1Image` 未调 `ReadEnhancedImage`, `fStage3Image` 为 NULL), 随后 `Stage3Image()->Bounds()` 解引用 NULL → 0xC0000005.
+	- 修复 (`dng_reader.cpp::RawReadDngFromStream`): `ReadStage1Image` 之后, 若 `info.fEnhancedIndex != -1 && !host.IgnoreEnhanced()` 则调 `ReadEnhancedImage` (默认 host = mode 2 "linear-only": 解码 enhanced 到 `fStage3Image`, 清除 MosaicInfo/OpcodeLists/`fEnhanceParams`) 再 `ClearStage1Image` 丢弃 Bayer. `is_linear_rgb` (planes==3) → `R16_Uint_RGB` → 现有 LinearRaw 管线. 写出时 `hasEnhancedImage` 为 false (`EnhanceParams` 已清空), 不再崩溃.
+	- 前置依赖: libjxl 必须已链接 (否则 enhanced SubIFD 若为 JPEG XL 压缩, `ReadEnhancedImage` 会抛 `"JXL not supported"`). 见上方 "三方依赖状态 > dng_sdk > JPEG XL 已启用".
+
 ## todos.txt 记录的已知问题 (根目录 `todos.txt`)
 	- 参考帧选取: 用户指定参考帧**未实现/未移植** (自动选取已实现: 包围取最暗, 普通取中间; 但无 CLI `--reference`). 
 	- HotPixel Suppression: "目前的算法好像是坏的" (另见 `Readme.md` TODOs: "current implementation not working well"). 
@@ -167,7 +188,7 @@ Vulkan GPU 后端 (已实现)
 	- 根目录脚本大量硬编码本机路径: `SyncARWLensCorr.ps1` (`C:\MultiMediaTools\Bin\exiftool.exe`), `Scripts/benchmark_parallel.ps1` (`Z:\seq1/seq2`, 注意默认 CLI 路径用大写 `Build` 与实际不符), `_bench.ps1` (用 `NUL` 作输出, 传位置参数且用了未定义的 `--profiler`, **当前 CLI 下无法运行**). 
 
 ## 尚未实现 / 占位
-	- Vulkan 后端 **已实现** (见上方 "Vulkan GPU 后端" 章节). 全部合并模式 (spatial/linear/temporal/freq-laplacian/wiener-fft) 与 CPU 近像素级一致 (等曝光 MAD < 0.02%; 包围曝光 < 0.25%); 对齐 standard+dense bit-identical (max 0px). **全单精度 float, shaderFloat64 不启用**. WienerFftRobust 在 GPU 路径未实现 (会抛异常拒绝); hot-pixel repair 尚未在 GPU 路径实现 (当前跳过). `IComputeBackend`/`SubGraph` 通用节点图接口保留但未被 Vulkan 后端使用.
+	- Vulkan 后端 **已实现** (见上方 "Vulkan GPU 后端" 章节). 全部合并模式 (spatial/linear/temporal/freq-laplacian/wiener-fft) 与 CPU 近像素级一致 (等曝光 MAD < 0.02%; 包围曝光 < 0.01%); 对齐 standard+dense bit-identical (max 0px). **全部使用 float (shaderFloat64 默认不启用); `dense_level.comp` 使用 strided M=16 累加 + FMA 减少 float 舍入误差; `BURSTMERGE_GPU_FP64=ON` 时 `dense_level_fp64.comp` 的 `tileCost` 使用 double, shaderFloat64 按需启用**. WienerFftRobust 在 GPU 路径未实现 (会抛异常拒绝); hot-pixel repair 尚未在 GPU 路径实现 (当前跳过). [新增] 高光恢复 (highlight recovery) 在 GPU 路径已实现 (Bayer-only, `highlight_recovery.comp`, `prepare_texture` 之后 dispatch). [新增] 曝光加权合并 (spatial/freq-laplacian/freq-wiener) 与链式对齐 (transmission) 均已在 GPU 实现. `IComputeBackend`/`SubGraph` 通用节点图接口保留但未被 Vulkan 后端使用.
 	- X-Trans CFA 支持: `float_image.h:46` 与 `float_image.cpp:349` 各有一条 `TODO(X-Trans)`, 当前非 Bayer 走通道平均 fallback, 可能不保色相位. 
 	- `tools/dump_dng.cpp` 不在 CMake 构建中; 其头注释 (列 `x,y,r,g,b`) 与实际输出 (`x,y,raw_value`) 不一致, 且有未使用变量 `search_rows`. 
 
@@ -206,12 +227,20 @@ Vulkan GPU 后端 (已实现)
 	- 对齐常量/入口: `libburstmerge/include/burstmerge/internal/align/align.h:11` (`AlignConstants`), `align.cpp:22` (`EstimateTranslation`)
 	- 空间合并: `libburstmerge/src/merge/spatial.cpp:243` (`SpatialMerge`)
 	- 频域合并: `libburstmerge/src/merge/frequency.cpp:1026` (`FrequencyMerge`)
-	- 热像素/时域平均: `libburstmerge/src/denoise/temporal.cpp:13` / `:223`
+	- 热像素/时域平均/包围曝光平均: `libburstmerge/src/denoise/temporal.cpp:13` / `:248` / `:315` (`RepairHotPixels` / `TemporalAverage` / `TemporalMedian`)
 	- 曝光: `libburstmerge/src/exposure/exposure.cpp:118` (`ApplyExposure`)
-	- DNG 读取: `libburstmerge/src/io/dng_reader.cpp:142` (`ReadDngFromBuffer`)
+	- DNG 读取: `libburstmerge/src/io/dng_reader.cpp:23` (`RawReadDngFromStream`), `:172` (`ReadDngFromBuffer`); Enhanced-Image 读取 `:59` (`ReadEnhancedImage` + `ClearStage1Image`)
 	- DNG SDK 桥 (不透明指针): `libburstmerge/src/io/dng_sdk_bridge.cpp`
 	- Adobe DNG Converter 包装: `libburstmerge/src/io/dng_converter.cpp:93`
 	- 线程/粒度: `libburstmerge/src/core/task_executor.cpp:64` (`ParallelFor`)
 	- FFT (thread-local plan): `libburstmerge/src/core/fft_util.cpp:8`
-	- 参考帧选择: `libburstmerge/src/core/pipeline_frame.cpp:147` (`SelectExposureRefIndex`)
+	- 参考帧选择: `libburstmerge/src/core/pipeline_frame.cpp` (`SelectExposureRefIndex`)
+	- [新增] 包围曝光判定 (统一): `libburstmerge/src/core/pipeline_frame.cpp` (`ClassifyExposureSequence` / `IsBracketedSequence` / `ExposureClassification`), 声明在 `pipeline_frame.h`; 消费者 `SelectExposureRefIndex` + `BuildAlignedComparisons` (`pipeline_align.cpp`) + 合并门控 (`pipeline.cpp`)
+	- [新增] 曝光加权合并: `SpatialMergeParams::exposure_weighted` / `FrequencyMergeParams::exposure_weighted` (`merge/spatial.h`, `merge/frequency.h`); CPU 累加点 `spatial.cpp` (单/多通道), `frequency.cpp` (Laplacian 低频 + `WienerFftMerge` 频谱 blend); GPU 累加点 `spatial_acc_multi/1ch.comp` (`pc.f6`), `freq_laplacian.comp` / `freq_wiener_tile.comp` (trust SSBO + `pc.f2=inv_stack`)
+	- [新增] GPU 链式对齐 (transmission): `gpu_pipeline.cpp` `GpuPipelineCore` (`align_to_parent` lambda + EV 序链式分支), 对应 CPU `BuildAlignedComparisons` 链式路径
+	- [新增] 高光恢复: `libburstmerge/src/core/pipeline_frame.cpp` (`RecoverHighlights`), 常量 `HighlightRecoveryParams` (`pipeline_frame.h`)
+	- [新增] GPU 高光恢复 shader: `libburstmerge/src/compute/vulkan/shaders/highlight_recovery.comp`
+	- [新增] 包围曝光平均: `libburstmerge/src/denoise/temporal.cpp` (`ExpBracketAverage`), 参数 `ExpBracketAverageParams` (`denoise/temporal.h`); GPU shader `expbkt_acc.comp` (`pc.f0`=clip_scaled, `pc.f1`=scale), GPU 分发 `gpu_pipeline.cpp` `GpuPipelineCore` (expbkt-avg 分支)
+	- [新增] GPU fp64 dense 对齐: `libburstmerge/src/compute/vulkan/shaders/dense_level_fp64.comp` (唯一使用 `double` 的着色器, `tileCost` 累加); `vulkan_backend.cpp` (`shaderFloat64` 条件启用 + `has_fp64` flag); `gpu_pipeline.cpp` `DenseAlignGPU` (shader 选择 `dense_level_fp64` vs `dense_level`); CMake 开关 `BURSTMERGE_GPU_FP64` (默认 OFF); `embed_shaders.ps1` (`-IncludeFp64` 参数控制是否编译 `dense_level_fp64.comp`)
+	- [新增] GPU fp32 strided 累加: `libburstmerge/src/compute/vulkan/shaders/dense_level.comp` `tileCost` 使用 M=16 独立 float 累加器 (pairwise merge) + FMA (SSD 模式) + stepped 内层循环 (避免动态索引致寄存器 spill); 超参数 `kStrideM` (默认 16, 可改为 1 回退为顺序累加); 需 cmake 重新 configure 以重新生成 SPIR-V
 	- CLI 选项定义: `apps/cli/main.cpp:129`

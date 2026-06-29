@@ -24,6 +24,8 @@ float highlightWeight(int linear_mode, float diff, float robust, float nf, float
 //   binding 4: cmp_guide (1ch)
 //   pc.i4 = linear_mode, f0=robustness f1=noise_floor f2=highlight_threshold
 //   f3=clip_threshold f4=min_cmp_weight f5=this comparison's exposure_scale
+//   f6=this comparison's exposure weight number wn (1/exposure_scale when
+//       bracketed, else 1.0); multiplied onto the final weight.
 layout(binding = 0) buffer Acc { float acc[]; };
 layout(binding = 1) buffer Wsum { float wsum[]; };
 layout(binding = 2) readonly buffer RefG { float refg[]; };
@@ -74,6 +76,10 @@ void main()
             w = w < minw ? minw : w;
         }
     }
+    // Exposure weight number for this comparison frame (1.0 when the burst is
+    // not exposure-bracketed). See spatial_acc_multi for rationale; wn == 1.0 is
+    // an exact no-op (bit-identical to the legacy path).
+    w *= pc.f6;
     acc[i] += cmp_v * w;
     wsum[i] += w;
 }

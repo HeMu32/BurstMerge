@@ -1,0 +1,44 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+// expbkt_acc: exposure-bracketed average accumulate.
+// Per-pixel clip gate uses max-across-channels (matching spatial multichannel):
+//   estimated_original = max_channel / scale >= clip_threshold  => skip frame.
+// Recovered green values do not inflate the max, so highlight-recovery regions
+// are naturally excluded from clip detection (un-recovered R/B dominate).
+// Weight number wn = 1/scale (brighter comparisons get larger weight).
+// Reference seed (wn=1) is established by a prior "copy" dispatch.
+//   binding 0: acc (inout NHWC), binding 1: wsum (inout NHWC)
+//   binding 2: cmp (readonly NHWC)
+//   f0=clip_scaled(=clip_threshold*scale), f1=exposure_scale(this comp)
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) buffer Acc { float acc[]; };
+layout(binding = 1) buffer Wsum { float wsum[]; };
+layout(binding = 2) readonly buffer Cmp { float cmpp[]; };
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int ch = pc.channels;
+    int base = (y * pc.w + x) * ch;
+    float scale = max(1e-6, pc.f1);
+    float clip_scaled = pc.f0;
+
+    float mx = cmpp[base];
+    for (int c = 1; c < ch; ++c)
+    {
+        float v = cmpp[base + c];
+        if (v > mx) mx = v;
+    }
+    if (clip_scaled > 0.0 && mx >= clip_scaled) return;
+
+    float wn = 1.0 / scale;
+    for (int c = 0; c < ch; ++c)
+    {
+        acc[base + c]  += cmpp[base + c] * wn;
+        wsum[base + c] += wn;
+    }
+}

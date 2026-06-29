@@ -29,7 +29,18 @@ FloatImage TemporalAverage(const FloatImage& reference,
 // noise_reduction and exposure_scales are accepted for API symmetry with
 // TemporalAverage but are not used by the median computation.
 FloatImage TemporalMedian(const FloatImage& reference,
-                          const std::vector<FloatImage>& aligned_comparisons,
-                          const TemporalDenoiseParams& params);
+                           const std::vector<FloatImage>& aligned_comparisons,
+                           const TemporalDenoiseParams& params);
+
+struct ExpBracketAverageParams
+{
+    float clip_threshold = 0.0f;
+    uint32_t num_scales = 0;
+    const float* exposure_scales = nullptr;
+};
+
+FloatImage ExpBracketAverage(const FloatImage& reference,
+                             const std::vector<FloatImage>& aligned_comparisons,
+                             const ExpBracketAverageParams& params);
 
 } // namespace burstmerge

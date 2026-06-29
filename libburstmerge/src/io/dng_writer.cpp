@@ -46,6 +46,7 @@ static bool GetDngType(const HostBuffer& buf, uint32_t& outPixelType, uint32_t& 
             // DNG has no separate types for 12/14/16-bit; all use ttShort.
             // The effective bit depth is conveyed by the white_level metadata
             // tag, which the writer receives from RawMetadata::white_level.
+        case PixelFormat::R16_Uint_RGB:
             outPixelType = ttShort; outPixelSize = 2; return true;
         case PixelFormat::R32_Float:  outPixelType = ttFloat; outPixelSize = 4; return true;
         case PixelFormat::RGBA32_Float: outPixelType = ttFloat; outPixelSize = 4; return true;
@@ -58,6 +59,7 @@ static uint32_t GetPlanes(PixelFormat fmt)
     switch (fmt)
     {
         case PixelFormat::RGBA32_Float: return 4;
+        case PixelFormat::R16_Uint_RGB: return 3;
         default: return 1;
     }
 }

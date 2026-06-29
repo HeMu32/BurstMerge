@@ -98,10 +98,16 @@ static CompareResult CompareDngOutputs(const std::string& path_a, const std::str
     auto img_b = rb.Read();
 
     if (img_a.pixels.width != img_b.pixels.width ||
-        img_a.pixels.height != img_b.pixels.height)
+        img_a.pixels.height != img_b.pixels.height ||
+        img_a.pixels.format != img_b.pixels.format)
         return {-1.0, 0.0, -1.0};
 
-    uint64_t count = uint64_t(img_a.pixels.width) * img_a.pixels.height;
+    // Compare every uint16 sample (width*height*planes). Using pixels.size/2
+    // accounts for the channel count automatically: 1 plane for Bayer mosaic,
+    // 3 planes for LinearRaw RGB.
+    if (img_a.pixels.size != img_b.pixels.size)
+        return {-1.0, 0.0, -1.0};
+    uint64_t count = img_a.pixels.size / sizeof(uint16_t);
     const uint16_t* pa = reinterpret_cast<const uint16_t*>(img_a.pixels.data);
     const uint16_t* pb = reinterpret_cast<const uint16_t*>(img_b.pixels.data);
 
@@ -164,6 +170,60 @@ static void TestConsistency(const std::string& tag,
     fs::remove(out_gpu);
 }
 
+// LinearRaw input on the Vulkan backend must fall back to CPU (the GPU prepare
+// path assumes a Bayer mosaic). Verifies the fallback succeeds, produces a
+// LinearRaw output, and is bit-identical to the CPU run. Independent of the
+// Seq1/converter prerequisites below — only needs Vulkan + the vendored DNG.
+static void TestLinearRawGpuFallback()
+{
+    fs::path linear = fs::path(TEST_DATA_DIR) /
+                      "3rdparty/dng_sdk/sample_files/04_PGTM2_per_profile.dng";
+    if (!fs::exists(linear))
+    {
+        std::cout << "SKIP linear GPU-fallback: sample not found" << std::endl;
+        return;
+    }
+
+    std::cout << "\n--- LinearRaw GPU CPU-fallback ---" << std::endl;
+    burstmerge::Settings s;
+    s.bit_depth = 16;
+    std::string dir = fs::temp_directory_path().string();
+
+    std::string out_cpu = RunBackend(burstmerge::BackendType::CPU, {linear.string()}, s,
+                                     dir + "/test_stage3_lin_cpu.dng");
+    std::string out_gpu = RunBackend(burstmerge::BackendType::Vulkan, {linear.string()}, s,
+                                     dir + "/test_stage3_lin_gpu.dng");
+    CHECK(!out_cpu.empty(), "linear CPU succeeded");
+    CHECK(!out_gpu.empty(), "linear GPU (fallback) succeeded");
+    if (out_cpu.empty() || out_gpu.empty()) return;
+
+    // GPU output must still be LinearRaw (fallback preserved topology).
+    {
+        burstmerge::DngReader r(out_gpu.c_str());
+        auto img = r.Read();
+        CHECK(img.metadata.mosaic_pattern_width == 0,
+              "linear GPU-fallback output mosaic_pattern_width == 0");
+        CHECK(img.pixels.format == burstmerge::PixelFormat::R16_Uint_RGB,
+              "linear GPU-fallback output R16_Uint_RGB");
+    }
+
+    auto cmp = CompareDngOutputs(out_cpu, out_gpu);
+    CHECK(cmp.rel >= 0.0, "linear CPU/GPU comparable");
+    if (cmp.rel >= 0.0)
+    {
+        std::cout << "  MAD=" << cmp.mad << "  rel=" << (cmp.rel * 100.0) << "%" << std::endl;
+        // GPU path falls back to CPU, so outputs must be bit-identical.
+        CHECK(cmp.mad == 0.0, "linear GPU-fallback bit-identical to CPU");
+    }
+
+    auto leaked_bufs = burstmerge::vulkan::VulkanBackend::LastLeakedBuffers();
+    CHECK(leaked_bufs == 0,
+          "linear GPU-fallback no VRAM leak (" + std::to_string(leaked_bufs) + " buffers)");
+
+    fs::remove(out_cpu);
+    fs::remove(out_gpu);
+}
+
 int main()
 {
     std::cout << "test_stage3: CPU vs GPU dual-path consistency" << std::endl;
@@ -173,23 +233,38 @@ int main()
     auto seq1 = FindSamples(samples_dir / "Seq1", ".arw", 3);
     auto bkt1 = FindSamples(samples_dir / "Bkt1", ".arw", 3);
 
+    const bool have_vulkan = burstmerge::GpuVulkanAvailable();
+    const bool have_converter = ConverterAvailable();
+
+    // LinearRaw GPU CPU-fallback: runs whenever Vulkan is available, regardless
+    // of Seq1/converter (sample is an already-converted DNG).
+    if (have_vulkan)
+    {
+        TestLinearRawGpuFallback();
+    } else
+    {
+        std::cout << "SKIP linear GPU-fallback: no Vulkan GPU available" << std::endl;
+    }
+
+    // Seq1-dependent CPU-vs-GPU consistency matrix.
     if (seq1.size() < 2)
     {
-        std::cout << "SKIP: need >=2 ARW samples in Seq1 (found " << seq1.size() << ")" << std::endl;
+        std::cout << "SKIP consistency matrix: need >=2 ARW samples in Seq1 (found "
+                  << seq1.size() << ")" << std::endl;
         std::cout << g_checks << " checks, " << g_failed << " failed" << std::endl;
-        return 0;
+        return g_failed > 0 ? 1 : 0;
     }
-    if (!ConverterAvailable())
+    if (!have_converter)
     {
-        std::cout << "SKIP: Adobe DNG Converter not found" << std::endl;
+        std::cout << "SKIP consistency matrix: Adobe DNG Converter not found" << std::endl;
         std::cout << g_checks << " checks, " << g_failed << " failed" << std::endl;
-        return 0;
+        return g_failed > 0 ? 1 : 0;
     }
-    if (!burstmerge::GpuVulkanAvailable())
+    if (!have_vulkan)
     {
-        std::cout << "SKIP: no Vulkan GPU available" << std::endl;
+        std::cout << "SKIP consistency matrix: no Vulkan GPU available" << std::endl;
         std::cout << g_checks << " checks, " << g_failed << " failed" << std::endl;
-        return 0;
+        return g_failed > 0 ? 1 : 0;
     }
 
     std::cout << "Samples: " << seq1.size() << " ARW from Seq1";
@@ -239,6 +314,15 @@ int main()
         ss.alignment_mode = burstmerge::AlignmentMode::Standard;
         ss.frequency_mode = burstmerge::FrequencyMode::Laplacian;
         TestConsistency("seq1 spatial-standard", seq1, ss, 0.002f);
+    }
+
+    // --- Skip alignment (no motion compensation) ---
+    {
+        burstmerge::Settings ss = s;
+        ss.merge_algo = burstmerge::MergeAlgorithm::Spatial;
+        ss.alignment_mode = burstmerge::AlignmentMode::Skip;
+        ss.frequency_mode = burstmerge::FrequencyMode::Laplacian;
+        TestConsistency("seq1 spatial-skip", seq1, ss, 0.002f);
     }
 
     // --- VRAM stress: repeat GPU run 3x, verify no accumulation ---

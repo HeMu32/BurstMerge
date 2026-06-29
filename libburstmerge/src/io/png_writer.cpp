@@ -95,6 +95,13 @@ public:
 
         png_write_info(png, info);
 
+        // Write transforms must be set AFTER png_write_info — it resets
+        // transform flags during the call. Without this, 16-bit samples
+        // are written in native LE instead of PNG-standard big-endian,
+        // and the decoder's png_set_swap double-swaps them (30000 <-> 12405).
+        if (bit_depth == 16)
+            png_set_swap(png);
+
         double wl = (params.white_level > 1.0) ? static_cast<double>(params.white_level) : 255.0;
         double output_max = (bit_depth == 16) ? 65535.0 : 255.0;
         double scale = (wl > 1.0) ? (output_max / wl) : 1.0;

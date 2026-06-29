@@ -49,12 +49,19 @@ int main(int argc, char* argv[])
             }
         }
 
-        double suma = 0, sumb = 0, mad = 0, mina = 1e30, maxa = -1e30;
+        double suma = 0, sumb = 0, mad = 0, maxdiff = 0, mina = 1e30, maxa = -1e30;
+        size_t ndiff = 0;
         for (size_t i = 0; i < fa.data.size(); ++i)
         {
             suma += fa.data[i];
             sumb += fb.data[i];
-            mad += std::fabs(fa.data[i] - fb.data[i]);
+            const double d = std::fabs(fa.data[i] - fb.data[i]);
+            mad += d;
+            if (d > 0.0)
+            {
+                ++ndiff;
+                if (d > maxdiff) maxdiff = d;
+            }
             if (fa.data[i] < mina) mina = fa.data[i];
             if (fa.data[i] > maxa) maxa = fa.data[i];
         }
@@ -62,6 +69,8 @@ int main(int argc, char* argv[])
         std::cout << "STATS A: mean=" << suma / n << " min=" << mina << " max=" << maxa << "\n";
         std::cout << "STATS B: mean=" << sumb / n << "\n";
         std::cout << "MAD A-B=" << mad / n << "  (rel=" << (mad / n) / (suma / n) << ")\n";
+        std::cout << "MAXDIFF A-B=" << maxdiff << "  differing=" << ndiff << "/" << fa.data.size()
+                  << " (" << (100.0 * static_cast<double>(ndiff) / n) << "%)\n";
         return 0;
     }
     catch (const std::exception& e)

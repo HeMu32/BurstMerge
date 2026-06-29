@@ -32,6 +32,24 @@ struct FrequencyMergeParams
     float black_level = -1.0f;
     uint32_t num_scales = 0;
     const float* exposure_scales = nullptr;
+    /// @brief Engage exposure-bracketing-aware merge weighting (CPU only).
+    ///
+    /// Augments (does NOT replace) the existing frequency-merge weighting with
+    /// an EV-derived weight number `wn = 1 / exposure_scales[idx]` per
+    /// comparison frame:
+    ///  - Laplacian: the low-frequency equal-weight average becomes an
+    ///    EV-weighted average; the high-frequency max-abs selection is
+    ///    unchanged.
+    ///  - WienerFft (standard): each comparison's spectral blend is scaled by
+    ///    its wn and the final normalization becomes 1/(1+Sum(wn)) instead of
+    ///    1/stack (identical to the legacy path when wn == 1).
+    ///  - WienerFftRobust: IGNORED -- that mode retains its own Swift-style
+    ///    exposure handling (noise-term / highlights_norm / motion_norm) and is
+    ///    intentionally left untouched.
+    /// Set by the orchestrator from ExposureClassification::is_bracketed. When
+    /// false (or for uniform bursts) the result is bit-identical to the legacy
+    /// path.
+    bool exposure_weighted = false;
 };
 
 FloatImage FrequencyMerge(const FloatImage& reference,

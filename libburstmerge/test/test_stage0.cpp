@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 #include <new>
+#include <cmath>
 
 #include "burstmerge/api.h"
 #include "burstmerge/api_c.h"
@@ -17,6 +18,7 @@
 #include "burstmerge/internal/merge/frequency.h"
 #include "burstmerge/internal/denoise/temporal.h"
 #include "burstmerge/internal/exposure/exposure.h"
+#include "burstmerge/internal/core/pipeline_frame.h"
 
 static int g_tests = 0;
 static int g_failed = 0;
@@ -590,6 +592,37 @@ static void test_frequency_wiener_highlights()
         v = (v - black) * exposure_scale + black;
     }
 
+    // Apply highlight recovery before frequency merge. Work in black-subtracted
+    // space (matching post-NormalizeFrames state), then restore black.
+    {
+        std::vector<burstmerge::FloatImage> rec_imgs = {reference, comparison};
+        for (auto& im : rec_imgs)
+            for (float& v : im.data) v -= black;
+
+        const uint16_t rggb[4] = {0, 1, 1, 2};
+        auto mk = [&](float ev) {
+            burstmerge::RawImage ri;
+            ri.metadata.white_level = static_cast<uint32_t>(white);
+            ri.metadata.mosaic_pattern_width = 2;
+            for (int i = 0; i < 4; ++i)
+            {
+                ri.metadata.mosaic_pattern[i] = rggb[i];
+                ri.metadata.black_level[i] = black;
+            }
+            ri.metadata.ev_value = ev;
+            return ri;
+        };
+        std::vector<burstmerge::RawImage> rec_raws;
+        rec_raws.push_back(mk(1.0f));
+        rec_raws.push_back(mk(1.0f / exposure_scale));
+        burstmerge::RecoverHighlights(rec_imgs, rec_raws, 0);
+
+        reference = std::move(rec_imgs[0]);
+        comparison = std::move(rec_imgs[1]);
+        for (float& v : reference.data) v += black;
+        for (float& v : comparison.data) v += black;
+    }
+
     burstmerge::FrequencyMergeParams params{};
     params.mode = burstmerge::FrequencyMode::WienerFftRobust;
     params.noise_reduction = 13.0f;
@@ -703,8 +736,8 @@ static void test_temporal_median()
 // Clip detection + highlight bypass: comparisons with clipped values are
 // excluded from the median (prevents Frankenstein pixel color casts), and
 // reference values at/near clipping are preserved (keeps the signal for RAW
-// converter highlight recovery).
-static void test_temporal_median_clip()
+// converter highlight recovery). This variant runs WITHOUT highlight recovery.
+static void test_temporal_median_clip_no_recovery()
 {
     std::cout << "[test] temporal median clip + bypass..." << std::endl;
 
@@ -759,7 +792,270 @@ static void test_temporal_median_clip()
           "TemporalMedian rejects exposure-scaled clipped comparison (got "
           + std::to_string(out_br.At(0, 0, 1)) + ")");
 
-    std::cout << "  TemporalMedian clip + bypass OK" << std::endl;
+    std::cout << "  TemporalMedian clip + bypass OK (no recovery)" << std::endl;
+}
+
+// Same scenario as above but WITH highlight recovery applied first.
+// Verifies that RecoverHighlights + TemporalMedian clip detection interact
+// correctly: recovered green values don't break the bypass/reject logic.
+static void test_temporal_median_clip_with_recovery()
+{
+    std::cout << "[test] temporal median clip + bypass (with recovery)..." << std::endl;
+
+    const uint32_t width = 4;
+    const uint32_t height = 4;
+    const uint32_t channels = 4;
+    const float white = 1023.0f;
+
+    // Reference: R+B clipped at (0,0), G1 bright → recovery will raise G1
+    burstmerge::FloatImage ref = make_float_image(width, height, channels, 100.0f);
+    ref.At(0, 0, 0) = 1020.0f;  // R clipped
+    ref.At(0, 0, 1) = 850.0f;   // G1 bright (ratio 0.83 > 0.8)
+    ref.At(0, 0, 3) = 1020.0f;  // B clipped
+    ref.At(1, 0, 0) = 1020.0f;  // right neighbour R (for G1 extrapolation)
+
+    burstmerge::FloatImage comp1 = make_float_image(width, height, channels, 120.0f);
+    burstmerge::FloatImage comp2 = make_float_image(width, height, channels, 120.0f);
+    comp2.At(0, 0, 0) = 1020.0f;  // clipped → should be rejected
+    burstmerge::FloatImage comp3 = make_float_image(width, height, channels, 110.0f);
+
+    // Apply highlight recovery
+    {
+        std::vector<burstmerge::FloatImage> rec_imgs = {ref, comp1, comp2, comp3};
+        const uint16_t rggb[4] = {0, 1, 1, 2};
+        auto mk = [&]() {
+            burstmerge::RawImage ri;
+            ri.metadata.white_level = static_cast<uint32_t>(white);
+            ri.metadata.mosaic_pattern_width = 2;
+            for (int i = 0; i < 4; ++i) ri.metadata.mosaic_pattern[i] = rggb[i];
+            ri.metadata.ev_value = 1.0f;
+            return ri;
+        };
+        std::vector<burstmerge::RawImage> rec_raws;
+        for (int i = 0; i < 4; ++i) rec_raws.push_back(mk());
+        burstmerge::RecoverHighlights(rec_imgs, rec_raws, 0);
+        ref = std::move(rec_imgs[0]);
+        comp1 = std::move(rec_imgs[1]);
+        comp2 = std::move(rec_imgs[2]);
+        comp3 = std::move(rec_imgs[3]);
+    }
+
+    // Recovery should have raised G1 at (0,0) from 850 towards ~874
+    float recovered_g1 = ref.At(0, 0, 1);
+    CHECK(recovered_g1 > 860.0f,
+          "Recovery raised ref G1 (got " + std::to_string(recovered_g1) + ")");
+
+    burstmerge::TemporalDenoiseParams params{};
+    params.white_level = white;
+    params.black_level = 0.0f;
+
+    std::vector<burstmerge::FloatImage> comps = {comp1, comp2, comp3};
+    burstmerge::FloatImage out = burstmerge::TemporalMedian(ref, comps, params);
+
+    // Pixel 0, ch0: ref=1020 ≥ threshold → bypass → output = 1020
+    CHECK(out.At(0, 0, 0) == 1020.0f,
+          "With recovery: clipped ref ch0 still bypassed (got "
+          + std::to_string(out.At(0, 0, 0)) + ")");
+
+    // Pixel 0, ch1: ref=~874, comp2 rejected (clipped ch0).
+    // Remaining: [~874(ref), 120(comp1), 110(comp3)] → median = 120
+    // (Without recovery it was 110 — recovery changed the median by raising ref G1.)
+    CHECK(out.At(0, 0, 1) == 120.0f,
+          "With recovery: median reflects raised ref G1 (got "
+          + std::to_string(out.At(0, 0, 1)) + ")");
+
+    // Pixel 1, ch0: ref=1020 (set as neighbour, also clipped) → bypass
+    CHECK(out.At(1, 0, 0) == 1020.0f,
+          "With recovery: neighbour pixel also bypassed (got "
+          + std::to_string(out.At(1, 0, 0)) + ")");
+
+    // Pixel 2: no clipping anywhere. [100, 120, 120, 110] → median = 115
+    CHECK(out.At(2, 0, 0) == 115.0f,
+          "With recovery: normal pixel unaffected (got "
+          + std::to_string(out.At(2, 0, 0)) + ")");
+
+    std::cout << "  TemporalMedian clip + bypass OK (with recovery)" << std::endl;
+}
+
+// Exercises the unified bracketing classifier (ClassifyExposureSequence /
+// IsBracketedSequence / SelectExposureRefIndex) across the three EV-spread
+// regimes: uniform, bracketed-only (1.4x..2.0x), and wide bracket (>2.0x).
+static void test_exposure_classification()
+{
+    std::cout << "[test] exposure classification..." << std::endl;
+
+    auto mk = [](float ev) {
+        burstmerge::RawImage ri;
+        ri.metadata.ev_value = ev;
+        return ri;
+    };
+
+    // Uniform burst: same EV everywhere -> not bracketed, no chaining, middle ref.
+    {
+        std::vector<burstmerge::RawImage> imgs;
+        for (int i = 0; i < 3; ++i) imgs.push_back(mk(1.0f));
+        auto ec = burstmerge::ClassifyExposureSequence(imgs);
+        CHECK(ec.has_exposure, "uniform: has_exposure");
+        CHECK(!ec.is_bracketed, "uniform: not bracketed");
+        CHECK(!ec.needs_chained_alignment, "uniform: no chained alignment");
+        CHECK(!burstmerge::IsBracketedSequence(imgs), "uniform: IsBracketedSequence false");
+        CHECK_EQ(burstmerge::SelectExposureRefIndex(imgs, ec), imgs.size() / 2,
+                 "uniform: middle frame is reference");
+    }
+
+    // Narrow bracket (ratio 1.5x: within 1.4x..2.0x band): bracketed, but the
+    // spread is not yet wide enough to trigger chained alignment.
+    {
+        std::vector<burstmerge::RawImage> imgs;
+        imgs.push_back(mk(1.0f));
+        imgs.push_back(mk(1.25f));
+        imgs.push_back(mk(1.5f));
+        auto ec = burstmerge::ClassifyExposureSequence(imgs);
+        CHECK(ec.is_bracketed, "narrow bracket: bracketed");
+        CHECK(!ec.needs_chained_alignment, "narrow bracket: no chained alignment");
+        CHECK_EQ(ec.exposure_order.front().second, 0u,
+                 "narrow bracket: order front is darkest (ev=1.0, idx 0)");
+        CHECK_EQ(burstmerge::SelectExposureRefIndex(imgs, ec), 0u,
+                 "narrow bracket: darkest frame is reference");
+    }
+
+    // Wide bracket (ratio 16x: >2.0x): both bracketed and chained alignment.
+    {
+        std::vector<burstmerge::RawImage> imgs;
+        imgs.push_back(mk(1.0f));
+        imgs.push_back(mk(0.25f));   // darkest
+        imgs.push_back(mk(4.0f));
+        auto ec = burstmerge::ClassifyExposureSequence(imgs);
+        CHECK(ec.is_bracketed, "wide bracket: bracketed");
+        CHECK(ec.needs_chained_alignment, "wide bracket: chained alignment");
+        CHECK_EQ(burstmerge::SelectExposureRefIndex(imgs, ec), 1u,
+                 "wide bracket: darkest frame (idx 1) is reference");
+    }
+
+    // No EV data at all -> not bracketed, empty order.
+    {
+        std::vector<burstmerge::RawImage> imgs;
+        imgs.push_back(mk(0.0f));
+        imgs.push_back(mk(0.0f));
+        auto ec = burstmerge::ClassifyExposureSequence(imgs);
+        CHECK(!ec.has_exposure, "no EV: not has_exposure");
+        CHECK(!ec.is_bracketed, "no EV: not bracketed");
+        CHECK(ec.exposure_order.empty(), "no EV: empty exposure_order");
+    }
+
+    std::cout << "  Exposure classification OK" << std::endl;
+}
+
+// Verifies the exposure-weight-number (wn) augmentation of SpatialMerge:
+//  - uniform-burst invariance (wn == 1 -> bit-identical to legacy path),
+//  - EV weight-number domination in shadows (brighter frame pulls the average),
+//  - the clip gate zeroes clipped comparisons despite a large wn.
+// All cases use robustness == 0 so the per-pixel robustness weight w == 1 and
+// the only differentiator is wn, making the expected averages exact.
+static void test_spatial_exposure_weighting()
+{
+    std::cout << "[test] spatial exposure weighting..." << std::endl;
+
+    const uint32_t w = 8, h = 8, ch = 1;
+
+    // --- Uniform-burst invariance: with every exposure_scale == 1.0, wn == 1
+    //     everywhere, so exposure_weighted must reproduce the legacy output. ---
+    {
+        burstmerge::FloatImage ref = make_float_image(w, h, ch, 100.0f);
+        burstmerge::FloatImage compA = make_float_image(w, h, ch, 130.0f);
+        burstmerge::FloatImage compB = make_float_image(w, h, ch, 90.0f);
+        std::vector<burstmerge::FloatImage> comps = {compA, compB};
+
+        float scales[2] = {1.0f, 1.0f};
+        burstmerge::SpatialMergeParams p_off{};
+        p_off.robustness = 0.0f;            // -> per-pixel weight w == 1
+        p_off.noise_floor = 100.0f;
+        p_off.highlight_threshold = 1e6f;   // never enter highlight branch
+        p_off.guide_block_size = 1;
+        p_off.num_scales = 2;
+        p_off.exposure_scales = scales;
+        p_off.exposure_weighted = false;
+
+        burstmerge::SpatialMergeParams p_on = p_off;
+        p_on.exposure_weighted = true;      // wn == 1 -> must equal p_off
+
+        burstmerge::FloatImage out_off = burstmerge::SpatialMerge(ref, comps, p_off);
+        burstmerge::FloatImage out_on  = burstmerge::SpatialMerge(ref, comps, p_on);
+
+        bool identical = true;
+        for (size_t i = 0; i < out_off.data.size(); ++i)
+            if (out_off.data[i] != out_on.data[i]) { identical = false; break; }
+        CHECK(identical,
+              "uniform scales: exposure_weighted=true bit-identical to false");
+    }
+
+    // --- EV weight-number domination: a brighter comparison (larger wn) pulls
+    //     the shadow average toward its value. ---
+    {
+        // ref=100; compA is a darker frame (scale 2.0 -> wn 0.5) value 90;
+        // compB is a brighter frame (scale 0.5 -> wn 2.0) value 110.
+        burstmerge::FloatImage ref = make_float_image(w, h, ch, 100.0f);
+        burstmerge::FloatImage compA = make_float_image(w, h, ch, 90.0f);
+        burstmerge::FloatImage compB = make_float_image(w, h, ch, 110.0f);
+        std::vector<burstmerge::FloatImage> comps = {compA, compB};
+
+        float scales[2] = {2.0f, 0.5f};
+        burstmerge::SpatialMergeParams p{};
+        p.robustness = 0.0f;
+        p.noise_floor = 100.0f;
+        p.highlight_threshold = 1e6f;
+        p.guide_block_size = 1;
+        p.num_scales = 2;
+        p.exposure_scales = scales;
+
+        // Legacy equal-weight average: (100 + 90 + 110)/3 = 100.0
+        p.exposure_weighted = false;
+        burstmerge::FloatImage out_eq = burstmerge::SpatialMerge(ref, comps, p);
+        CHECK(std::fabs(out_eq.data[0] - 100.0f) < 0.01f,
+              "EV weighting off -> equal-weight average 100 (got " +
+              std::to_string(out_eq.data[0]) + ")");
+
+        // wn-weighted average: (100*1 + 90*0.5 + 110*2.0)/(1+0.5+2.0) ~ 104.286
+        p.exposure_weighted = true;
+        burstmerge::FloatImage out_wn = burstmerge::SpatialMerge(ref, comps, p);
+        const float expected = (100.0f + 90.0f * 0.5f + 110.0f * 2.0f) /
+                               (1.0f + 0.5f + 2.0f);
+        CHECK(std::fabs(out_wn.data[0] - expected) < 0.01f,
+              "EV weighting on -> wn-weighted average (got " +
+              std::to_string(out_wn.data[0]) + " want " + std::to_string(expected) + ")");
+        CHECK(expected > 100.0f,
+              "brighter frame (wn=2) pulls shadow average above 100");
+    }
+
+    // --- Clip gate is the clamp: a clipped bright comparison contributes 0
+    //     despite a large wn, so it cannot drag the highlight down. ---
+    {
+        // ref=950 (highlight); bright comp scale 0.0625 (wn=16) value 800,
+        // whose pre-normalization value 800/0.0625 = 12800 exceeds clip_threshold.
+        burstmerge::FloatImage ref = make_float_image(w, h, ch, 950.0f);
+        burstmerge::FloatImage comp = make_float_image(w, h, ch, 800.0f);
+        std::vector<burstmerge::FloatImage> comps = {comp};
+
+        float scales[1] = {0.0625f};
+        burstmerge::SpatialMergeParams p{};
+        p.robustness = 0.0f;
+        p.noise_floor = 100.0f;
+        p.highlight_threshold = 1e6f;
+        p.clip_threshold = 1000.0f;         // enable gate; 12800 >= 1000 -> clipped
+        p.guide_block_size = 1;
+        p.num_scales = 1;
+        p.exposure_scales = scales;
+        p.exposure_weighted = true;         // wn = 16, but clipped -> weight 0
+
+        burstmerge::FloatImage out = burstmerge::SpatialMerge(ref, comps, p);
+        // Rejected bright comp -> output == reference (950). Without the clip
+        // gate it would be (950 + 800*16)/17 ~ 809, confirming rejection.
+        CHECK(std::fabs(out.data[0] - 950.0f) < 0.01f,
+              "clipped bright frame rejected despite wn=16 (got " +
+              std::to_string(out.data[0]) + ")");
+    }
+
+    std::cout << "  Spatial exposure weighting OK" << std::endl;
 }
 
 int main()
@@ -776,7 +1072,10 @@ int main()
     test_module_params();
     test_frequency_wiener_highlights();
     test_temporal_median();
-    test_temporal_median_clip();
+    test_temporal_median_clip_no_recovery();
+    test_temporal_median_clip_with_recovery();
+    test_exposure_classification();
+    test_spatial_exposure_weighting();
 
     std::cout << "\n================================" << std::endl;
     std::cout << "Stage 0: " << g_tests << " checks, "

@@ -81,11 +81,50 @@ list(REMOVE_ITEM DNG_SDK_SRCS
     "${DNG_SDK_ROOT}/dng_sdk/source/dng_validate.cpp"
     "${DNG_SDK_ROOT}/dng_sdk/source/dng_xmp_sdk.cpp"
     "${DNG_SDK_ROOT}/dng_sdk/source/dng_update_meta.cpp"
-    "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl.cpp"
 )
 
-# Add JXL stubs (replaces dng_jxl.cpp for builds without libjxl)
-list(APPEND DNG_SDK_SRCS "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl_stubs.cpp")
+# JPEG XL support: build vendored libjxl (highway + brotli + skcms are
+# pulled in as add_subdirectory by libjxl's own third_party/CMakeLists.txt)
+# as a static, decoder-capable library, then compile the real dng_jxl.cpp
+# bridge instead of the throw-on-every-call stubs.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_JPEGLI OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_DEVTOOLS OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_BENCHMARK OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_DOXYGEN OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_MANPAGES OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_SJPEG OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_OPENEXR OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_JNI OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_PLUGINS OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_VIEWERS OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_AVX512 OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_AVX512_SPR OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_AVX512_ZEN4 OFF CACHE BOOL "" FORCE)
+set(JPEGXL_BUNDLE_LIBPNG OFF CACHE BOOL "" FORCE)
+set(JPEGXL_ENABLE_SKCMS ON CACHE BOOL "" FORCE)
+set(JPEGXL_FORCE_SYSTEM_BROTLI OFF CACHE BOOL "" FORCE)
+set(JPEGXL_FORCE_SYSTEM_HWY OFF CACHE BOOL "" FORCE)
+set(JPEGXL_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+
+# libjxl / Highway require precise IEEE-754 floating point (the arithmetic
+# coder and color transforms break under -ffast-math) and Highway drives its
+# own per-target ISA dispatch, so -march=native must not leak in. Temporarily
+# strip both from the Release flag set for this subdirectory only.
+set(_bm_saved_cxx_release "${CMAKE_CXX_FLAGS_RELEASE}")
+string(REPLACE "-ffast-math" "" _bm_clean_cxx_release "${CMAKE_CXX_FLAGS_RELEASE}")
+string(REPLACE "-march=native" "" _bm_clean_cxx_release "${_bm_clean_cxx_release}")
+set(CMAKE_CXX_FLAGS_RELEASE "${_bm_clean_cxx_release}")
+add_subdirectory(
+    "${DNG_SDK_ROOT}/libjxl/libjxl"
+    "${CMAKE_BINARY_DIR}/libjxl_build"
+    EXCLUDE_FROM_ALL)
+set(CMAKE_CXX_FLAGS_RELEASE "${_bm_saved_cxx_release}")
+
+list(APPEND DNG_SDK_SRCS "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl.cpp")
 
 add_library(dng_sdk STATIC ${DNG_SDK_SRCS})
 
@@ -127,3 +166,8 @@ endif()
 
 # zlib is used by DNG SDK for ZIP compression
 target_link_libraries(dng_sdk PUBLIC z)
+
+# libjxl for JPEG XL decode/encode (static). The full `jxl` target carries
+# both encoder and decoder objects (dng_jxl.cpp references both); jxl_threads
+# provides the resizable parallel runner used by the decoder.
+target_link_libraries(dng_sdk PRIVATE jxl jxl_threads)

@@ -21,15 +21,16 @@ enum class BackendType
 { CPU, Vulkan };
 enum class MergeAlgorithm
 {
-    Spatial,         // Pixel-domain weighted blending (Standard or Linear sub-mode)
-    Frequency,       // Frequency-domain merge (Laplacian or WienerFft sub-mode)
-    TemporalAverage, // Simple exposure-weighted frame average; ignores noise_reduction
-    TemporalMedian   // Simple per-pixel median across frames; ignores noise_reduction
+    Spatial,            // Pixel-domain weighted blending (Standard or Linear sub-mode)
+    Frequency,          // Frequency-domain merge (Laplacian or WienerFft sub-mode)
+    TemporalAverage,    // Simple exposure-weighted frame average; ignores noise_reduction
+    TemporalMedian,     // Simple per-pixel median across frames; ignores noise_reduction
+    ExpBracketAverage   // Bracket-aware average: EV weight numbers + clip gate; assumes bracketed input
 };
 enum class ExposureMode
 { Off, Linear, Curve };
 enum class AlignmentMode
-{ Standard, DenseTile, Frequency };
+{ Standard, DenseTile, Frequency, Skip };
 enum class SpatialMergeMode
 { Standard, Linear };
 enum class FrequencyMode
@@ -55,6 +56,7 @@ struct Settings
     int            bit_depth        = 14;
     float          align_gamma      = 1.0f;
     bool           smooth_tile_field = false;
+    bool           highlight_recovery = true;  // recover clipped green highlights (default on)
     int            gpu_device_index = -1;  // GPU device index for Vulkan backend (-1 = auto)
     // output_format: Auto = auto-infer (DNG for RAW, PNG for non-RAW)
     OutputFormat   output_format    = OutputFormat::Auto;

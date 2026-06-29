@@ -298,7 +298,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             else
             {
                 std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
-                    settings_, cfa_period, progress);
+                    settings_, cfa_period, ExposureClassification{}, progress);
 
                 // float_images[i] for i != ref_idx are now dead: BuildAlignedComparisons
                 // has already warped them into `aligned`. Free them before the merge
@@ -327,6 +327,14 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                     params.num_scales = static_cast<uint32_t>(aligned.size());
                     params.exposure_scales = nullptr;
                     merged = TemporalMedian(ref_image, aligned, params);
+                } else if (settings_.merge_algo == MergeAlgorithm::ExpBracketAverage)
+                {
+                    Report(progress, PipelineConstants::kProgressMerge, "Merging frames (exposure-bracketed average)");
+                    ExpBracketAverageParams params;
+                    params.clip_threshold = white_level * PipelineConstants::kClipFactor;
+                    params.num_scales = static_cast<uint32_t>(aligned.size());
+                    params.exposure_scales = nullptr;
+                    merged = ExpBracketAverage(ref_image, aligned, params);
                 } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
                 {
                     Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
@@ -468,27 +476,73 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         file_buffers.clear();
         file_buffers.shrink_to_fit();
 
+        // Topology consistency check: LinearRaw (demosaiced RGB, mosaic=0) and
+        // Bayer CFA (mosaic>=2) inputs cannot be merged together — they differ
+        // in channel topology. Reject up front with a clear message rather
+        // than failing later inside IsCompatibleForAverage with a generic one.
+        {
+            uint32_t ref_top = images[0].metadata.mosaic_pattern_width;
+            for (size_t i = 1; i < images.size(); ++i)
+            {
+                uint32_t top = images[i].metadata.mosaic_pattern_width;
+                bool linear_a = (ref_top == 0);
+                bool linear_b = (top == 0);
+                if (linear_a != linear_b)
+                {
+                    throw std::runtime_error(
+                        "Cannot mix LinearRaw (demosaiced RGB) DNG inputs with "
+                        "Bayer CFA raw inputs in one burst — different channel "
+                        "topologies. Filter the inputs to one kind.");
+                }
+            }
+        }
+
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
-        size_t ref_idx = SelectExposureRefIndex(images);
+        // Single source of truth for the bracketing decision: computed once and
+        // threaded through reference-frame selection, alignment strategy, and
+        // the exposure-weighted merge gate. See pipeline_frame.h.
+        ExposureClassification exposure = ClassifyExposureSequence(images);
+        size_t ref_idx = SelectExposureRefIndex(images, exposure);
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
+        const bool input_is_linear =
+            (images[ref_idx].metadata.mosaic_pattern_width == 0);
         FloatImage merged;
-        if (backend_ == BackendType::Vulkan)
+        bool ran_gpu_pipeline = false;
+        if (backend_ == BackendType::Vulkan && !input_is_linear)
         {
             // GPU-native pipeline: prepare / align / merge all on Vulkan compute.
             // Falls through to the shared CPU tail (bit-depth / exposure / DNG).
-            merged = GpuRunBurstPipeline(images, ref_idx, settings_, progress);
+            merged = GpuRunBurstPipeline(images, ref_idx, exposure, settings_, progress);
+            ran_gpu_pipeline = true;
         }
-        else
+        else if (backend_ == BackendType::Vulkan && input_is_linear)
         {
-            Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
+            // LinearRaw (3-plane RGB) input is not handled by the GPU prepare
+            // path (which assumes a Bayer mosaic for CFA deinterleave). Fall
+            // back to the CPU pipeline, which fully supports multi-channel
+            // planar data. This keeps results correct without adding a new
+            // shader variant.
+            Report(progress, PipelineConstants::kProgressHotpixel,
+                "LinearRaw DNG input: GPU backend falls back to CPU for this burst");
+        }
+        if (!ran_gpu_pipeline)
+        {
             std::vector<FloatImage> float_images = BuildFloatImages(images);
-            uint32_t hotpixel_period = (float_images.empty() || float_images[0].channels <= 1)
-                ? images[0].metadata.mosaic_pattern_width
-                : 1u;
-            RepairHotPixels(float_images,
-                            static_cast<float>(images[0].metadata.white_level),
-                            images[0].metadata.black_level,
-                            hotpixel_period);
+            // Hot-pixel repair relies on CFA sub-pixel periodicity; on a
+            // LinearRaw (already-demosaiced RGB) image there is no such
+            // structure, and the input has typically already been denoised
+            // (e.g. DxO DeepPRIME). Skip it for linear input.
+            if (!input_is_linear)
+            {
+                Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
+                uint32_t hotpixel_period = (float_images.empty() || float_images[0].channels <= 1)
+                    ? images[0].metadata.mosaic_pattern_width
+                    : 1u;
+                RepairHotPixels(float_images,
+                                static_cast<float>(images[0].metadata.white_level),
+                                images[0].metadata.black_level,
+                                hotpixel_period);
+            }
             // Log the CFA pattern so we can verify channel ordering
             if (images[ref_idx].metadata.mosaic_pattern_width > 0)
             {
@@ -505,6 +559,11 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
             Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
             NormalizeFrames(float_images, images, ref_idx);
+            if (settings_.highlight_recovery)
+            {
+                Report(progress, PipelineConstants::kProgressNormalize, "Recovering clipped highlights");
+                RecoverHighlights(float_images, images, ref_idx);
+            }
             for (size_t i = 1; i < images.size(); ++i)
             {
                 if (!IsCompatibleForAverage(images[0], images[i]))
@@ -514,7 +573,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
 
             uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
-            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, progress);
+            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, exposure, progress);
 
             // float_images[i] for i != ref_idx are now dead: BuildAlignedComparisons
             // has already warped them into `aligned`. Free them before the merge
@@ -570,6 +629,19 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.num_scales = static_cast<uint32_t>(exp_scales.size());
                 params.exposure_scales = exp_scales.data();
                 merged = TemporalMedian(ref_image, aligned, params);
+            } else if (settings_.merge_algo == MergeAlgorithm::ExpBracketAverage)
+            {
+                // ExpBracketAverage: EV weight number (wn = 1/scale) averaging
+                // with the same clip gate as spatial (max-across-channels).
+                // Assumes bracketed input; non-bracketed degrades to equal-weight
+                // average (wn = 1 for all frames).
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames with exposure-bracketed average");
+                ExpBracketAverageParams params;
+                float avg_bl_eb = MeanBlackLevel(images[ref_idx].metadata);
+                params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl_eb) * PipelineConstants::kClipFactor;
+                params.num_scales = static_cast<uint32_t>(exp_scales.size());
+                params.exposure_scales = exp_scales.data();
+                merged = ExpBracketAverage(ref_image, aligned, params);
             } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
             {
                 Report(progress, PipelineConstants::kProgressMerge, "Merging frames with frequency path");
@@ -581,6 +653,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.black_level = MeanBlackLevel(images[ref_idx].metadata);
                 params.num_scales = static_cast<uint32_t>(exp_scales.size());
                 params.exposure_scales = exp_scales.data();
+                // Engage EV-weighted merging for bracketed bursts. Ignored by
+                // WienerFftRobust (own exposure handling); augments Laplacian /
+                // standard Wiener. See FrequencyMergeParams::exposure_weighted.
+                params.exposure_weighted = exposure.is_bracketed;
                 merged = FrequencyMerge(ref_image, aligned, params);
             } else
             {
@@ -603,6 +679,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                     : 2;
                 params.num_scales = static_cast<uint32_t>(exp_scales.size());
                 params.exposure_scales = exp_scales.data();
+                // Engage EV-weighted merging for bracketed bursts; augments the
+                // existing robustness/highlight/clip weight. Uniform bursts keep
+                // the legacy equal-weight path (wn == 1). See SpatialMergeParams.
+                params.exposure_weighted = exposure.is_bracketed;
                 merged = SpatialMerge(ref_image, aligned, params);
             }
         }
@@ -855,6 +935,15 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
             Report(progress, PipelineConstants::kProgressWrite, "Writing output DNG file");
             io::SetDngWhiteLevel(output.metadata.dng_negative, output.metadata.white_level);
+            // LinearRaw output: merged is 3-channel planar RGB. Ensure the DNG
+            // negative carries no CFA / mosaic info so WriteDNG emits a
+            // LinearRaw (PhotometricInterpretation 34892) IFD. For a LinearRaw
+            // input the source negative already lacks mosaic info, but this is
+            // also the correct path when re-encoding and is idempotent.
+            if (merged.channels == 3)
+            {
+                io::ClearDngMosaicInfo(output.metadata.dng_negative);
+            }
             if (use_zero_black)
             {
                 // Force BlackLevel to 0 in the DNG SDK negative so the
@@ -876,13 +965,16 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
         else
         {
-            // RAW → non-DNG: write Bayer mosaic grayscale with white-point scaling
-            Report(progress, PipelineConstants::kProgressQuantize, "Writing RAW as non-DNG (Bayer mosaic)");
+            // RAW → non-DNG. Bayer input yields mosaic grayscale; LinearRaw
+            // (3-channel) input yields RGB. Both reuse the generic RGB writer.
+            Report(progress, PipelineConstants::kProgressQuantize,
+                input_is_linear ? "Writing LinearRaw as non-DNG (RGB)"
+                                : "Writing RAW as non-DNG (Bayer mosaic)");
 
             io::DecodedImage raw_decoded;
             raw_decoded.info.width     = images[ref_idx].metadata.width;
             raw_decoded.info.height    = images[ref_idx].metadata.height;
-            raw_decoded.info.pix_fmt   = io::kPixelGray;
+            raw_decoded.info.pix_fmt   = input_is_linear ? io::kPixelRGB : io::kPixelGray;
             raw_decoded.info.bit_depth = settings_.bit_depth;
             raw_decoded.info.is_raw    = true;
             raw_decoded.info.white_level = static_cast<float>(target_white);

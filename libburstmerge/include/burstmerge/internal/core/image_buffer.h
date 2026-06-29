@@ -9,7 +9,7 @@ namespace burstmerge
 enum class MemoryLocation
 { Host, Device };
 enum class PixelFormat
-{ R8_Uint, R16_Uint, R32_Float, RGBA32_Float };
+{ R8_Uint, R16_Uint, R16_Uint_RGB, R32_Float, RGBA32_Float };
 enum class BufferType
 { Staging, DeviceLocal };
 

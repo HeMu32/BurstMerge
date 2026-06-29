@@ -98,7 +98,8 @@ public:
             png_set_tRNS_to_alpha(png);
         }
 
-        // Handle 16-bit: swap byte order for host endianness
+        // Handle 16-bit: PNG stores samples big-endian; swap to native LE.
+        // The writer calls png_set_swap too (after png_write_info) to emit BE.
         if (bit_depth == 16)
             png_set_swap(png);
 
