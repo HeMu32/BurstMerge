@@ -32,25 +32,88 @@ layout(binding = 5) buffer OY { int oy[]; };
 
 const int kSearchDist = 3;  // AlignConstants::kTileSearchRadius
 
+// ── Strided accumulation hyperparameters ──────────────────────────────────
+//
+// DESIGN RATIONALE
+//   CPU TileCost (align_common.cpp) accumulates SAD/SSD using double. When
+//   the GPU uses plain float accumulation, rounding errors (~0.1 %) flip the
+//   argmin on the flat cost surfaces produced by extreme exposure bracketing,
+//   causing tiles to lock onto wrong displacements (up to 74 px at t=32).
+//
+//   This shader uses M independent float accumulators cycled via a stepped
+//   loop. After the pixel loop, a pairwise merge tree reduces them to one.
+//   The effective rounding error drops from O(N·ε) to O((N/M + log M)·ε),
+//   an ~M× improvement. SSD mode additionally uses fma() (single rounding
+//   multiply-add) for a further 2× per-pixel gain.
+//
+//   With M=16 the t=32 max divergence drops from 74 px (plain float) to 46 px.
+//   At t≥64 the plain float path is already adequate (≤12 px from chained
+//   warp propagation, not accumulation error); strided is harmless overhead.
+//   M=8 was tested and found insufficient (max unchanged at 74 px). M=12
+//   reduces the >3 px percentage but does not reduce the max.
+//
+// STEPPED INNER LOOP
+//   The outer x-loop steps by kStrideM and the inner j-loop has a constant
+//   trip count, so acc[j] is always a compile-time-constant index after the
+//   compiler unrolls the inner loop. This keeps the accumulator array in
+//   registers — a naive sequential loop with dynamic indexing (acc[m]) would
+//   spill to local memory and run ~2× slower.
+//
+// REVERTING / TUNING
+//   Set kStrideM = 1 to disable striding (the loop becomes sequential, the
+//   merge tree is a no-op). To also disable FMA for SSD, replace
+//   `fma(d, d, acc[j])` with `acc[j] += d * d`. Requires cmake reconfigure
+//   to regenerate the embedded SPIR-V.
+//
+// RELATIONSHIP TO dense_level_fp64.comp
+//   This shader is the default float path. For extreme cases where even M=16
+//   is insufficient (t=32: 46 px residual), build with BURSTMERGE_GPU_FP64=ON
+//   to use dense_level_fp64.comp (double accumulation, 19 px at t=32).
+//   Both shaders share the same interface and dispatch logic.
+const int kStrideM = 16;
+
 float tileCost(int x0, int y0, int dx, int dy, int W, int H, int use_ssd)
 {
     const float OB = 65504.0;
     int ts = pc.i0;
     int x1 = min(W, x0 + ts);
     int y1 = min(H, y0 + ts);
-    float cost = 0.0;
+    float acc[kStrideM];
+    for (int i = 0; i < kStrideM; ++i) acc[i] = 0.0;
     for (int yy = y0; yy < y1; ++yy)
     {
         int by = yy - dy;
-        for (int xx = x0; xx < x1; ++xx)
+        for (int xx = x0; xx < x1; xx += kStrideM)
         {
-            int bx = xx - dx;
-            if (by < 0 || by >= H || bx < 0 || bx >= W) { cost += use_ssd != 0 ? OB * OB : OB; continue; }
-            float d = refp[yy * W + xx] - cmpp[by * W + bx];
-            cost += use_ssd != 0 ? d * d : (d < 0.0 ? -d : d);
+            for (int j = 0; j < kStrideM; ++j)
+            {
+                int px = xx + j;
+                if (px < x1)
+                {
+                    int bx = px - dx;
+                    if (by < 0 || by >= H || bx < 0 || bx >= W) {
+                        acc[j] += use_ssd != 0 ? (OB * OB) : OB;
+                    } else {
+                        float d = refp[yy * W + px] - cmpp[by * W + bx];
+                        if (use_ssd != 0)
+                            acc[j] = fma(d, d, acc[j]);
+                        else
+                            acc[j] += d < 0.0 ? -d : d;
+                    }
+                }
+            }
         }
     }
-    return cost;
+    int cur = kStrideM;
+    while (cur > 1)
+    {
+        int pair = cur / 2;
+        for (int i = 0; i < pair; ++i)
+            acc[i] = acc[2*i] + acc[2*i+1];
+        if ((cur & 1) != 0) { acc[pair] = acc[cur - 1]; cur = pair + 1; }
+        else cur = pair;
+    }
+    return acc[0];
 }
 
 // fetch a coarser-level shift for this tile (mapped + scaled). Returns 0 at coarsest.

@@ -1,6 +1,19 @@
 # Tests: each test_*.cpp is a standalone executable
 # Exit code 0=pass, non-zero=fail
 
+# libburstmerge links libtiff.dll.a (PRIVATE) on Windows, so every test
+# executable transitively needs libtiff.dll at load time. Compute the runtime
+# PATH prefix once, before defining add_burstmerge_test, so the function can
+# prepend it to every test's ENVIRONMENT.
+if (WIN32)
+    set(TEST_PATH_SEP ";")
+else()
+    set(TEST_PATH_SEP ":")
+endif()
+if (WIN32 AND EXISTS "${PROJECT_SOURCE_DIR}/3rdparty/libtiff/install/bin")
+    set(TEST_RUNTIME_PATH "${PROJECT_SOURCE_DIR}/3rdparty/libtiff/install/bin")
+endif()
+
 function(add_burstmerge_test name)
     add_executable(${name} "${name}.cpp")
     target_link_libraries(${name} PRIVATE burstmerge OpenMP::OpenMP_CXX)
@@ -16,6 +29,10 @@ function(add_burstmerge_test name)
     add_test(NAME ${name} COMMAND ${name})
     # 默认超时: 快速单元测试
     set_tests_properties(${name} PROPERTIES TIMEOUT 60)
+    if(WIN32 AND TEST_RUNTIME_PATH)
+        set_tests_properties(${name} PROPERTIES
+            ENVIRONMENT "PATH=${TEST_RUNTIME_PATH}${TEST_PATH_SEP}$ENV{PATH}")
+    endif()
 endfunction()
 
 add_burstmerge_test(test_deps)
@@ -44,14 +61,3 @@ set_tests_properties(test_stage2 PROPERTIES TIMEOUT 600)
 # Requires Adobe DNG Converter + Vulkan GPU at runtime.
 add_burstmerge_test(test_stage3)
 set_tests_properties(test_stage3 PROPERTIES TIMEOUT 900)
-
-set(TEST_COMMON_RGB_FMT_LD_PATH "${PROJECT_SOURCE_DIR}/3rdparty/libtiff/install/bin")
-# Seprator for PATH environment variable: ";" on Windows, ":" on Unix
-if (WIN32)
-    set(TEST_PATH_SEP ";")
-else()
-    set(TEST_PATH_SEP ":")
-endif()
-
-set_tests_properties(test_common_rgb_fmt PROPERTIES
-    ENVIRONMENT "PATH=${TEST_COMMON_RGB_FMT_LD_PATH}${TEST_PATH_SEP}$ENV{PATH}")

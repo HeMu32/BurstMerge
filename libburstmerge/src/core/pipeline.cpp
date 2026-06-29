@@ -298,7 +298,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             else
             {
                 std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, raw_wrappers, ref_idx,
-                    settings_, cfa_period, progress);
+                    settings_, cfa_period, ExposureClassification{}, progress);
 
                 // float_images[i] for i != ref_idx are now dead: BuildAlignedComparisons
                 // has already warped them into `aligned`. Free them before the merge
@@ -327,6 +327,14 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                     params.num_scales = static_cast<uint32_t>(aligned.size());
                     params.exposure_scales = nullptr;
                     merged = TemporalMedian(ref_image, aligned, params);
+                } else if (settings_.merge_algo == MergeAlgorithm::ExpBracketAverage)
+                {
+                    Report(progress, PipelineConstants::kProgressMerge, "Merging frames (exposure-bracketed average)");
+                    ExpBracketAverageParams params;
+                    params.clip_threshold = white_level * PipelineConstants::kClipFactor;
+                    params.num_scales = static_cast<uint32_t>(aligned.size());
+                    params.exposure_scales = nullptr;
+                    merged = ExpBracketAverage(ref_image, aligned, params);
                 } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
                 {
                     Report(progress, PipelineConstants::kProgressMerge, "Merging frames (frequency)");
@@ -490,7 +498,11 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
 
         Report(progress, PipelineConstants::kProgressRefFrame, "Selecting reference frame");
-        size_t ref_idx = SelectExposureRefIndex(images);
+        // Single source of truth for the bracketing decision: computed once and
+        // threaded through reference-frame selection, alignment strategy, and
+        // the exposure-weighted merge gate. See pipeline_frame.h.
+        ExposureClassification exposure = ClassifyExposureSequence(images);
+        size_t ref_idx = SelectExposureRefIndex(images, exposure);
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
         const bool input_is_linear =
             (images[ref_idx].metadata.mosaic_pattern_width == 0);
@@ -500,7 +512,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         {
             // GPU-native pipeline: prepare / align / merge all on Vulkan compute.
             // Falls through to the shared CPU tail (bit-depth / exposure / DNG).
-            merged = GpuRunBurstPipeline(images, ref_idx, settings_, progress);
+            merged = GpuRunBurstPipeline(images, ref_idx, exposure, settings_, progress);
             ran_gpu_pipeline = true;
         }
         else if (backend_ == BackendType::Vulkan && input_is_linear)
@@ -561,7 +573,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             }
 
             uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
-            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, progress);
+            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, exposure, progress);
 
             // float_images[i] for i != ref_idx are now dead: BuildAlignedComparisons
             // has already warped them into `aligned`. Free them before the merge
@@ -617,6 +629,19 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.num_scales = static_cast<uint32_t>(exp_scales.size());
                 params.exposure_scales = exp_scales.data();
                 merged = TemporalMedian(ref_image, aligned, params);
+            } else if (settings_.merge_algo == MergeAlgorithm::ExpBracketAverage)
+            {
+                // ExpBracketAverage: EV weight number (wn = 1/scale) averaging
+                // with the same clip gate as spatial (max-across-channels).
+                // Assumes bracketed input; non-bracketed degrades to equal-weight
+                // average (wn = 1 for all frames).
+                Report(progress, PipelineConstants::kProgressMerge, "Merging frames with exposure-bracketed average");
+                ExpBracketAverageParams params;
+                float avg_bl_eb = MeanBlackLevel(images[ref_idx].metadata);
+                params.clip_threshold = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl_eb) * PipelineConstants::kClipFactor;
+                params.num_scales = static_cast<uint32_t>(exp_scales.size());
+                params.exposure_scales = exp_scales.data();
+                merged = ExpBracketAverage(ref_image, aligned, params);
             } else if (settings_.merge_algo == MergeAlgorithm::Frequency)
             {
                 Report(progress, PipelineConstants::kProgressMerge, "Merging frames with frequency path");
@@ -628,6 +653,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 params.black_level = MeanBlackLevel(images[ref_idx].metadata);
                 params.num_scales = static_cast<uint32_t>(exp_scales.size());
                 params.exposure_scales = exp_scales.data();
+                // Engage EV-weighted merging for bracketed bursts. Ignored by
+                // WienerFftRobust (own exposure handling); augments Laplacian /
+                // standard Wiener. See FrequencyMergeParams::exposure_weighted.
+                params.exposure_weighted = exposure.is_bracketed;
                 merged = FrequencyMerge(ref_image, aligned, params);
             } else
             {
@@ -650,6 +679,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                     : 2;
                 params.num_scales = static_cast<uint32_t>(exp_scales.size());
                 params.exposure_scales = exp_scales.data();
+                // Engage EV-weighted merging for bracketed bursts; augments the
+                // existing robustness/highlight/clip weight. Uniform bursts keep
+                // the legacy equal-weight path (wn == 1). See SpatialMergeParams.
+                params.exposure_weighted = exposure.is_bracketed;
                 merged = SpatialMerge(ref_image, aligned, params);
             }
         }

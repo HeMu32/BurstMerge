@@ -58,6 +58,7 @@ struct VulkanBackend::Impl
     VkDevice device = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
     uint32_t queue_family = 0;
+    bool has_fp64 = false;
     VkCommandPool cmd_pool = VK_NULL_HANDLE;
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
@@ -205,6 +206,15 @@ VulkanBackend::~VulkanBackend()
 bool VulkanBackend::IsInitialized() const { return impl_->initialized; }
 const BackendInfo& VulkanBackend::Info() const { return impl_->info; }
 const std::string& VulkanBackend::LastError() const { return impl_->last_error; }
+
+bool VulkanBackend::HasFloat64() const
+{
+#if defined(BURSTMERGE_HAVE_GPU_FP64)
+    return impl_ ? impl_->has_fp64 : false;
+#else
+    return false;
+#endif
+}
 
 bool VulkanBackend::Initialize()
 {
@@ -357,10 +367,17 @@ bool VulkanBackend::Initialize(int device_index)
     qi.pQueuePriorities = &prio;
     VkPhysicalDeviceFeatures pdf{};
     vkGetPhysicalDeviceFeatures(d.physical, &pdf);
-    // All shaders use single-precision float only. shaderFloat64 is intentionally
-    // NOT enabled — no shader declares or uses 'double' types.
     VkPhysicalDeviceFeatures want{};
     want.shaderInt64 = pdf.shaderInt64;
+#if defined(BURSTMERGE_HAVE_GPU_FP64)
+    // shaderFloat64 is only requested when compiled with BURSTMERGE_GPU_FP64=ON.
+    // Used exclusively by dense_level_fp64.comp tileCost double accumulation
+    // to match CPU TileCost precision in dense-tile alignment.
+    want.shaderFloat64 = pdf.shaderFloat64;
+    d.has_fp64 = (pdf.shaderFloat64 != VK_FALSE);
+#else
+    d.has_fp64 = false;
+#endif
     VkDeviceCreateInfo di{};
     di.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     di.queueCreateInfoCount = 1;

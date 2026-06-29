@@ -13,7 +13,6 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
-#include <vector>
 
 namespace burstmerge
 {
@@ -231,7 +230,8 @@ uint64_t SpatialMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
                          const Settings& settings, int pw, int ph, int ch,
                          float mean_bl,
                          const std::vector<size_t>& comp_orig,
-                         const std::vector<float>& comp_scale)
+                         const std::vector<float>& comp_scale,
+                         bool exposure_weighted)
 {
     const bool linear = (settings.spatial_mode == SpatialMergeMode::Linear);
     uint64_t ref_blur = vk.CreateBuffer(pw * ph * ch);
@@ -315,6 +315,7 @@ uint64_t SpatialMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
             ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = 1; pc.i4 = linear ? 1 : 0;
             pc.f0 = robustness; pc.f1 = noise_floor; pc.f2 = highlight_threshold;
             pc.f3 = clip_threshold; pc.f4 = min_cmp_w; pc.f5 = comp_scale[k];
+            pc.f6 = exposure_weighted ? 1.0f / comp_scale[k] : 1.0f;
             Binding b[5] = {{0, acc, 0}, {1, wsum, 0}, {2, rg, 0}, {3, aligned[k], 0}, {4, cg, 0}};
             vk.Dispatch("spatial_acc_1ch", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 5);
         }
@@ -323,6 +324,7 @@ uint64_t SpatialMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
             ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch; pc.i4 = linear ? 1 : 0;
             pc.f0 = robustness; pc.f1 = noise_floor; pc.f2 = highlight_threshold;
             pc.f3 = clip_threshold; pc.f4 = min_cmp_w; pc.f5 = comp_scale[k];
+            pc.f6 = exposure_weighted ? 1.0f / comp_scale[k] : 1.0f;
             Binding b[6] = {{0, acc, 0}, {1, wsum, 0}, {2, ref_plane, 0}, {3, ref_blur, 0},
                             {4, aligned[k], 0}, {5, cmp_blur, 0}};
             vk.Dispatch("spatial_acc_multi", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 6);
@@ -360,9 +362,20 @@ uint64_t FrequencyMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
                            const std::vector<uint64_t>& aligned,
                            const std::vector<RawImage>& images, size_t ref_idx,
                            const Settings& settings, int pw, int ph, int ch,
-                           float mean_bl, uint64_t merged_out)
+                           float mean_bl, uint64_t merged_out,
+                           const std::vector<float>& comp_scale,
+                           bool exposure_weighted)
 {
     (void)images; (void)mean_bl;
+    // Per-comparison exposure weight numbers (1.0 for the non-bracketed path ->
+    // bit-identical equal-weight legacy behaviour).
+    std::vector<float> trust(aligned.size(), 1.0f);
+    if (exposure_weighted)
+    {
+        for (size_t k = 0; k < aligned.size(); ++k)
+            if (k < comp_scale.size() && comp_scale[k] > 0.0f)
+                trust[k] = 1.0f / comp_scale[k];
+    }
     const int tile = FrequencyConstants::kWienerTileSize; // 8
     const int stride = std::max(1, tile / 2);
     size_t ff = size_t(pw) * ph * ch;
@@ -392,11 +405,12 @@ uint64_t FrequencyMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
         }
         ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch;
         pc.i0 = int(aligned.size()); pc.i1 = int(ff);
-        Binding b[5] = {{0, ref_plane, 0}, {1, ref_low, 0}, {2, cmps, 0}, {3, cmpsl, 0}, {4, merged_out, 0}};
-        vk.Dispatch("freq_laplacian", pc, (uint32_t(ff) + 255) / 256, 1, 1, b, 5);
+        uint64_t trustbuf = vk.CreateBufferFromFloats(trust.data(), uint32_t(trust.size()));
+        Binding b[6] = {{0, ref_plane, 0}, {1, ref_low, 0}, {2, cmps, 0}, {3, cmpsl, 0}, {4, merged_out, 0}, {5, trustbuf, 0}};
+        vk.Dispatch("freq_laplacian", pc, (uint32_t(ff) + 255) / 256, 1, 1, b, 6);
         vk.FlushFrame();
         for (auto cl : cmp_lows) vk.DestroyBuffer(cl);
-        vk.DestroyBuffer(ref_low); vk.DestroyBuffer(cmps); vk.DestroyBuffer(cmpsl);
+        vk.DestroyBuffer(ref_low); vk.DestroyBuffer(cmps); vk.DestroyBuffer(cmpsl); vk.DestroyBuffer(trustbuf);
         return merged_out;
     }
 
@@ -413,7 +427,14 @@ uint64_t FrequencyMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
     double read_noise = std::pow(std::pow(2.0, -robustness_rev + FrequencyConstants::kReadNoiseBase),
                                  FrequencyConstants::kReadNoiseExp);
     int stack = int(aligned.size()) + 1;
+    // EV-weighted normalization denominator: 1 + sum(wn). For the non-bracketed
+    // path every wn == 1.0 so this collapses to `stack` and inv_stack == 1/stack
+    // (bit-identical to the legacy 1/stack_size). Accumulate in float to match.
+    float weight_acc = 1.0f;
+    for (float wn : trust) weight_acc += wn;
+    const float inv_stack = 1.0f / weight_acc;
 
+    uint64_t trustbuf = vk.CreateBufferFromFloats(trust.data(), uint32_t(trust.size()));
     uint64_t out = vk.CreateBuffer(ff);
     uint64_t norm = vk.CreateBuffer(pw * ph);
     vk.FillFloat(out, 0.0f);
@@ -427,7 +448,8 @@ uint64_t FrequencyMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
     pc.i0 = stride; pc.i3 = int(aligned.size());
     pc.i4 = stack; pc.i5 = tile; pc.i6 = int(ff);
     pc.f0 = float(robustness_norm); pc.f1 = float(read_noise);
-    Binding b[4] = {{0, ref_plane, 0}, {1, cmps, 0}, {2, out, 0}, {3, norm, 0}};
+    pc.f2 = inv_stack;
+    Binding b[5] = {{0, ref_plane, 0}, {1, cmps, 0}, {2, out, 0}, {3, norm, 0}, {4, trustbuf, 0}};
     vk.BeginFrame();
     for (int py = 0; py < 2; ++py)
     {
@@ -438,11 +460,12 @@ uint64_t FrequencyMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
             if (ptx == 0 || pty == 0) continue;
             pc.i1 = px;
             pc.i2 = py;
-            vk.Dispatch("freq_wiener_tile", pc, ptx, pty, 1, b, 4);
+            vk.Dispatch("freq_wiener_tile", pc, ptx, pty, 1, b, 5);
         }
     }
     vk.FlushFrame();
     vk.DestroyBuffer(cmps);
+    vk.DestroyBuffer(trustbuf);
 
     // normalize out/norm -> merged_out, then clamp floor -1 (ReduceTileBorderArtifacts)
     vk.BeginFrame();
@@ -468,6 +491,12 @@ void DenseAlignGPU(VulkanBackend& vk,
                    int pw, int ph, int tile_size, int pyr_n,
                    uint64_t out_tsx, uint64_t out_tsy)
 {
+    const char* dense_shader =
+#if defined(BURSTMERGE_HAVE_GPU_FP64)
+        vk.HasFloat64() ? "dense_level_fp64" : "dense_level";
+#else
+        "dense_level";
+#endif
     int half_tile = std::max(1, tile_size / 2);
     int ft_x = std::max(1, (pw + half_tile - 1) / half_tile - 1);
     int ft_y = std::max(1, (ph + half_tile - 1) / half_tile - 1);
@@ -496,11 +525,9 @@ void DenseAlignGPU(VulkanBackend& vk,
         ShaderPC pc{};
         pc.w = W; pc.h = H; pc.channels = 1;
         pc.i0 = tile_size; pc.i1 = half_tile; pc.i2 = tx_L; pc.i3 = ty_L;
-        pc.i4 = is_coarsest ? 0 : tx_L;  // cur (coarser) tiles ? recomputed by shader via ratio; pass coarsest-finer tx
+        pc.i4 = is_coarsest ? 0 : tx_L;
         pc.i5 = is_coarsest ? 0 : ty_L;
         pc.i6 = level_scale; pc.i7 = 1; pc.i8 = is_coarsest ? 1 : 0; pc.i9 = weight_ssd;
-        // For correct ratio mapping the shader needs the COARSER level's tile count.
-        // Store it in i4/i5 = (coarser tx, ty). Compute coarser tiles:
         if (!is_coarsest)
         {
             int cW = ref_pyr[level + 1].w, cH = ref_pyr[level + 1].h;
@@ -509,7 +536,7 @@ void DenseAlignGPU(VulkanBackend& vk,
         }
         Binding b[6] = {{0, ref_pyr[level].handle, 0}, {1, cmp_lvl, 0},
                         {2, csx, 0}, {3, csy, 0}, {4, out_sx, 0}, {5, out_sy, 0}};
-        vk.Dispatch("dense_level", pc, (tx_L + 7) / 8, (ty_L + 7) / 8, 1, b, 6);
+        vk.Dispatch(dense_shader, pc, (tx_L + 7) / 8, (ty_L + 7) / 8, 1, b, 6);
     }
     vk.DestroyBuffer(sc_sx[0]); vk.DestroyBuffer(sc_sx[1]);
     vk.DestroyBuffer(sc_sy[0]); vk.DestroyBuffer(sc_sy[1]);
@@ -671,8 +698,10 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
                                   const ProgressFn& progress,
                                   const std::vector<float>& mean_bl,
                                   const std::vector<size_t>& comp_orig,
-                                  const std::vector<float>& comp_scale)
+                                  const std::vector<float>& comp_scale,
+                                  const ExposureClassification& exposure)
 {
+    const bool exposure_weighted = exposure.is_bracketed;
     const size_t N = plane.size();
 
     // ---- to_grayscale (shared) ----
@@ -719,26 +748,19 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
     aligned.reserve(N > 0 ? N - 1 : 0);
     int pyr_n = int(ref_pyr.size());
 
-    for (size_t i = 0; i < N; ++i)
+    // Aligns `child_idx` against an arbitrary parent (its full-res gray buffer
+    // `parent_gray` and pyramid `parent_pyr`), warps the child plane into the
+    // parent's coordinate frame, and returns the warped buffer. Frees the
+    // child's gray/plane/cmp_pyr. This single primitive is shared by the
+    // fixed-reference and chained (transmission) paths — they differ only in
+    // what parent_gray/parent_pyr are (the reference, or an EV-adjacent frame
+    // already warped into the reference frame).
+    auto align_to_parent = [&](uint64_t parent_gray,
+                               const std::vector<PyrLevel>& parent_pyr,
+                               size_t child_idx) -> uint64_t
     {
-        if (i == ref_idx) continue;
-        Report(progress, 0.6f, "GPU: aligning frame " + std::to_string(i));
-
-        if (settings.alignment_mode == AlignmentMode::Skip)
-        {
-            uint64_t warped = vk.CreateBuffer(size_t(pw) * ph * ch);
-            vk.BeginFrame();
-            ShaderPC cpc{}; cpc.w = pw; cpc.h = ph; cpc.channels = ch;
-            Binding cb[2] = {{0, plane[i], 0}, {1, warped, 0}};
-            vk.Dispatch("copy", cpc, (size_t(pw) * ph * ch + 255) / 256, 1, 1, cb, 2);
-            vk.FlushFrame();
-            vk.DestroyBuffer(gray[i]);
-            vk.DestroyBuffer(plane[i]);
-            aligned.push_back(warped);
-            continue;
-        }
-
-        auto cmp_pyr = BuildGrayPyramid(vk, gray[i], pw, ph, tile_size);
+        Report(progress, 0.6f, "GPU: aligning frame " + std::to_string(child_idx));
+        auto cmp_pyr = BuildGrayPyramid(vk, gray[child_idx], pw, ph, tile_size);
         int z2[2] = {0, 0};
         vk.UploadFloats(align_state, reinterpret_cast<float*>(z2), 2);
 
@@ -747,21 +769,21 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
         {
             if (level < pyr_n - 1)
             {
-                int scale = ref_pyr[level].w / std::max(1, ref_pyr[level + 1].w);
+                int scale = parent_pyr[level].w / std::max(1, parent_pyr[level + 1].w);
                 ShaderPC pc{}; pc.i0 = scale;
                 Binding b[1] = {{0, align_state, 0}};
                 vk.Dispatch("upscale_seed", pc, 1, 1, 1, b, 1);
             }
-            int longest = std::max(ref_pyr[level].w, ref_pyr[level].h);
+            int longest = std::max(parent_pyr[level].w, parent_pyr[level].h);
             int shift = AlignConstants::kSearchFractionShiftBase + (pyr_n - 1 - level);
             int radius = std::max(int(AlignConstants::kMinSearchRadius), longest >> shift);
             int step = std::max(1, 16 >> (level + 1));
             int side = 2 * radius + 1;
-            uint64_t cmp_lvl = (level < int(cmp_pyr.size())) ? cmp_pyr[level].handle : gray[i];
+            uint64_t cmp_lvl = (level < int(cmp_pyr.size())) ? cmp_pyr[level].handle : gray[child_idx];
             {
-                ShaderPC pc{}; pc.w = ref_pyr[level].w; pc.h = ref_pyr[level].h; pc.channels = 1;
+                ShaderPC pc{}; pc.w = parent_pyr[level].w; pc.h = parent_pyr[level].h; pc.channels = 1;
                 pc.i0 = radius; pc.i1 = step; pc.i2 = 1;
-                Binding b[4] = {{0, ref_pyr[level].handle, 0}, {1, cmp_lvl, 0},
+                Binding b[4] = {{0, parent_pyr[level].handle, 0}, {1, cmp_lvl, 0},
                                 {2, align_state, 0}, {3, cand_global, 0}};
                 vk.Dispatch("sad_global", pc, side * side, 1, 1, b, 4);
             }
@@ -775,7 +797,7 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
 
         vk.BeginFrame();
         if (settings.alignment_mode == AlignmentMode::DenseTile)
-            DenseAlignGPU(vk, ref_pyr, cmp_pyr, pw, ph, tile_size, pyr_n, tsx, tsy);
+            DenseAlignGPU(vk, parent_pyr, cmp_pyr, pw, ph, tile_size, pyr_n, tsx, tsy);
         else
         {
             ShaderPC pc{};
@@ -786,7 +808,7 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
             for (int d = 0; d < diags; ++d)
             {
                 pc.i4 = d;
-                Binding b[5] = {{0, gray[ref_idx], 0}, {1, gray[i], 0},
+                Binding b[5] = {{0, parent_gray, 0}, {1, gray[child_idx], 0},
                                 {2, global_shift, 0}, {3, tsx, 0}, {4, tsy, 0}};
                 vk.Dispatch("tile_refine_diag", pc, 1, 1, 1, b, 5);
             }
@@ -797,18 +819,131 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
             pc.i0 = tile_size; pc.i1 = align_tiles_x; pc.i2 = align_tiles_y;
             pc.i3 = dense ? half_tile : 0;
             pc.i4 = 1;
-            Binding b[4] = {{0, plane[i], 0}, {1, warped, 0}, {2, tsx, 0}, {3, tsy, 0}};
+            Binding b[4] = {{0, plane[child_idx], 0}, {1, warped, 0}, {2, tsx, 0}, {3, tsy, 0}};
             vk.Dispatch("warp_tilefield", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 4);
         }
         vk.FlushFrame();
-        for (auto& lvl : cmp_pyr) if (lvl.handle != gray[i]) vk.DestroyBuffer(lvl.handle);
-        // Comparison frame gray and plane are no longer needed after warp.
-        // The warped buffer (pushed to aligned[]) contains the final aligned
-        // plane data. GPU is idle (just flushed), so DestroyBuffer is immediate
-        // with no sync cost. Frees ~pw*ph*(1+ch)*4 bytes per comparison frame.
-        vk.DestroyBuffer(gray[i]);
-        vk.DestroyBuffer(plane[i]);
-        aligned.push_back(warped);
+        for (auto& lvl : cmp_pyr) if (lvl.handle != gray[child_idx]) vk.DestroyBuffer(lvl.handle);
+        // Comparison frame gray/plane consumed; warped buffer is the aligned
+        // result. GPU is idle (just flushed), so DestroyBuffer is immediate.
+        vk.DestroyBuffer(gray[child_idx]);
+        vk.DestroyBuffer(plane[child_idx]);
+        return warped;
+    };
+
+    const bool skip = (settings.alignment_mode == AlignmentMode::Skip);
+
+    // Chained ("transmission") alignment for wide exposure brackets: each frame
+    // is aligned against its EV-adjacent neighbour (already warped into the
+    // reference frame) instead of directly against the reference. Mirrors the
+    // CPU BuildAlignedComparisons chained path; gated by the stricter
+    // needs_chained_alignment threshold (spread > 2^kBracketTransmissionFallbackEv).
+    const bool chained = exposure.needs_chained_alignment &&
+                         !exposure.exposure_order.empty() && !skip;
+
+#ifndef NDEBUG
+    std::fprintf(stderr, "[DEBUG] GPU alignment: %s (ref=#%zu, %zu frames in EV order)\n",
+        chained ? "chained (transmission)" : "fixed-reference",
+        ref_idx, exposure.exposure_order.size());
+#endif
+
+    if (chained)
+    {
+        const auto& ord = exposure.exposure_order;  // ascending by EV, (ev, source_idx)
+        size_t root_pos = 0;
+        bool found_root = false;
+        for (size_t p = 0; p < ord.size(); ++p)
+            if (ord[p].second == ref_idx) { root_pos = p; found_root = true; break; }
+
+        // (child, parent) pairs in dependency order: walk outward from the root
+        // in EV order. Each child's parent is its EV-adjacent neighbour.
+        std::vector<std::pair<size_t, size_t>> seq;
+        std::vector<char> in_order(N, 0);
+        for (auto& pr : ord) in_order[pr.second] = 1;
+        if (found_root)
+        {
+            for (size_t pos = root_pos; pos > 0; --pos)
+                seq.push_back({ord[pos - 1].second, ord[pos].second});
+            for (size_t pos = root_pos + 1; pos < ord.size(); ++pos)
+                seq.push_back({ord[pos].second, ord[pos - 1].second});
+        }
+        // Frames without valid EV fall back to fixed-reference alignment.
+        for (size_t i = 0; i < N; ++i)
+            if (i != ref_idx && !in_order[i]) seq.push_back({i, ref_idx});
+
+        std::vector<uint64_t> aligned_by_idx(N, 0);
+        for (auto& cp : seq)
+        {
+            size_t child = cp.first, parent = cp.second;
+#ifndef NDEBUG
+            {
+                float child_ev = 0.0f, parent_ev = 0.0f;
+                for (auto& pr : ord)
+                {
+                    if (pr.second == child) child_ev = pr.first;
+                    if (pr.second == parent) parent_ev = pr.first;
+                }
+                std::fprintf(stderr, "[DEBUG] GPU chained align: frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
+                    child, child_ev, parent, parent_ev);
+            }
+#endif
+            std::vector<uint64_t> scratch;  // temp parent buffers freed after this step
+            uint64_t parent_gray_h;
+            std::vector<PyrLevel> parent_pyr;
+            if (parent == ref_idx)
+            {
+                parent_gray_h = gray[ref_idx];
+                parent_pyr = ref_pyr;  // shallow share; align_to_parent does not free parent_pyr
+            }
+            else
+            {
+                // Parent is an already-aligned comparison: derive its gray from
+                // the warped plane (to_grayscale), then build a pyramid. This is
+                // the parent's gray in the reference coordinate frame.
+                parent_gray_h = vk.CreateBuffer(pw * ph);
+                scratch.push_back(parent_gray_h);
+                vk.BeginFrame();
+                ShaderPC gpc{}; gpc.w = pw; gpc.h = ph; gpc.channels = ch; gpc.w2 = pw; gpc.h2 = ph;
+                gpc.f0 = settings.align_gamma;
+                gpc.f1 = float(raw_meta[ref_idx].metadata.white_level);
+                Binding gb[2] = {{0, aligned_by_idx[parent], 0}, {1, parent_gray_h, 0}};
+                vk.Dispatch("to_grayscale", gpc, (pw + 7) / 8, (ph + 7) / 8, 1, gb, 2);
+                vk.FlushFrame();
+                parent_pyr = BuildGrayPyramid(vk, parent_gray_h, pw, ph, tile_size);
+                // parent_pyr[0] aliases parent_gray_h (already in scratch);
+                // deeper levels are owned temp buffers.
+                for (size_t l = 1; l < parent_pyr.size(); ++l) scratch.push_back(parent_pyr[l].handle);
+            }
+            aligned_by_idx[child] = align_to_parent(parent_gray_h, parent_pyr, child);
+            for (auto h : scratch) vk.DestroyBuffer(h);
+        }
+
+        // Emit aligned[] in source order (excluding ref) to match the comp_orig
+        // / comp_scale indexing used by the merge stage.
+        for (size_t i = 0; i < N; ++i)
+            if (i != ref_idx) aligned.push_back(aligned_by_idx[i]);
+    }
+    else
+    {
+        // Fixed-reference alignment: every comparison aligned directly to ref.
+        for (size_t i = 0; i < N; ++i)
+        {
+            if (i == ref_idx) continue;
+            if (skip)
+            {
+                uint64_t warped = vk.CreateBuffer(size_t(pw) * ph * ch);
+                vk.BeginFrame();
+                ShaderPC cpc{}; cpc.w = pw; cpc.h = ph; cpc.channels = ch;
+                Binding cb[2] = {{0, plane[i], 0}, {1, warped, 0}};
+                vk.Dispatch("copy", cpc, (size_t(pw) * ph * ch + 255) / 256, 1, 1, cb, 2);
+                vk.FlushFrame();
+                vk.DestroyBuffer(gray[i]);
+                vk.DestroyBuffer(plane[i]);
+                aligned.push_back(warped);
+                continue;
+            }
+            aligned.push_back(align_to_parent(gray[ref_idx], ref_pyr, i));
+        }
     }
 
     // Reference pyramid levels (except [0] which aliases gray[ref_idx]):
@@ -891,15 +1026,50 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
         vk.DestroyBuffer(packed); vk.DestroyBuffer(clipbuf);
         for (size_t k = 0; k < aligned.size(); ++k) vk.DestroyBuffer(aligned[k]);
     }
+    else if (settings.merge_algo == MergeAlgorithm::ExpBracketAverage)
+    {
+        merged = vk.CreateBuffer(size_t(pw) * ph * ch);
+        uint64_t wsum = vk.CreateBuffer(size_t(pw) * ph * ch);
+        vk.FillFloat(wsum, 1.0f);
+        {
+            ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch;
+            Binding b[2] = {{0, plane[ref_idx], 0}, {1, merged, 0}};
+            vk.BeginFrame(); vk.Dispatch("copy", pc, (size_t(pw) * ph * ch + 255) / 256, 1, 1, b, 2); vk.FlushFrame();
+        }
+        float wl = float(raw_meta[ref_idx].metadata.white_level);
+        float bl = mean_bl[ref_idx];
+        float clip = (wl > bl + 1.0f) ? (wl - bl) * PipelineConstants::kClipFactor : 0.0f;
+        for (size_t k = 0; k < aligned.size(); ++k)
+        {
+            vk.BeginFrame();
+            {
+                ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch;
+                pc.f0 = clip * comp_scale[k];
+                pc.f1 = comp_scale[k];
+                Binding b[3] = {{0, merged, 0}, {1, wsum, 0}, {2, aligned[k], 0}};
+                vk.Dispatch("expbkt_acc", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 3);
+            }
+            vk.FlushFrame();
+            vk.DestroyBuffer(aligned[k]);
+        }
+        vk.BeginFrame();
+        {
+            ShaderPC pc{}; pc.w = pw; pc.h = ph; pc.channels = ch; pc.i6 = 1;
+            Binding b[2] = {{0, merged, 0}, {1, wsum, 0}};
+            vk.Dispatch("normalize_div", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 2);
+        }
+        vk.FlushFrame();
+        vk.DestroyBuffer(wsum);
+    }
     else if (settings.merge_algo == MergeAlgorithm::Frequency)
     {
         merged = vk.CreateBuffer(size_t(pw) * ph * ch);
-        FrequencyMergeGPU(vk, plane[ref_idx], aligned, raw_meta, ref_idx, settings, pw, ph, ch, mean_bl[ref_idx], merged);
+        FrequencyMergeGPU(vk, plane[ref_idx], aligned, raw_meta, ref_idx, settings, pw, ph, ch, mean_bl[ref_idx], merged, comp_scale, exposure_weighted);
         for (size_t k = 0; k < aligned.size(); ++k) vk.DestroyBuffer(aligned[k]);
     }
     else // Spatial (SpatialMergeGPU frees aligned[] internally)
     {
-        merged = SpatialMergeGPU(vk, plane[ref_idx], aligned, raw_meta, ref_idx, settings, pw, ph, ch, mean_bl[ref_idx], comp_orig, comp_scale);
+        merged = SpatialMergeGPU(vk, plane[ref_idx], aligned, raw_meta, ref_idx, settings, pw, ph, ch, mean_bl[ref_idx], comp_orig, comp_scale, exposure_weighted);
     }
     // Only plane[ref_idx] remains; comparison planes freed in alignment loop.
     vk.DestroyBuffer(plane[ref_idx]);
@@ -922,6 +1092,7 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
 
 FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
                                size_t ref_idx,
+                               const ExposureClassification& exposure,
                                const Settings& settings,
                                const ProgressFn& progress)
 {
@@ -1086,7 +1257,7 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
     }
 
     return GpuPipelineCore(vk, plane, images, ref_idx, pw, ph, int(ch),
-                           settings, progress, mean_bl, comp_orig, comp_scale);
+                           settings, progress, mean_bl, comp_orig, comp_scale, exposure);
 }
 
 FloatImage GpuRunBurstPipelineRgb(std::vector<FloatImage>& images,
@@ -1150,7 +1321,7 @@ FloatImage GpuRunBurstPipelineRgb(std::vector<FloatImage>& images,
     }
 
     return GpuPipelineCore(vk, plane, raw_meta, ref_idx, pw, ph, ch,
-                           settings, progress, mean_bl, comp_orig, comp_scale);
+                           settings, progress, mean_bl, comp_orig, comp_scale, ExposureClassification{});
 }
 
 } // namespace burstmerge

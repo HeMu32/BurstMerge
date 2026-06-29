@@ -137,6 +137,13 @@ struct StandardTileContext
     double robustness_norm = 0.0;
     double read_noise = 0.0;
     size_t stack_size = 0;
+    /// Per-comparison exposure weight number wn = 1/exposure_scales[idx]
+    /// (1.0 when exposure_weighted is false). The reference seed implicitly
+    /// carries wn = 1.
+    std::vector<float> comp_weight_numbers;
+    /// Precomputed 1 / (1 + Sum(wn)). Equals 1/stack_size when not
+    /// exposure-weighted, so the legacy normalization is preserved.
+    float inv_stack = 0.0f;
 };
 
 struct RobustTileContext
@@ -413,8 +420,14 @@ void ComputeStandardTileResult(const StandardTileContext& ctx,
     const double noise_norm =
         (rms + ctx.read_noise) * static_cast<double>(tile * tile) * ctx.robustness_norm;
 
-    for (const auto& comp_img : ctx.aligned_comparisons)
+    for (size_t comp_idx = 0; comp_idx < ctx.aligned_comparisons.size(); ++comp_idx)
     {
+        const FloatImage& comp_img = ctx.aligned_comparisons[comp_idx];
+        // Exposure weight number for this comparison frame (1.0 for the
+        // uniform / non-bracketed path). Applied only to the spectral-blend
+        // accumulation below; the reference seed stays at wn = 1.
+        const float wn = ctx.comp_weight_numbers.empty() ? 1.0f
+            : ctx.comp_weight_numbers[comp_idx];
         buf.comp_spectra.resize(ctx.reference.channels * n);
         auto& comp_spectra = buf.comp_spectra;
         for (uint32_t c = 0; c < ctx.reference.channels; ++c)
@@ -561,15 +574,32 @@ void ComputeStandardTileResult(const StandardTileContext& ctx,
                 
                 for (uint32_t c = 0; c < ctx.reference.channels; ++c)
                 {
-                    merged_spectra[c * stride + k] +=
-                        static_cast<float>(1.0 - weight) * shifted[c] +
-                        static_cast<float>(weight) * ref_spectra[c * stride + k];
+                    if (ctx.params.exposure_weighted)
+                    {
+                        // wn augments the existing Wiener trust `weight` (which is
+                        // preserved unchanged); it scales this comparison frame's
+                        // whole blend contribution.
+                        merged_spectra[c * stride + k] += wn *
+                            (static_cast<float>(1.0 - weight) * shifted[c] +
+                             static_cast<float>(weight) * ref_spectra[c * stride + k]);
+                    }
+                    else
+                    {
+                        // Legacy path: expression kept verbatim so -ffast-math
+                        // FMA contraction is bit-identical for non-bracketed
+                        // bursts (wn == 1 here, but the compiler cannot see that
+                        // through the wn*() wrapper above).
+                        merged_spectra[c * stride + k] +=
+                            static_cast<float>(1.0 - weight) * shifted[c] +
+                            static_cast<float>(weight) * ref_spectra[c * stride + k];
+                    }
                 }
             }
         }
     }
 
-    const float inv_stack = 1.0f / static_cast<float>(ctx.stack_size);
+    // EV-weighted normalization (== 1/stack_size when not exposure-weighted).
+    const float inv_stack = ctx.inv_stack;
     for (uint32_t c = 0; c < ctx.reference.channels; ++c)
     {
         std::complex<float>* src = merged_spectra.data() + c * stride;
@@ -931,7 +961,7 @@ void ComputeRobustTileResult(const RobustTileContext& ctx,
     }
 
     {
-        const float inv_stack = 1.0f / static_cast<float>(ctx.stack_size);
+    const float inv_stack = 1.0f / static_cast<float>(ctx.stack_size);
         for (uint32_t c = 0; c < ctx.reference.channels; ++c)
         {
             std::complex<float>* ms = merged_spectra.data() + c * stride;
@@ -1150,9 +1180,31 @@ FloatImage WienerFftMerge(const FloatImage& reference,
         (FrequencyConstants::kRobustnessRevOffset - static_cast<double>(static_cast<int>(params.noise_reduction + 0.5f)));
     const double robustness_norm = std::pow(2.0, -robustness_rev + FrequencyConstants::kRobustnessNormBase);
     const double read_noise = std::pow(std::pow(2.0, -robustness_rev + FrequencyConstants::kReadNoiseBase), FrequencyConstants::kReadNoiseExp);
+
+    // Exposure-bracketing weight numbers + EV-weighted normalization. wn[idx]
+    // stays 1.0 for the uniform / non-bracketed path, so weight_acc collapses to
+    // the frame count and inv_stack == 1/stack_size -- the legacy behaviour.
+    // Accumulate in float (not double) so that, when every wn == 1.0, weight_acc
+    // is bit-identical to the integer stack_size and inv_stack reproduces the
+    // legacy `1.0f / stack_size` exactly (no 1-ULP drift on uniform bursts).
+    std::vector<float> comp_wn(aligned_comparisons.size(), 1.0f);
+    if (params.exposure_weighted && params.exposure_scales)
+    {
+        for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+        {
+            if (idx < params.num_scales && params.exposure_scales[idx] > 0.0f)
+                comp_wn[idx] = 1.0f / params.exposure_scales[idx];
+        }
+    }
+    float weight_acc = 1.0f;  // reference seed contributes wn = 1
+    for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+        weight_acc += comp_wn[idx];
+    const float inv_stack = 1.0f / weight_acc;
+
     const StandardTileContext ctx{reference, aligned_comparisons, params,
                                 robustness_norm, read_noise,
-                                aligned_comparisons.size() + 1};
+                                aligned_comparisons.size() + 1,
+                                std::move(comp_wn), inv_stack};
 
     std::vector<uint32_t> y_coords;
     for (uint32_t y0 = 0; y0 < reference.height; y0 += stride)
@@ -1228,6 +1280,10 @@ FloatImage FrequencyMerge(const FloatImage& reference,
 
     if (params.mode == FrequencyMode::WienerFftRobust)
     {
+        // WienerFftRobust retains its own Swift-style exposure handling
+        // (per-tile noise-term scaling, highlights_norm, motion_norm_exposure)
+        // and therefore intentionally IGNORES params.exposure_weighted. Only
+        // the Laplacian and standard-Wiener paths consume the wn augmentation.
         if (params.white_level < 0.0f || params.black_level < 0.0f)
         {
             throw std::runtime_error(
@@ -1252,6 +1308,20 @@ FloatImage FrequencyMerge(const FloatImage& reference,
     out.channels = reference.channels;
     out.data.resize(reference.data.size(), 0.0f);
 
+    // Exposure-bracketing weight numbers for the low-frequency average. The
+    // high-frequency max-abs selection below is intentionally left untouched
+    // (it is not a weighted average). wn[idx]==1 for the uniform / non-bracketed
+    // path, so the legacy equal-weight low-frequency average is preserved.
+    std::vector<float> cmp_wn(aligned_comparisons.size(), 1.0f);
+    if (params.exposure_weighted && params.exposure_scales)
+    {
+        for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
+        {
+            if (idx < params.num_scales && params.exposure_scales[idx] > 0.0f)
+                cmp_wn[idx] = 1.0f / params.exposure_scales[idx];
+        }
+    }
+
     for (size_t i = 0; i < out.data.size(); ++i)
     {
         float low_sum = ref_low.data[i];
@@ -1261,8 +1331,9 @@ FloatImage FrequencyMerge(const FloatImage& reference,
         for (size_t idx = 0; idx < aligned_comparisons.size(); ++idx)
         {
             float comp_high = aligned_comparisons[idx].data[i] - comp_low[idx].data[i];
-            low_sum += comp_low[idx].data[i];
-            low_weight += 1.0f;
+            // EV-weight the low-frequency accumulation; reference seed is wn=1.
+            low_sum += comp_low[idx].data[i] * cmp_wn[idx];
+            low_weight += cmp_wn[idx];
             if (std::abs(comp_high) > std::abs(high)) high = comp_high;
         }
 

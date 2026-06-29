@@ -166,42 +166,64 @@ std::vector<FloatImage> BuildFloatImages(const std::vector<RawImage>& images)
     return out;
 }
 
-size_t SelectExposureRefIndex(const std::vector<RawImage>& images)
+ExposureClassification ClassifyExposureSequence(const std::vector<RawImage>& images)
+{
+    ExposureClassification ec;
+    if (images.empty()) return ec;
+
+    float min_exp = std::numeric_limits<float>::max();
+    float max_exp = 0.0f;
+    ec.exposure_order.reserve(images.size());
+    for (size_t i = 0; i < images.size(); ++i)
+    {
+        float v = images[i].metadata.ev_value;
+        if (v > 0.0f)
+        {
+            ec.has_exposure = true;
+            min_exp = std::min(min_exp, v);
+            max_exp = std::max(max_exp, v);
+            ec.exposure_order.push_back({v, i});
+        }
+    }
+    if (!ec.has_exposure) return ec;
+
+    // Sort ascending by EV once; both reference-frame selection (front == darkest)
+    // and chained alignment (walk outwards in EV order) consume this directly.
+    std::sort(ec.exposure_order.begin(), ec.exposure_order.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Coarse gate (~+0.49 stops): bracketed enough to pick the darkest frame as
+    // reference and to engage exposure-weighted merging.
+    ec.is_bracketed = max_exp > min_exp * PipelineConstants::kBracketEvRatioThreshold;
+
+    // Stricter gate (+1 stop): only wide brackets justify chained alignment.
+    // Note this is intentionally a higher bar than is_bracketed, so there is a
+    // 1.4x..2.0x band treated as bracketed but aligned with a fixed reference.
+    ec.needs_chained_alignment =
+        max_exp > min_exp * std::pow(2.0f, PipelineConstants::kBracketTransmissionFallbackEv);
+
+    return ec;
+}
+
+bool IsBracketedSequence(const std::vector<RawImage>& images)
+{
+    return ClassifyExposureSequence(images).is_bracketed;
+}
+
+size_t SelectExposureRefIndex(const std::vector<RawImage>& images,
+                              const ExposureClassification& ec)
 {
     if (images.empty()) return 0;
 
-    bool has_exposure = false;
-    float min_exp = std::numeric_limits<float>::max();
-    float max_exp = 0.0f;
-    for (const auto& img : images)
+    // Bracketed burst: the darkest frame has the best highlight retention and
+    // is used as the alignment + merge + exposure reference. The EV-sorted
+    // order was computed once by ClassifyExposureSequence; just take the front.
+    if (ec.is_bracketed && !ec.exposure_order.empty())
     {
-        float v = img.metadata.ev_value;
-        if (v > 0.0f)
-        {
-            has_exposure = true;
-            min_exp = std::min(min_exp, v);
-            max_exp = std::max(max_exp, v);
-        }
+        return ec.exposure_order.front().second;
     }
 
-    if (has_exposure && max_exp > min_exp * PipelineConstants::kBracketEvRatioThreshold)
-    {
-        std::vector<std::pair<float, size_t>> exposure_order;
-        exposure_order.reserve(images.size());
-        for (size_t i = 0; i < images.size(); ++i)
-        {
-            float v = images[i].metadata.ev_value;
-            if (v > 0.0f) exposure_order.push_back({v, i});
-        }
-        if (!exposure_order.empty())
-        {
-            std::sort(exposure_order.begin(), exposure_order.end(),
-                      [](const auto& a, const auto& b)
-                      { return a.first < b.first; });
-            return exposure_order.front().second;
-        }
-    }
-
+    // Constant-exposure burst: middle frame by position.
     return images.size() / 2;
 }
 

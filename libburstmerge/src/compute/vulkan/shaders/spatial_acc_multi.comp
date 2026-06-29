@@ -37,6 +37,8 @@ float planeBiasVeto(float chroma_shift, float nf, float minw)
 //   pc.i4 = linear_mode(0/1)
 //   pc.f0=robustness f1=noise_floor f2=highlight_threshold
 //   pc.f3=clip_threshold f4=min_cmp_weight f5=this comparison's exposure_scale
+//   pc.f6=this comparison's exposure weight number wn (=1/exposure_scale when
+//         the burst is bracketed, else 1.0). Multiplied onto the final weight.
 layout(binding = 0) buffer Acc { float acc[]; };
 layout(binding = 1) buffer Wsum { float wsum[]; };
 layout(binding = 2) readonly buffer Ref { float refp[]; };
@@ -109,6 +111,13 @@ void main()
         float chroma_shift = abs((cmp_rb - cmp_g) - (ref_rb - ref_g));
         w *= planeBiasVeto(chroma_shift, nf, minw);
     }
+
+    // Exposure weight number for this comparison frame (1.0 when the burst is
+    // not exposure-bracketed). Scales the final weight so brighter frames lead
+    // the shadows; clipped comparisons already have w == 0 here so a large wn
+    // cannot drag highlights. wn == 1.0 is an exact no-op (bit-identical to the
+    // legacy path).
+    w *= pc.f6;
 
     for (int c = 0; c < ch; ++c)
         acc[base + c] += cmpp[base + c] * w;

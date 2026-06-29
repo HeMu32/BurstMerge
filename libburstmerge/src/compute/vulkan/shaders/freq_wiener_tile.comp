@@ -13,16 +13,21 @@
 //
 // PC: w,h,channels = image; i0=stride i1=phase_x i2=phase_y i3=num_comp
 //     i4=stack_size i5=tile(8) i6=frame_stride(w*h*ch)
-//     f0=robustness_norm f1=read_noise
+//     f0=robustness_norm f1=read_noise f2=inv_stack
+//        (inv_stack = 1/(1+sum(wn)) when exposure-weighted, else 1/stack_size;
+//         precomputed on the host so the GPU does a single load)
 // Dispatched in 4 phases (phase_x,phase_y)∈{0,1}² so that within each
 // dispatch workgroups are spaced 2*stride = tile apart (non-overlapping).
 // Barriers between dispatches make the out/norm accumulation safe.
 // binding 0: ref(NHWC) 1: cmps(packed NHWC) 2: out(NHWC) 3: norm(1ch)
+// binding 4: trust (per-comparison exposure weight number wn; 1.0 for the
+//            non-bracketed path -> bit-identical to legacy)
 layout(local_size_x = 64) in;
 layout(binding = 0) readonly buffer Ref { float refp[]; };
 layout(binding = 1) readonly buffer Cmps { float cmps[]; };
 layout(binding = 2) buffer Out { float outv[]; };
 layout(binding = 3) buffer Norm { float normv[]; };
+layout(binding = 4) readonly buffer Trust { float trust[]; };
 
 const float kPi = 3.14159265358979323846;
 
@@ -251,19 +256,26 @@ void main()
             float weight = (ch >= 4) ? 0.5 * (wsum - wmin - wmax)
                                      : wsum / float(max(1, ch));
             weight = clampf(weight, 0.0, 1.0);
+            // Exposure weight number for this comparison (1.0 when not
+            // exposure-bracketed). Augments the Wiener `weight` (preserved);
+            // trust[comp] == 1.0 is an exact no-op, keeping the non-bracketed
+            // path bit-identical to the legacy shader.
+            float wn = trust[comp];
             for (int c = 0; c < ch; ++c)
             {
                 vec2 m = merged_sp[c * 64 + k];
                 vec2 rs = ref_sp[c * 64 + k];
-                m += (1.0 - weight) * shifted[c] + weight * rs;
+                m += wn * ((1.0 - weight) * shifted[c] + weight * rs);
                 merged_sp[c * 64 + k] = m;
             }
         }
         barrier();
     }
 
-    // inverse DFT merged per channel, accumulate windowed
-    float inv_stack = 1.0 / float(max(1, stack));
+    // inverse DFT merged per channel, accumulate windowed. inv_stack is
+    // precomputed on the host (1/(1+sum(wn)) when exposure-weighted, else
+    // 1/stack_size) and passed via pc.f2.
+    float inv_stack = pc.f2;
     for (int c = 0; c < ch; ++c)
     {
         int fy = int(tid) / tile;
