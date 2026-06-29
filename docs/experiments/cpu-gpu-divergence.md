@@ -206,11 +206,32 @@ out = low_sum/(N+1) + high
 
 **CPU** (`align/align.cpp` + `align_standard.cpp`): coarse-to-fine 金字塔, 每层 `SparseSad` (行主序顺序求和) 全局搜索 argmin → `RefineTileField` per-tile 局部搜索加权平均 → 双线性 warp.
 
-**GPU** (`sad_global.comp` 256 线程树状归约 + `select_min.comp` + `tile_sad.comp` + `tile_select.comp` + `warp_tilefield.comp`): 同搜索空间, 同 argmin/加权, 但:
-- **SAD 求和顺序**: GPU 树状归约 ≠ CPU 顺序求和 → SAD 值差 ~1e-5 相对.
-- 平局 (近静态帧, 多位移 SAD 几乎相等) 时 argmin 翻转 → 该 tile 整数位移差 1 → warp 在该 tile 偏 1 像素.
+**GPU** (`sad_global.comp` 256 线程树状归约 + `select_min.comp` + `tile_refine_diag.comp` + `warp_tilefield.comp`): 同搜索空间, 同 argmin, 但 standard 对齐有**三处实质差异**:
 
-对齐差异是**所有 merge 模式的共同底噪** (因为所有模式都消费 warped comp). 它本身贡献约 1.5–2.5% (即 temporal 的量级, temporal 没有额外放大).
+> ⚠ **2026-06-30 更新**: GPU standard 对齐从此前的 per-diagonal wavefront (每对角线 dispatch `(1,1,1)`, ~104 次 dispatch/帧, ~1% SM 利用率) 重写为 **2-pass 全并行** dispatch. 这引入了与 CPU wavefront 的算法性差异 (不仅仅是 FP 噪声):
+
+1. **传播链深度 (dominant semantic difference)**:
+   - CPU wavefront: tile (tx,ty) 在对角线 d=tx+ty 上, 读对角线 d-1 的 left/top 邻居 — 这些邻居**已经含链式传播** (它们自己又读了 d-2 的邻居). 传播链可达 tiles_x+tiles_y 跳.
+   - GPU 2-pass: pass 0 全部 tile 从全局 seed 搜索; pass 1 从 left/top 平均值搜索 — 但 left/top 只有 pass 0 的结果 (全局 seed, 无递归传播). 传播深度固定 1 跳.
+   - 影响: 对全局 SAD seed 良好的 tile 不可观测; 对 seed 较差、需要长距离空间传播修正的 tile, 可能偏差 ≤2 px.
+
+2. **Cost 累加精度**:
+   - CPU `TileCost`: `double` 累加 (`align_common.cpp:99`).
+   - GPU `tileSad`: `float` 累加. 9216 像素累计 ~0.5 ULP × N 舍入差, 通常不影响 argmin, 近平局 tile 可能翻转.
+
+3. **SmoothTileField 后处理**:
+   - CPU: `RefineTileField` 末尾调 `SmoothTileField(result, smooth_tile_field)` (`align_standard.cpp:125`), 3×3 中值平滑.
+   - GPU: 无等效. `smooth_tile_field=false` (CLI 默认) 时等价.
+
+**实测** (GPU 2-pass vs CPU wavefront, 16-bit 输出):
+- Bkt1 (包围曝光, t=96): MAD = 1.85, rel = 0.04%
+- Seq1 (等曝光, t=96): MAD = 0.86, rel = 0.016%
+
+此外, 全局 SAD 搜索阶段 (pass 0 之前) 的 **SAD 求和顺序**: GPU 树状归约 ≠ CPU 顺序求和 → SAD 值差 ~1e-5 相对, 可导致近平局 argmin 翻转.
+
+对齐差异是**所有 merge 模式的共同底噪** (因为所有模式都消费 warped comp).
+
+> Dense 对齐 (`dense_level.comp`) 不受上述 standard wavefront 改动影响 — 它使用 per-level coarse-to-fine 传播 (不经 wavefront), 与 CPU `align_dense.cpp` 算法等价 (除 float vs double cost 精度).
 
 ---
 

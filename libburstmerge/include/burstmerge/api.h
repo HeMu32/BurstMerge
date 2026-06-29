@@ -57,6 +57,7 @@ struct Settings
     float          align_gamma      = 1.0f;
     bool           smooth_tile_field = false;
     bool           highlight_recovery = true;  // recover clipped green highlights (default on)
+    bool           hot_pixel_repair   = false; // suppress hot pixels on RAW mosaic (default off; 2026-6-30 over-fires on real point light sources)
     int            gpu_device_index = -1;  // GPU device index for Vulkan backend (-1 = auto)
     // output_format: Auto = auto-infer (DNG for RAW, PNG for non-RAW)
     OutputFormat   output_format    = OutputFormat::Auto;

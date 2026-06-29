@@ -532,7 +532,7 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             // LinearRaw (already-demosaiced RGB) image there is no such
             // structure, and the input has typically already been denoised
             // (e.g. DxO DeepPRIME). Skip it for linear input.
-            if (!input_is_linear)
+            if (!input_is_linear && settings_.hot_pixel_repair)
             {
                 Report(progress, PipelineConstants::kProgressHotpixel, "Repairing hot pixels");
                 uint32_t hotpixel_period = (float_images.empty() || float_images[0].channels <= 1)

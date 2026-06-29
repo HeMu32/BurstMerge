@@ -55,6 +55,8 @@ prepare 之后两条路径汇入 `GpuPipelineCore`，执行完全相同的 to_gr
 
 例外: `BURSTMERGE_GPU_FP64=ON` 时编译 `dense_level_fp64.comp` (double 累加, `shaderFloat64` 按需启用), 仅供极端包围曝光 dense 对齐使用。默认 fp32 路径 `dense_level.comp` 使用 strided M=16 累加器 (pairwise merge) + FMA 减少 float 舍入误差, 仍是纯 float, 不违反此约束。
 
+> **2026-06-30 dense_level.comp 优化**: shader 从 52 次独立 `tileCost()` 调用 (每次独立遍历 tile 全部像素, 重复读取 ref buffer) 重写为 **fused candidate evaluation**: 候选按 `kCandGroup=4` 分批, 每批内 `ref[pixel]` 只读一次, 共享给批内所有候选; 仅 cmp 按候选位移分别读取。全局内存读取从 104 次/像素降至 69 次/像素 (~34%). 实测 RTX 3080 上 dense 对齐阶段加速 ~28% (0.43s→0.31s/帧), 输出与旧版 bit-identical (MAD=6.3e-05, MAXDIFF=1). Strided 累加精度不变.
+
 CPU 端的 `double` 计算 (如 `robustness_norm`, `read_noise`) 在 C++ 中完成，结果以 `float` 通过 push constant 传入 shader。这不需要修改——只是不要在 GLSL 中引入 `double` 类型。
 
 ### 2.2 Push-constant 布局
