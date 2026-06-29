@@ -17,19 +17,6 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Bayer color filter array support
 - CLI application
 
-### Merge and processing modes
-
-- Simple temporal averaging merge
-- Exposure-bracketed average merge (EV weight numbers + clip gate; CPU + GPU)
-- Simple temporal median merge
-- Motion-robust merge in the spatial domain
-- Motion-robust merge in the frequency domain
-- Exposure-weighted merging for bracketed bursts (spatial / frequency-Laplacian / frequency-Wiener / exp-bkt-average): brighter frames lead the shadows while clipped comparisons are rejected at the highlights — engaged automatically for bracketed RAW bursts, CPU + GPU paths.
-- Highlight recovery for clipped green channels (extrapolated from R/B neighbours)
-    - Highlight recovery was for internal processing only and was not intended for extending dynamic range for outputs.
-- Optional non-linear exposure mapping for improved shadow tonality
-- Burst support with bracketed exposure (not applicable for common RGB formats)
-
 ### File Input&Output formats
 
 - RAW picture input/output support
@@ -47,17 +34,24 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 
 ### Performance and platform support
 
-- CPU processing support
-- Multi-threaded RAW decoding
-- Vulkan GPU compute backend
+- CPU processing support, with multi-thread optimization
+- Vulkan GPU processing backend support
     - GPU device selection (`--gpu N`, `--list-gpus`)
-- Basic CPU performance optimizations for:
-    - DNG decoding
-    - picture alignment
-    - merging
-    - highlight recovery
-- Folder-based sequence reading
+- Folder-based picture sequence reading
 - Windows 10 support (via MinGW-W64)
+
+### Merge and processing modes
+
+- Simple temporal averaging merge
+- Simple temporal median merge
+- Motion-robust merge in the spatial domain
+- Motion-robust merge in the frequency domain
+- Burst support with bracketed exposure (not applicable for common RGB formats)
+  - Exposure-bracketed average merge (EV weight numbers + clip gate; CPU + GPU)
+  - Exposure-weighted merging for bracketed bursts (spatial / frequency-Laplacian / frequency-Wiener / exp-bkt-average): brighter frames lead the shadows while clipped comparisons are rejected at the highlights — engaged automatically for bracketed RAW bursts, CPU + GPU paths.
+- Highlight recovery for clipped green channels (extrapolated from R/B neighbours)
+    - Highlight recovery was for internal processing only and was not intended for extending dynamic range for outputs.
+- Optional non-linear exposure mapping for improved shadow tonality
 
 ## TODOs
 
@@ -65,6 +59,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - OpenEXR support
 - DPX support
 - Hot pixel suppression (current implementation not working well)
+- In-RAM caching for DNG conversion
 - Better noise estimation algorithm
 - Preserve lens correction profiles (via exiftool, Sony ARW only)
 - Configurable path to Adobe DNG Converter (hard-coded for now, will not be a problem on most machines)
@@ -75,7 +70,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Multi-threaded image loading
 - Support for AVIF and/or HEIF
 - Adaptive tile size and/or smarter tile rejection in alignment
-- Improve alignment algorithms for extreme exposure bracket range
+- Improve alignment algorithms for extreme exposure bracket range (Current resolve: set tile size >100 manually)
 - Soft low-cut for merging exposure brackets
 - More constrained alignment algorithms: perspective, ...
 - Mid-percentage merge option
@@ -88,8 +83,8 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - CJK path support
 - User-configurable cache folder path
 - User-configurable reference frame selection
+- Better automatic reference frame selection algorithm
 - Progress reporting for frame merging
-- Performance optimizations for alignment gamma apply processing on CPU
 - Add example pictures to here
 
 ## Usage
@@ -155,7 +150,7 @@ Frames flow through the stages below. Stages marked with an option list expose a
     - `--merge spatial` *(default)*: pixel-domain weighted blending, motion-robust via per-pixel weights. Sub-mode `--spatial-mode`: `standard` *(default)* or `linear`.
     - `--merge frequency`: frequency-domain merge. Sub-mode `--frequency-mode`: `laplacian` *(default)*, `wiener` (FFT Wiener), `wiener-robust` (CPU only).
     - `--merge temporal`: exposure-weighted temporal average (simplest; ignores `--noise-reduction`).
-    - `--merge exp-bkt-average` (alias `expbkt-avg`): bracket-aware average using EV weight numbers (`wn = 1/scale`) and a hard clip gate (same overflow detection as spatial). Assumes bracketed input; non-bracketed degrades to equal-weight average. CPU + GPU.
+    - `--merge exp-bkt-average` (alias `expbkt-avg`): bracket-aware average using EV weight numbers (`wn = 1/scale`) and a hard clip gate (same overflow detection as spatial). Always uses EV-based weights regardless of bracketing classification; when all frames share identical EV, weights are uniform (`wn = 1`). CPU + GPU.
     - `--merge median`: per-pixel median across frames (robust to outliers; but tend to produce bad results in motion scene; ignores `--noise-reduction`).
     - Strength knob for spatial/frequency: `--noise-reduction`.
     - For bracketed RAW bursts, spatial / frequency-laplacian / frequency-wiener automatically engage **exposure-weighted merging**: each comparison frame's contribution is scaled by an EV-derived weight number (`wn = 1/exposure_scale`) on top of the existing motion-robust weight, so brighter frames lead the shadows while clipped comparisons are rejected at the highlights. Automatic (no flag); CPU + GPU. `wiener-robust` keeps its own exposure handling. `exp-bkt-average` always uses this weighting.
@@ -206,6 +201,7 @@ burstmerge_cli.exe --list-gpus
 - Adobe DNG SDK
 - Pocket FFT
 - Vulkan
+- An Adobe DNG Converter installation (Optional)
 
 ## Build Guide
 

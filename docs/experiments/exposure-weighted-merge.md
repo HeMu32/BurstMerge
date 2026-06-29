@@ -132,10 +132,12 @@ Key properties:
   test is dominated by the un-recovered R/B channels, so a recovered green value
   (extrapolated downward from clipped white) does not inflate the max. This means
   a sensor-clipped photosite is still detected via R/B even after green recovery.
-- **Non-bracketed fallback**: when `exposure_scales` is null (RGB path) or all
-  scales are 1.0 (uniform burst), `wn ≡ 1` and the algorithm degrades to a
-  plain equal-weight average with clip gate. The user is responsible for
-  supplying bracketed input; no rejection of non-bracketed sequences.
+- **Always uses EV weights**: `ExpBracketAverage` does not check
+  `is_bracketed`. It always computes `wn = 1/scale` from the actual exposure
+  data. When all frames share identical EV (`scale ≡ 1.0`), weights are
+  uniform (`wn ≡ 1`). Near-bracketed sequences (EV spread < 1.4× but
+  individual frames differ) receive non-uniform weights proportional to
+  their actual EV difference.
 - **Hard clip threshold**: unlike spatial merge's soft robustness weight (which
   gracefully degrades near clipping), the averaging algorithm uses a binary
   include/exclude decision. This means CPU-vs-GPU warp differences can flip the
