@@ -841,6 +841,12 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
     const bool chained = exposure.needs_chained_alignment &&
                          !exposure.exposure_order.empty() && !skip;
 
+#ifndef NDEBUG
+    std::fprintf(stderr, "[DEBUG] GPU alignment: %s (ref=#%zu, %zu frames in EV order)\n",
+        chained ? "chained (transmission)" : "fixed-reference",
+        ref_idx, exposure.exposure_order.size());
+#endif
+
     if (chained)
     {
         const auto& ord = exposure.exposure_order;  // ascending by EV, (ev, source_idx)
@@ -869,6 +875,18 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
         for (auto& cp : seq)
         {
             size_t child = cp.first, parent = cp.second;
+#ifndef NDEBUG
+            {
+                float child_ev = 0.0f, parent_ev = 0.0f;
+                for (auto& pr : ord)
+                {
+                    if (pr.second == child) child_ev = pr.first;
+                    if (pr.second == parent) parent_ev = pr.first;
+                }
+                std::fprintf(stderr, "[DEBUG] GPU chained align: frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
+                    child, child_ev, parent, parent_ev);
+            }
+#endif
             std::vector<uint64_t> scratch;  // temp parent buffers freed after this step
             uint64_t parent_gray_h;
             std::vector<PyrLevel> parent_pyr;

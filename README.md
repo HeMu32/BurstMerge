@@ -32,9 +32,11 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 
 ### File Input&Output formats
 
-- DNG RAW input/output support
-- Camera manufacturer proprietary RAW format input support (via Adobe DNG Converter)
+- RAW picture input/output support
+    - DNG RAW input and output
+    - Camera manufacturer proprietary RAW format input support (via Adobe DNG Converter)
     - Detailed compatibility to be determined
+    - X-Trans NOT supported
 - Common RGB picture formats input/output support
     - JPEG, PNG, BMP, TIF input and output
     - Note: RAW-in RGB-out and RGB-in RAW-out are not supported
@@ -72,6 +74,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Non-Bayer sensor support
 - Multi-threaded image loading
 - Support for AVIF and/or HEIF
+- Adaptive tile size and/or smarter tile rejection in alignment
 - Improve alignment algorithms for extreme exposure bracket range
 - Soft low-cut for merging exposure brackets
 - More constrained alignment algorithms: perspective, ...
@@ -335,3 +338,7 @@ Some tests read sample files from `libburstmerge/test/samples/`. The `test_commo
 
 Sample files used by the test suit were not uploaded to this repo. 
 Some algorithms saw huge performance degradation under Debug build, especially frequency merge algorithms. 
+
+# Known issue
+
+Noise may appera around high-contrast edges for spatial merge vulkan path in exposure bracketing, while same artifacts was less significant in the CPU path. 
