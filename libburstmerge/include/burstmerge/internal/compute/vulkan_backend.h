@@ -9,7 +9,7 @@ namespace vulkan
 {
 
 // Push-constant block mirrored from shaders/common.glsl. Order/offsets MUST
-// match the GLSL layout exactly (14 ints followed by 8 floats, no padding).
+// match the GLSL layout exactly (16 ints followed by 8 floats, no padding).
 struct ShaderPC
 {
     int32_t w;
@@ -77,6 +77,11 @@ public:
 
     const BackendInfo& Info() const;
     const std::string& LastError() const;
+
+    // Returns true if the GPU supports shaderFloat64 AND the library was
+    // compiled with BURSTMERGE_GPU_FP64=ON. When false, dense alignment uses
+    // the float-accumulation shader (less consistent in extreme bracketing).
+    bool HasFloat64() const;
 
     // ---- Buffer management ----
     // Allocate a device-local storage buffer sized for `float_count` floats.

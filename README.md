@@ -281,6 +281,7 @@ Notes:
 - `BUILD_TESTS` defaults to `ON` in the top-level `CMakeLists.txt`.
 - The build enables OpenMP with `find_package(OpenMP REQUIRED)`.
 - The codebase is written for C++17 and sets `CMAKE_CXX_STANDARD 17`.
+- `BURSTMERGE_GPU_FP64` (default `OFF`): compiles the fp64 dense-alignment shader (`dense_level_fp64.comp`) for improved alignment consistency in extreme exposure bracketing (EV spread > 6 stops). Requires a GPU with `shaderFloat64` support. At runtime, the backend auto-detects and falls back to the float shader if unsupported. Adds 2–20 % overhead to the dense alignment path (standard alignment unaffected). Enable with `-DBURSTMERGE_GPU_FP64=ON`.
 
 ### Build targets
 

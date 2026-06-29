@@ -38,22 +38,39 @@ add_library(burstmerge STATIC
 # ---- Vulkan compute shaders -> embedded SPIR-V header (configure time) ----
 # Compiles every src/compute/vulkan/shaders/*.comp with glslangValidator and
 # emits a single generated header included by vulkan_backend.cpp.
+#
+# BURSTMERGE_GPU_FP64 (default OFF): when ON, the fp64 variant
+# dense_level_fp64.comp is compiled and embedded, improving dense-tile
+# alignment consistency for extreme bracketing. Requires a GPU with
+# shaderFloat64 support (all NVIDIA/AMD desktop GPUs). At runtime, the backend
+# checks HasFloat64() and falls back to the float shader if unsupported.
+option(BURSTMERGE_GPU_FP64 "Compile GPU fp64 dense-alignment shader for improved bracketing alignment consistency" OFF)
 set(BURSTMERGE_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/compute/vulkan/shaders")
 set(BURSTMERGE_GLSLANG "${PROJECT_SOURCE_DIR}/3rdparty/glslang/glslangValidator.exe")
 set(BURSTMERGE_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${BURSTMERGE_GENERATED_DIR}")
 set(BURSTMERGE_SPIRV_INL "${BURSTMERGE_GENERATED_DIR}/spirv_embedded.inl")
+set(_embed_args
+    -Validator "${BURSTMERGE_GLSLANG}"
+    -ShaderDir "${BURSTMERGE_SHADER_DIR}"
+    -OutFile "${BURSTMERGE_SPIRV_INL}"
+)
+if(BURSTMERGE_GPU_FP64)
+    list(APPEND _embed_args -IncludeFp64)
+endif()
 execute_process(
     COMMAND powershell -NoProfile -ExecutionPolicy Bypass
-            -File "${PROJECT_SOURCE_DIR}/cmake/embed_shaders.ps1"
-            -Validator "${BURSTMERGE_GLSLANG}"
-            -ShaderDir "${BURSTMERGE_SHADER_DIR}"
-            -OutFile "${BURSTMERGE_SPIRV_INL}"
+            -File "${PROJECT_SOURCE_DIR}/cmake/embed_shaders.ps1" ${_embed_args}
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     RESULT_VARIABLE _spv_result
 )
 if(NOT _spv_result EQUAL 0)
     message(WARNING "Shader embedding failed (code ${_spv_result}); Vulkan backend will not compile.")
+endif()
+if(BURSTMERGE_GPU_FP64)
+    message(STATUS "GPU fp64 dense alignment: enabled (36 shaders)")
+else()
+    message(STATUS "GPU fp64 dense alignment: disabled (35 shaders, default)")
 endif()
 
 # ---- 条件编译解码器 ----
@@ -106,6 +123,10 @@ target_include_directories(burstmerge
 target_compile_definitions(burstmerge PRIVATE
     # Macro definitions are inherited from dng_sdk PUBLIC
 )
+
+if(BURSTMERGE_GPU_FP64)
+    target_compile_definitions(burstmerge PRIVATE BURSTMERGE_HAVE_GPU_FP64)
+endif()
 
 target_link_libraries(burstmerge
     PUBLIC  dng_sdk

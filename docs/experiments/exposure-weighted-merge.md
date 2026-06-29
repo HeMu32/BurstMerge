@@ -147,6 +147,105 @@ Key properties:
 GPU shader: `expbkt_acc.comp` (binding 0=acc, 1=wsum, 2=cmp;
 `pc.f0`=`clip×scale`, `pc.f1`=`scale`). Per-frame accumulate + `normalize_div`.
 
+### 5. Dense-tile alignment fp64 precision (`BURSTMERGE_GPU_FP64`)
+
+**Problem:** In extreme bracketing (EV spread > 6 stops), GPU dense-tile
+alignment diverged catastrophically from CPU (ExBkt t=64: 100 % tiles wrong,
+max 706px off). Root cause: CPU `TileCost` (align_common.cpp) accumulates
+SAD/SSD using `double`; GPU `dense_level.comp` used `float`. The rounding
+difference (~0.1 %) is negligible on a well-shaped cost surface, but in
+extreme bracketing the SAD surface across candidate displacements is
+extremely flat (large uniform regions after EV normalization). A 0.1 %
+float error flips the argmin, causing tiles to lock onto wrong displacements.
+
+**Solution — opt-in fp64 compilation:**
+- `dense_level_fp64.comp`: identical to `dense_level.comp` except `tileCost`
+  uses `double` accumulation (the only fp64 usage in the entire GPU pipeline).
+  Pixel values are promoted to `double` before summation; everything else
+  (pyramid traversal, candidate search, output) is unchanged.
+- CMake option `BURSTMERGE_GPU_FP64` (default **OFF**): controls whether
+  `dense_level_fp64.comp` is compiled and embedded (36 shaders ON, 35 OFF).
+- Runtime: `VulkanBackend::HasFloat64()` checks `shaderFloat64` device
+  support. `DenseAlignGPU` selects `"dense_level_fp64"` or `"dense_level"`.
+- Non-fp64 GPUs or default builds use the float shader (graceful fallback).
+
+**Where fp64 is used (exactly one place):**
+`dense_level_fp64.comp::tileCost()` — the per-tile SAD/SSD cost summation
+accumulator. No other shader or code path uses `double`.
+
+**Why it improves alignment:** Double accumulation matches CPU `TileCost`
+exactly, producing identical argmin decisions per tile. The flat cost
+surface in extreme bracketing means float-vs-double rounding is the deciding
+factor for which candidate displacement wins.
+
+**Measured improvement:**
+
+| Sample / tile | float (default) | fp64 (`BURSTMERGE_GPU_FP64=ON`) |
+|---------------|-----------------|---------------------------------|
+| ExBkt t=32    | 27–74px, 0.9 % >3px | 7–19px, 0.1 % >3px          |
+| ExBkt t=64    | 294–706px, 100 %   | 5–12px, 0.1 % >3px          |
+| ExBkt t=128   | 125–477px, 100 %   | **0px, 0 %**                 |
+| Bkt1 t=32     | 37–444px, 16 %     | 12–54px, 0.6 % >3px         |
+| Bkt1 t=64     | 12–38px, 0.7 %     | **0px, 0 %**                |
+| Bkt1 t=128    | 4–13px, 0.5 %      | **0px, 0 %**                |
+
+**Performance cost:** Consumer NVIDIA fp64 throughput is 1/64 of fp32.
+Dense path: +2 % (tile=32) to +20 % (tile=128). Standard alignment path:
+0 % (entirely float, unaffected).
+
+**Behavior matrix:**
+
+| Build               | GPU `shaderFloat64` | Shader dispatched           | Quality (argmax under t=32)   |
+|---------------------|---------------------|-----------------------------|----------------------|
+| FP64 OFF (default)  | N/A                 | `dense_level` (strided M=16) | **46 px** (from 74) |
+| FP64 ON             | Yes                 | `dense_level_fp64`          | **19 px** (best)     |
+| FP64 ON             | No                  | `dense_level` (strided M=16) | **46 px** (fallback) |
+
+### 6. Strided fp32 accumulation (default dense_level.comp)
+
+The default float shader (`dense_level.comp`) uses **M independent float
+accumulators** with a pairwise merge tree to reduce sequential rounding error
+by ~M×. SSD mode additionally uses `fma()` (single-rounding multiply-add).
+This improves small-tile (t=32) dense alignment in extreme bracketing without
+any fp64 support.
+
+**Design:**
+- Outer x-loop steps by `kStrideM`; inner `for (j=0; j<kStrideM; ++j)` has a
+  constant trip count so the compiler unrolls it and keeps `acc[j]` in
+  registers (a naive sequential loop with dynamic indexing spills to local
+  memory and runs ~2× slower).
+- After the pixel loop, a pairwise merge tree reduces the M accumulators to
+  one in log₂(M) rounds.
+
+**M=16 was chosen after benchmarking M=8 / M=12 / M=16 on ExBkt (t=32, 5 frames):**
+
+| Variant   | max divergence | >3 px tiles | Notes                      |
+|-----------|----------------|-------------|----------------------------|
+| plain float | 74 px         | 0.55 %      | baseline (M=1 equivalent)  |
+| M=8       | 74 px           | 0.49 %      | max unchanged — insufficient |
+| M=12      | 74 px           | 0.27 %      | percentage improved, max not |
+| **M=16**  | **46 px**       | **0.18 %**  | only M that reduces max    |
+| fp64      | 19 px           | 0.04 %      | best (separate shader)     |
+
+**Performance overhead (alignment stage, 5 comparison frames):**
+
+| GPU                  | M=16 overhead | fp64 overhead |
+|----------------------|---------------|---------------|
+| RTX 3080             | +8–14 %       | +4–74 % (tile-dependent) |
+| RTX 5060 Ti          | +26–50 %      | +74–132 %     |
+
+fp64 cost scales worse on newer GPUs (5060 Ti fp64 throughput ≈ 1/128 vs
+3080 ≈ 1/64), making the strided fp32 approach increasingly valuable.
+Note: This is question-raising as that TechPowerup marks that 5060Ti did
+has 1:64 FP64 perf. ratio. 
+
+**Reverting:** Set `kStrideM = 1` in `dense_level.comp` (loop becomes
+sequential, merge tree is a no-op). Requires cmake reconfigure.
+
+**At t ≥ 64**, all variants (including plain float) produce identical tile
+fields (≤12 px from chained warp propagation, not accumulation error).
+The strided overhead at these tile sizes is harmless but provides no benefit.
+
 ## Tests
 
 `test_stage0.cpp` adds:

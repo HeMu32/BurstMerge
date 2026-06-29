@@ -13,7 +13,6 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
-#include <vector>
 
 namespace burstmerge
 {
@@ -492,6 +491,12 @@ void DenseAlignGPU(VulkanBackend& vk,
                    int pw, int ph, int tile_size, int pyr_n,
                    uint64_t out_tsx, uint64_t out_tsy)
 {
+    const char* dense_shader =
+#if defined(BURSTMERGE_HAVE_GPU_FP64)
+        vk.HasFloat64() ? "dense_level_fp64" : "dense_level";
+#else
+        "dense_level";
+#endif
     int half_tile = std::max(1, tile_size / 2);
     int ft_x = std::max(1, (pw + half_tile - 1) / half_tile - 1);
     int ft_y = std::max(1, (ph + half_tile - 1) / half_tile - 1);
@@ -520,11 +525,9 @@ void DenseAlignGPU(VulkanBackend& vk,
         ShaderPC pc{};
         pc.w = W; pc.h = H; pc.channels = 1;
         pc.i0 = tile_size; pc.i1 = half_tile; pc.i2 = tx_L; pc.i3 = ty_L;
-        pc.i4 = is_coarsest ? 0 : tx_L;  // cur (coarser) tiles ? recomputed by shader via ratio; pass coarsest-finer tx
+        pc.i4 = is_coarsest ? 0 : tx_L;
         pc.i5 = is_coarsest ? 0 : ty_L;
         pc.i6 = level_scale; pc.i7 = 1; pc.i8 = is_coarsest ? 1 : 0; pc.i9 = weight_ssd;
-        // For correct ratio mapping the shader needs the COARSER level's tile count.
-        // Store it in i4/i5 = (coarser tx, ty). Compute coarser tiles:
         if (!is_coarsest)
         {
             int cW = ref_pyr[level + 1].w, cH = ref_pyr[level + 1].h;
@@ -533,7 +536,7 @@ void DenseAlignGPU(VulkanBackend& vk,
         }
         Binding b[6] = {{0, ref_pyr[level].handle, 0}, {1, cmp_lvl, 0},
                         {2, csx, 0}, {3, csy, 0}, {4, out_sx, 0}, {5, out_sy, 0}};
-        vk.Dispatch("dense_level", pc, (tx_L + 7) / 8, (ty_L + 7) / 8, 1, b, 6);
+        vk.Dispatch(dense_shader, pc, (tx_L + 7) / 8, (ty_L + 7) / 8, 1, b, 6);
     }
     vk.DestroyBuffer(sc_sx[0]); vk.DestroyBuffer(sc_sx[1]);
     vk.DestroyBuffer(sc_sy[0]); vk.DestroyBuffer(sc_sy[1]);

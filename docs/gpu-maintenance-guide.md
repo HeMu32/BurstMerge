@@ -51,13 +51,15 @@ prepare 之后两条路径汇入 `GpuPipelineCore`，执行完全相同的 to_gr
 
 ### 2.1 全单精度 float
 
-**所有 shader 必须使用 `float`，不允许 `double`。** `shaderFloat64` 在设备创建时 **不启用**。
+**所有 shader 默认使用 `float`，不允许 `double` 以保证兼容性。** `shaderFloat64` 默认 **不启用**。
+
+例外: `BURSTMERGE_GPU_FP64=ON` 时编译 `dense_level_fp64.comp` (double 累加, `shaderFloat64` 按需启用), 仅供极端包围曝光 dense 对齐使用。默认 fp32 路径 `dense_level.comp` 使用 strided M=16 累加器 (pairwise merge) + FMA 减少 float 舍入误差, 仍是纯 float, 不违反此约束。
 
 CPU 端的 `double` 计算 (如 `robustness_norm`, `read_noise`) 在 C++ 中完成，结果以 `float` 通过 push constant 传入 shader。这不需要修改——只是不要在 GLSL 中引入 `double` 类型。
 
 ### 2.2 Push-constant 布局
 
-`ShaderPC` (common.glsl) = 14 int + 8 float = 88 字节。这是 Vulkan 保证的最小 push-constant 大小 (128B) 以内。
+`ShaderPC` (common.glsl) = 16 int + 8 float = 96 字节。这是 Vulkan 保证的最小 push-constant 大小 (128B) 以内。
 
 新增 shader 时，如果需要更多参数，优先复用现有的 `i0..i9` / `f0..f7` 槽位，并在 shader 注释中标注语义。注意同一槽位在不同 shader 中含义不同（例如 `i0` 在 `extract.comp` 中是 mode，在 `box_blur.comp` 中是 radius）。
 
