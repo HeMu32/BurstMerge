@@ -29,6 +29,34 @@ static void PngFlushData(png_structp png_ptr)
     std::fflush(fp);
 }
 
+namespace
+{
+struct FileGuard
+{
+    FILE* fp;
+    explicit FileGuard(FILE* f) : fp(f) {}
+    ~FileGuard()
+    {
+        if (fp) std::fclose(fp);
+    }
+    FileGuard(const FileGuard&) = delete;
+    FileGuard& operator=(const FileGuard&) = delete;
+};
+
+struct PngWriteGuard
+{
+    png_structp png;
+    png_infop info;
+    PngWriteGuard(png_structp p, png_infop i) : png(p), info(i) {}
+    ~PngWriteGuard()
+    {
+        if (png) png_destroy_write_struct(&png, info ? &info : nullptr);
+    }
+    PngWriteGuard(const PngWriteGuard&) = delete;
+    PngWriteGuard& operator=(const PngWriteGuard&) = delete;
+};
+} // namespace
+
 class PngWriter : public ImageWriter
 {
 public:
@@ -64,26 +92,24 @@ public:
         {
             throw std::runtime_error("PngWriter: cannot open " + path);
         }
+        FileGuard fp_guard(fp);
 
         png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
         if (!png)
         {
-            std::fclose(fp);
             throw std::runtime_error("PngWriter: png_create_write_struct failed");
         }
 
-        png_infop info = png_create_info_struct(png);
+        png_infop info = nullptr;
+        PngWriteGuard png_guard(png, info);
+        info = png_create_info_struct(png);
         if (!info)
         {
-            png_destroy_write_struct(&png, nullptr);
-            std::fclose(fp);
             throw std::runtime_error("PngWriter: png_create_info_struct failed");
         }
 
         if (setjmp(png_jmpbuf(png)))
         {
-            png_destroy_write_struct(&png, &info);
-            std::fclose(fp);
             throw std::runtime_error("PngWriter: write error");
         }
 
@@ -142,8 +168,6 @@ public:
         }
 
         png_write_end(png, nullptr);
-        png_destroy_write_struct(&png, &info);
-        std::fclose(fp);
     }
 };
 

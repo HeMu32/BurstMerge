@@ -30,6 +30,34 @@ static void JpegErrorExit(j_common_ptr cinfo)
     longjmp(myerr->setjmp_buffer, 1);
 }
 
+namespace
+{
+struct FileGuard
+{
+    FILE* fp;
+    explicit FileGuard(FILE* f) : fp(f) {}
+    ~FileGuard()
+    {
+        if (fp) std::fclose(fp);
+    }
+    FileGuard(const FileGuard&) = delete;
+    FileGuard& operator=(const FileGuard&) = delete;
+};
+
+struct JpegDecompressGuard
+{
+    jpeg_decompress_struct* cinfo = nullptr;
+    void arm(jpeg_decompress_struct* c) { cinfo = c; }
+    ~JpegDecompressGuard()
+    {
+        if (cinfo) jpeg_destroy_decompress(cinfo);
+    }
+    JpegDecompressGuard() = default;
+    JpegDecompressGuard(const JpegDecompressGuard&) = delete;
+    JpegDecompressGuard& operator=(const JpegDecompressGuard&) = delete;
+};
+} // namespace
+
 class JpegDecoder : public ImageDecoder
 {
 public:
@@ -50,20 +78,22 @@ public:
         {
             throw std::runtime_error("JpegDecoder: cannot open " + path);
         }
+        FileGuard fp_guard(fp);
 
         jpeg_decompress_struct cinfo;
         JpegErrorMgr jerr;
         cinfo.err = jpeg_std_error(&jerr.pub);
         jerr.pub.error_exit = JpegErrorExit;
 
+        JpegDecompressGuard cinfo_guard;
+
         if (setjmp(jerr.setjmp_buffer))
         {
-            jpeg_destroy_decompress(&cinfo);
-            std::fclose(fp);
             throw std::runtime_error("JpegDecoder: decode error in " + path);
         }
 
         jpeg_create_decompress(&cinfo);
+        cinfo_guard.arm(&cinfo);
         jpeg_stdio_src(&cinfo, fp);
         jpeg_read_header(&cinfo, TRUE);
 
@@ -79,8 +109,6 @@ public:
                 case JCS_YCbCr: cs_name = "YCbCr"; break;
                 default: break;
             }
-            std::fclose(fp);
-            jpeg_destroy_decompress(&cinfo);
             throw std::runtime_error(
                 std::string("JpegDecoder: unsupported color space ") + cs_name
                 + " (" + std::to_string(cinfo.num_components) + " components). "
@@ -121,8 +149,6 @@ public:
         }
 
         jpeg_finish_decompress(&cinfo);
-        jpeg_destroy_decompress(&cinfo);
-        std::fclose(fp);
 
         return result;
     }

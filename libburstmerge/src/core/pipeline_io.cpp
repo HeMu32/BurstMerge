@@ -144,7 +144,6 @@ std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_
            "Converting " + std::to_string(raw_paths.size()) + " RAW file(s) to DNG");
     if (!RunAdobeDngConverter(raw_paths, out_convert_dir, converted))
     {
-        out_convert_dir.clear();
         throw std::runtime_error("Adobe DNG Converter failed or timed out");
     }
     Report(progress, PipelineConstants::kProgressConvertEnd, "RAW to DNG conversion completed");

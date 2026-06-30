@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <array>
+#include <memory>
 #include "burstmerge/internal/core/image_buffer.h"
 
 namespace burstmerge
@@ -91,6 +92,7 @@ struct RawImage
 // The data pointer must remain valid for the duration of the call.
 RawImage ReadDngFromBuffer(const void* data, uint32_t size);
 
+struct DngReaderImpl;
 class DngReader
 {
 public:
@@ -105,9 +107,10 @@ public:
     RawImage Read();
 
 private:
-    void* impl_ = nullptr;
+    std::unique_ptr<DngReaderImpl> impl_;
 };
 
+struct DngWriterImpl;
 class DngWriter
 {
 public:
@@ -123,7 +126,7 @@ public:
     void Write(const char* out_path, const RawImage& image);
 
 private:
-    void* impl_ = nullptr;
+    std::unique_ptr<DngWriterImpl> impl_;
 };
 
 // DNG Converter (Windows only)

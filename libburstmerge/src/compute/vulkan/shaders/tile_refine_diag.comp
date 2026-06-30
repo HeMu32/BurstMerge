@@ -2,21 +2,59 @@
 #extension GL_GOOGLE_include_directive : enable
 #include "common.glsl"
 
-// tile_refine_diag: Standard alignment per-tile refinement WITH left/top
-// neighbour propagation, matching CPU RefineTileField. Dispatched once per
-// diagonal d = 0..(tiles_x+tiles_y-2); tiles on diagonal d depend only on
-// diagonal d-1 (already written in place), so within a dispatch all tiles are
-// independent.
+// tile_refine_diag: Standard alignment per-tile refinement (GPU, 2-pass parallel).
 //
-// Each tile: seed = global; if tx>0 seed = (seed+left)/2; if ty>0 seed=(seed+top)/2
-//   (integer avg, like CPU). Then search ±local_radius around seed, weighted-avg
-//   with w = smin²/(score²+1e-8) (CPU-equivalent, numerically stable).
+// ──────────────────────────────────────────────────────────────────────────
+// OPTIMISATION HISTORY & CPU EQUIVALENCE STATUS
 //
-//   binding 0: ref gray (pc.w x pc.h), 1: cmp gray, 2: global_shift (int[2]),
-//   binding 3: tsx (int[tiles], in-place), 4: tsy (int[tiles], in-place)
-//   pc.i0=tile_size, i1=local_radius, i2=tiles_x, i3=tiles_y, i4=diagonal d, i5=cfa_period
-//   dispatch (1,1,1), local_size_x = 256 (one thread per tile on the diagonal)
-layout(local_size_x = 256) in;
+// This shader was rewritten from a serial diagonal-wavefront dispatch
+// (one (1,1,1) workgroup per diagonal, ~tiles_x+tiles_y dispatches) to a
+// two-pass parallel dispatch (each pass covers the full tile grid with
+// (tiles_x/8, tiles_y/8) workgroups). The old dispatch left the GPU at
+// ~1% SM utilisation (one workgroup at a time); the new dispatch engages all
+// SMs. Measured speedup: ~11.5× on RTX 3080 (2.44s → 0.22s per frame).
+//
+// The 2-pass model is NOT strictly equivalent to the CPU wavefront
+// (align_standard.cpp::RefineTileField). Three differences exist — see
+// docs/experiments/cpu-gpu-divergence.md §4.5 for the full analysis:
+//
+//   1. PROPAGATION CHAIN DEPTH (dominant semantic difference)
+//      CPU wavefront: tile (tx,ty) on diagonal d reads the ALREADY-PROPAGATED
+//        left/top neighbours from diagonal d-1, which themselves inherited
+//        from d-2, etc. The propagation chains across the entire tile field
+//        (up to tiles_x+tiles_y hops).
+//      GPU 2-pass: pass 1 reads left/top from pass-0 results, which were
+//        seeded from the GLOBAL shift only (no recursive propagation).
+//        Propagation is limited to exactly 1 hop.
+//      Practical impact: negligible for well-seeded tiles (global SAD
+//        already close); manifests as <=2 px shifts on tiles where the
+//        global seed was poor and long-range propagation would have helped.
+//
+//   2. COST ACCUMULATION PRECISION
+//      CPU TileCost: double accumulation (align_common.cpp:99).
+//      GPU tileSad:  float accumulation (below). For tile_size=96 (9216 px)
+//        the rounding difference is ~0.5 ULP × N — usually irrelevant to
+//        argmin but can flip near-tied tiles.
+//
+//   3. SMOOTH_TILE FIELD POST-PROCESSING
+//      CPU calls SmoothTileField(result, smooth_tile_field) after the
+//        wavefront (align_standard.cpp:125). GPU has no equivalent.
+//        Equivalent when smooth_tile_field=false (the CLI default).
+//
+// Measured divergence (GPU 2-pass vs CPU wavefront, 16-bit output):
+//   Bkt1 (bracketed): MAD = 1.85 (0.04%)
+//   Seq1 (constant exposure): MAD = 0.86 (0.016%)
+//
+// ──────────────────────────────────────────────────────────────────────────
+//
+//   Pass 0 (pc.i4 == 0): every tile searches from the global shift.
+//   Pass 1 (pc.i4 == 1): every tile searches from the average of its
+//                         left/top neighbours (written by pass 0).
+//
+// binding 0: ref gray (pc.w x pc.h), 1: cmp gray, 2: global_shift (int[2]),
+// binding 3: tsx (int[tiles], in-place), 4: tsy
+// pc.i0=tile_size, i1=local_radius, i2=tiles_x, i3=tiles_y, i4=pass, i5=cfa_period
+layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) readonly buffer Ref { float refp[]; };
 layout(binding = 1) readonly buffer Cmp { float cmpp[]; };
 layout(binding = 2) readonly buffer GShift { int gs[]; };
@@ -50,16 +88,13 @@ float tileSad(int x0, int y0, int x1, int y1, int dx, int dy, int W, int H)
 
 void main()
 {
-    int t = int(gl_LocalInvocationID.x);
-    int d = pc.i4;
+    int tx = int(gl_GlobalInvocationID.x);
+    int ty = int(gl_GlobalInvocationID.y);
     int tiles_x = pc.i2;
     int tiles_y = pc.i3;
-    int tx_start = max(0, d - (tiles_y - 1));
-    int tx_end = min(tiles_x - 1, d);
-    int tx = tx_start + t;
-    if (tx > tx_end) return;
-    int ty = d - tx;
+    if (tx >= tiles_x || ty >= tiles_y) return;
 
+    int pass = pc.i4;
     int lr = pc.i1;
     int period = pc.i5;
     int ts = pc.i0;
@@ -71,27 +106,31 @@ void main()
     int x1 = min(W, x0 + ts);
     int y1 = min(H, y0 + ts);
 
-    // seed = global, then average with left/top neighbours (integer avg, CPU match)
+    // seed = global, then average with left/top neighbours (integer avg, CPU match).
+    // Pass 1 only; pass 0 uses the raw global shift.
     int seed_x = gs[0];
     int seed_y = gs[1];
-    if (tx > 0)
+    if (pass != 0)
     {
-        int li = ty * tiles_x + (tx - 1);
-        seed_x = (seed_x + snapPeriod(tsx[li], period)) / 2;
-        seed_y = (seed_y + snapPeriod(tsy[li], period)) / 2;
-    }
-    if (ty > 0)
-    {
-        int ti = (ty - 1) * tiles_x + tx;
-        seed_x = (seed_x + snapPeriod(tsx[ti], period)) / 2;
-        seed_y = (seed_y + snapPeriod(tsy[ti], period)) / 2;
+        if (tx > 0)
+        {
+            int li = ty * tiles_x + (tx - 1);
+            seed_x = (seed_x + snapPeriod(tsx[li], period)) / 2;
+            seed_y = (seed_y + snapPeriod(tsy[li], period)) / 2;
+        }
+        if (ty > 0)
+        {
+            int ti = (ty - 1) * tiles_x + tx;
+            seed_x = (seed_x + snapPeriod(tsx[ti], period)) / 2;
+            seed_y = (seed_y + snapPeriod(tsy[ti], period)) / 2;
+        }
     }
 
-    int side = 2 * lr + 1;
     // Argmin (float-stable). The CPU weighted-avg (1/score²) is dominated by the
     // min-score candidate wherever the minimum is well-defined; using argmin
     // avoids float-vs-double summation drift that flips the rounded result on
     // near-tied tiles. Matches CPU's effective result within <=2px.
+    int side = 2 * lr + 1;
     float best_score = 3.402823466e38;
     int best_dx = seed_x, best_dy = seed_y;
     for (int oy = 0; oy < side; ++oy)
