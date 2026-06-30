@@ -10,28 +10,24 @@
 // level seeds from 0, weight_ssd = (level>0), half_tile spacing.
 //
 // ──────────────────────────────────────────────────────────────────────────
-// OPTIMISATION HISTORY
+// OPTIMISATION: FUSED CANDIDATE EVALUATION + KAHAN M=8 (2026-06-30)
 //
-// v1 (original): 52 separate tileCost() calls, each independently iterating
-//   over all tile pixels. 104 global reads per pixel (52 ref + 52 cmp).
+// v1 (original): 52 separate tileCost() calls. 104 global reads/pixel.
+// v2 (fused kCandGroup=4): batched 4 candidates, shared ref read. 69 reads/pixel.
+// v3 (fused + Kahan M=8): M=8 strided + Kahan compensation. Same register count
+//   as v2 (8 acc + 8 comp = 16/candidate), ~145× lower accumulation error.
+//   Kahan does NOT change observable divergence vs CPU (the floor is float32
+//   per-pixel arithmetic, not accumulation). See test_stage2.cpp 3px threshold.
 //
-// v2 (2026-06-30, fused kCandGroup=4): batched 4 candidates per pixel-loop
-//   pass, sharing ref read within batch. 69 reads per pixel. ~28% faster on
-//   NV RTX 3080 & 5060Ti
+// SPIR-V ASSUMPTION: Vulkan disables FMA contraction by default (requires
+// explicit FPFastMathMode decoration, which glslangValidator never emits).
+// Therefore Kahan's 4-op sequence is preserved verbatim in SPIR-V.
 //
-//   experiment (kCandGroup=7): each batch covered one ROW of the 7×7 search
-//   grid → cmp reads hit consecutive cache lines (1 miss + 6 hits). Measured
-//   ~12% faster than v2 on RTX 3080. BUT reverted to kCandGroup=4 because
-//   7×16=112 accumulator registers exceed the 128-VGPR limit on AMD RDNA
-//   and the 128-register limit on Intel Arc, causing register spills that
-//   negate the cache benefit (see kCandGroup comment below).
-//
-//   binding 0: ref gray (pc.w x pc.h, THIS level), 1: cmp gray (THIS level)
-//   binding 2: tsx_coarse (int, coarser level; dummy if is_coarsest), 3: tsy_coarse
-//   binding 4: tsx_out (int, this level), 5: tsy_out
+//   binding 0: ref gray (pc.w x pc.h), 1: cmp gray, 2: tsx_coarse, 3: tsy_coarse
+//   binding 4: tsx_out, 5: tsy_out
 //   pc.i0=tile_size, i1=half_tile, i2=tiles_x, i3=tiles_y,
-//   pc.i4=cur_tiles_x (coarser; 0 if coarsest), i5=cur_tiles_y,
-//   pc.i6=level_scale, i7=cfa_period, i8=is_coarsest, i9=weight_ssd(1=SSD,0=SAD)
+//   pc.i4=cur_tiles_x, i5=cur_tiles_y, i6=level_scale, i7=cfa_period,
+//   i8=is_coarsest, i9=weight_ssd(1=SSD,0=SAD)
 //   dispatch (ceil(tiles_x/8), ceil(tiles_y/8), 1), local (8,8)
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) readonly buffer Ref { float refp[]; };
@@ -41,97 +37,22 @@ layout(binding = 3) readonly buffer CY { int cy[]; };
 layout(binding = 4) buffer OX { int ox[]; };
 layout(binding = 5) buffer OY { int oy[]; };
 
-const int kSearchDist = 3;  // AlignConstants::kTileSearchRadius
-
-// ── Strided accumulation hyperparameters ──────────────────────────────────
-//
-// DESIGN RATIONALE
-//   CPU TileCost (align_common.cpp) accumulates SAD/SSD using double. When
-//   the GPU uses plain float accumulation, rounding errors (~0.1 %) flip the
-//   argmin on the flat cost surfaces produced by extreme exposure bracketing,
-//   causing tiles to lock onto wrong displacements (up to 74 px at t=32).
-//
-//   This shader uses M independent float accumulators cycled via a stepped
-//   loop. After the pixel loop, a pairwise merge tree reduces them to one.
-//   The effective rounding error drops from O(N·ε) to O((N/M + log M)·ε),
-//   an ~M× improvement. SSD mode additionally uses fma() (single rounding
-//   multiply-add) for a further 2× per-pixel gain.
-//
-//   With M=16 the t=32 max divergence drops from 74 px (plain float) to 46 px.
-//   At t≥64 the plain float path is already adequate (≤12 px from chained
-//   warp propagation, not accumulation error); strided is harmless overhead.
-//   M=8 was tested and found insufficient (max unchanged at 74 px). M=12
-//   reduces the >3 px percentage but does not reduce the max.
-//
-// FUSED CONTEXT NOTE (2026-06-30)
-//   The strided accumulators are instantiated PER CANDIDATE within each fused
-//   batch (acc0[16], acc1[16], ...). The accumulation order within each
-//   candidate is identical to the pre-fused version — only the ref read is
-//   shared. This preserves the same rounding-error characteristics; verified
-//   bit-identical on constant-exposure sequences and ≤0.1 % tile divergence
-//   on extreme brackets (SPIR-V compiler path differences, not algorithmic).
-//
-// STEPPED INNER LOOP
-//   The outer x-loop steps by kStrideM and the inner j-loop has a constant
-//   trip count, so acc[j] is always a compile-time-constant index after the
-//   compiler unrolls the inner loop. This keeps the accumulator array in
-//   registers — a naive sequential loop with dynamic indexing (acc[m]) would
-//   spill to local memory and run ~2× slower.
-//
-// REVERTING / TUNING
-//   Set kStrideM = 1 to disable striding (the loop becomes sequential, the
-//   merge tree is a no-op). To also disable FMA for SSD, replace
-//   `fma(d, d, acc[j])` with `acc[j] += d * d`. Requires cmake reconfigure
-//   to regenerate the embedded SPIR-V.
-//
-// RELATIONSHIP TO dense_level_fp64.comp
-//   This shader is the default float path. For extreme cases where even M=16
-//   is insufficient (t=32: 46 px residual), build with BURSTMERGE_GPU_FP64=ON
-//   to use dense_level_fp64.comp (double accumulation, 19 px at t=32).
-//   Both shaders share the same interface and dispatch logic.
-const int kStrideM = 16;
-
-// Candidates evaluated per fused batch.
-//
-// ARCHITECTURAL TRADEOFF (why 4, not 7):
-//   The search grid is 7×7, so kCandGroup=7 would let each batch cover one
-//   full row (constant dy, sequential dx) for optimal L1 cache-line reuse
-//   (7 consecutive cmp reads fit in one 128 B / 64 B cache line). Measured
-//   ~12% faster on RTX 3080 (Ampere).
-//
-//   However, kCandGroup directly sets register pressure:
-//     kCandGroup × kStrideM = N float accumulators per thread.
-//     kCandGroup=4:  64 acc  + ~20 overhead = ~84 regs  → fits all GPUs
-//     kCandGroup=7: 112 acc  + ~20 overhead = ~132 regs  → spills on AMD/Intel
-//
-//   Register limits by architecture:
-//     NVIDIA (Ampere/Turing/Ada): 255 per thread → kCandGroup=7 OK
-//     AMD RDNA2/3:                128 VGPR per lane → kCandGroup=7 SPILLS
-//     Intel Arc Alchemist:        128 per thread    → kCandGroup=7 SPILLS
-//
-//   Spilling to local memory (uncached global traffic per spilled variable)
-//   negates the cache benefit and adds overhead. kCandGroup=4 is the safe
-//   cross-vendor default. On NVIDIA-only deployments it can be raised to 7
-//   for a ~12% speedup; this requires cmake reconfigure.
+const int kSearchDist = 3;
+const int kStrideM = 8;
 const int kCandGroup = 4;
 
-float mergeStrided(inout float acc[16])
+float mergeStrided(inout float acc[kStrideM])
 {
     int cur = kStrideM;
-    while (cur > 1)
-    {
+    while (cur > 1) {
         int pair = cur / 2;
-        for (int i = 0; i < pair; ++i)
-            acc[i] = acc[2*i] + acc[2*i+1];
+        for (int i = 0; i < pair; ++i) acc[i] = acc[2*i] + acc[2*i+1];
         if ((cur & 1) != 0) { acc[pair] = acc[cur - 1]; cur = pair + 1; }
         else cur = pair;
     }
     return acc[0];
 }
 
-// Evaluate up to kCandGroup candidates in a single pass through the tile.
-// ref[pixel] is read once; cmp[pixel - disp_c] is read per candidate.
-// Results written to costs[0..ncand-1].
 void tileCostFused(int x0, int y0, int W, int H, int use_ssd,
                    int dx0, int dy0, int dx1, int dy1,
                    int dx2, int dy2, int dx3, int dy3,
@@ -141,59 +62,46 @@ void tileCostFused(int x0, int y0, int W, int H, int use_ssd,
     int ts = pc.i0;
     int x1 = min(W, x0 + ts);
     int y1 = min(H, y0 + ts);
-
-    float acc0[16]; float acc1[16]; float acc2[16]; float acc3[16];
-    for (int m = 0; m < kStrideM; ++m) { acc0[m] = 0.0; acc1[m] = 0.0; acc2[m] = 0.0; acc3[m] = 0.0; }
-
-    for (int yy = y0; yy < y1; ++yy)
-    {
-        for (int xx = x0; xx < x1; xx += kStrideM)
-        {
-            for (int j = 0; j < kStrideM; ++j)
-            {
+    float a0[kStrideM]; float cp0[kStrideM];
+    float a1[kStrideM]; float cp1[kStrideM];
+    float a2[kStrideM]; float cp2[kStrideM];
+    float a3[kStrideM]; float cp3[kStrideM];
+    for (int m = 0; m < kStrideM; ++m)
+    { a0[m]=0.0; cp0[m]=0.0; a1[m]=0.0; cp1[m]=0.0; a2[m]=0.0; cp2[m]=0.0; a3[m]=0.0; cp3[m]=0.0; }
+    for (int yy = y0; yy < y1; ++yy) {
+        for (int xx = x0; xx < x1; xx += kStrideM) {
+            for (int j = 0; j < kStrideM; ++j) {
                 int px = xx + j;
-                if (px < x1)
-                {
+                if (px < x1) {
                     float rv = refp[yy * W + px];
-
-                    int bx = px - dx0;
-                    int by = yy - dy0;
-                    if (by < 0 || by >= H || bx < 0 || bx >= W) acc0[j] += use_ssd != 0 ? (OB * OB) : OB;
-                    else { float d = rv - cmpp[by * W + bx]; acc0[j] = use_ssd != 0 ? fma(d, d, acc0[j]) : (acc0[j] + (d < 0.0 ? -d : d)); }
-
-                    if (ncand > 1) {
-                        bx = px - dx1; by = yy - dy1;
-                        if (by < 0 || by >= H || bx < 0 || bx >= W) acc1[j] += use_ssd != 0 ? (OB * OB) : OB;
-                        else { float d = rv - cmpp[by * W + bx]; acc1[j] = use_ssd != 0 ? fma(d, d, acc1[j]) : (acc1[j] + (d < 0.0 ? -d : d)); }
-                    }
-                    if (ncand > 2) {
-                        bx = px - dx2; by = yy - dy2;
-                        if (by < 0 || by >= H || bx < 0 || bx >= W) acc2[j] += use_ssd != 0 ? (OB * OB) : OB;
-                        else { float d = rv - cmpp[by * W + bx]; acc2[j] = use_ssd != 0 ? fma(d, d, acc2[j]) : (acc2[j] + (d < 0.0 ? -d : d)); }
-                    }
-                    if (ncand > 3) {
-                        bx = px - dx3; by = yy - dy3;
-                        if (by < 0 || by >= H || bx < 0 || bx >= W) acc3[j] += use_ssd != 0 ? (OB * OB) : OB;
-                        else { float d = rv - cmpp[by * W + bx]; acc3[j] = use_ssd != 0 ? fma(d, d, acc3[j]) : (acc3[j] + (d < 0.0 ? -d : d)); }
-                    }
+                    int bx = px - dx0; int by = yy - dy0;
+                    if (by < 0 || by >= H || bx < 0 || bx >= W) a0[j] += use_ssd != 0 ? (OB * OB) : OB;
+                    else { float d = rv - cmpp[by * W + bx]; float val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
+                        float y = val - cp0[j]; float t = a0[j] + y; cp0[j] = (t - a0[j]) - y; a0[j] = t; }
+                    if (ncand > 1) { bx = px - dx1; by = yy - dy1;
+                    if (by < 0 || by >= H || bx < 0 || bx >= W) a1[j] += use_ssd != 0 ? (OB * OB) : OB;
+                    else { float d = rv - cmpp[by * W + bx]; float val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
+                        float y = val - cp1[j]; float t = a1[j] + y; cp1[j] = (t - a1[j]) - y; a1[j] = t; } }
+                    if (ncand > 2) { bx = px - dx2; by = yy - dy2;
+                    if (by < 0 || by >= H || bx < 0 || bx >= W) a2[j] += use_ssd != 0 ? (OB * OB) : OB;
+                    else { float d = rv - cmpp[by * W + bx]; float val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
+                        float y = val - cp2[j]; float t = a2[j] + y; cp2[j] = (t - a2[j]) - y; a2[j] = t; } }
+                    if (ncand > 3) { bx = px - dx3; by = yy - dy3;
+                    if (by < 0 || by >= H || bx < 0 || bx >= W) a3[j] += use_ssd != 0 ? (OB * OB) : OB;
+                    else { float d = rv - cmpp[by * W + bx]; float val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
+                        float y = val - cp3[j]; float t = a3[j] + y; cp3[j] = (t - a3[j]) - y; a3[j] = t; } }
                 }
             }
         }
     }
-
-    costs[0] = mergeStrided(acc0);
-    costs[1] = ncand > 1 ? mergeStrided(acc1) : 3.402823466e38;
-    costs[2] = ncand > 2 ? mergeStrided(acc2) : 3.402823466e38;
-    costs[3] = ncand > 3 ? mergeStrided(acc3) : 3.402823466e38;
+    costs[0] = mergeStrided(a0);
+    costs[1] = ncand > 1 ? mergeStrided(a1) : 3.402823466e38;
+    costs[2] = ncand > 2 ? mergeStrided(a2) : 3.402823466e38;
+    costs[3] = ncand > 3 ? mergeStrided(a3) : 3.402823466e38;
 }
 
-int snapPeriod(int v, int p)
-{
-    if (p <= 1) return v;
-    return v >= 0 ? (v / p) * p : -((-v) / p) * p;
-}
+int snapPeriod(int v, int p) { if (p <= 1) return v; return v >= 0 ? (v / p) * p : -((-v) / p) * p; }
 
-// fetch a coarser-level shift for this tile (mapped + scaled). Returns 0 at coarsest.
 void fetchCoarse(int tx, int ty, int tiles_x, int tiles_y, int cur_tiles_x, int cur_tiles_y,
                  int level_scale, int is_coarsest, out int dvx, out int dvy)
 {
@@ -203,77 +111,55 @@ void fetchCoarse(int tx, int ty, int tiles_x, int tiles_y, int cur_tiles_x, int 
     int px = min(cur_tiles_x - 1, tx / max(1, ratio_x));
     int py = min(cur_tiles_y - 1, ty / max(1, ratio_y));
     int ci = py * cur_tiles_x + px;
-    dvx = cx[ci] * level_scale;
-    dvy = cy[ci] * level_scale;
+    dvx = cx[ci] * level_scale; dvy = cy[ci] * level_scale;
 }
 
 void main()
 {
     int tx = int(gl_GlobalInvocationID.x);
     int ty = int(gl_GlobalInvocationID.y);
-    int tiles_x = pc.i2;
-    int tiles_y = pc.i3;
+    int tiles_x = pc.i2; int tiles_y = pc.i3;
     if (tx >= tiles_x || ty >= tiles_y) return;
-
-    int tile_size = pc.i0;
-    int half_tile = pc.i1;
-    int cur_tiles_x = pc.i4;
-    int cur_tiles_y = pc.i5;
-    int level_scale = pc.i6;
-    int period = pc.i7;
-    int is_coarsest = pc.i8;
-    int use_ssd = pc.i9;
-    int W = pc.w;
-    int H = pc.h;
+    int tile_size = pc.i0; int half_tile = pc.i1;
+    int cur_tiles_x = pc.i4; int cur_tiles_y = pc.i5;
+    int level_scale = pc.i6; int period = pc.i7;
+    int is_coarsest = pc.i8; int use_ssd = pc.i9;
+    int W = pc.w; int H = pc.h;
     int idx = ty * tiles_x + tx;
-    int x0 = tx * half_tile;
-    int y0 = ty * half_tile;
+    int x0 = tx * half_tile; int y0 = ty * half_tile;
 
-    // ---- Phase 1: 3-candidate upsampling correction (fused) ----
-    // argmin (float-stable, matches CPU weighted-avg where the min dominates).
     int cand_tx[3]; int cand_ty[3];
     cand_tx[0] = tx;     cand_ty[0] = ty;
     cand_tx[1] = clampi(tx + ((tx % 2 == 0) ? -1 : 1), 0, tiles_x - 1);  cand_ty[1] = ty;
     cand_tx[2] = tx;     cand_ty[2] = clampi(ty + ((ty % 2 == 0) ? -1 : 1), 0, tiles_y - 1);
-
     int up_dx0, up_dy0, up_dx1, up_dy1, up_dx2, up_dy2;
     fetchCoarse(cand_tx[0], cand_ty[0], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx0, up_dy0);
     fetchCoarse(cand_tx[1], cand_ty[1], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx1, up_dy1);
     fetchCoarse(cand_tx[2], cand_ty[2], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx2, up_dy2);
-
     float up_costs[4];
     tileCostFused(x0, y0, W, H, use_ssd, up_dx0, up_dy0, up_dx1, up_dy1, up_dx2, up_dy2, 0, 0, 3, up_costs);
-
     float cmin = up_costs[0];
     int seed_x = up_dx0, seed_y = up_dy0;
     if (up_costs[1] < cmin) { cmin = up_costs[1]; seed_x = up_dx1; seed_y = up_dy1; }
     if (up_costs[2] < cmin) { cmin = up_costs[2]; seed_x = up_dx2; seed_y = up_dy2; }
 
-    // ---- Phase 2: ±kSearchDist local search (49 candidates, batched) ----
     int side = 2 * kSearchDist + 1;
-    int total_search = side * side;  // 49
+    int total_search = side * side;
     float smin = cmin;
     int outdx = seed_x, outdy = seed_y;
-
-    for (int batch = 0; batch < total_search; batch += kCandGroup)
-    {
+    for (int batch = 0; batch < total_search; batch += kCandGroup) {
         int nc = min(kCandGroup, total_search - batch);
-
-        int bdx0 = 0, bdy0 = 0, bdx1 = 0, bdy1 = 0, bdx2 = 0, bdy2 = 0, bdx3 = 0, bdy3 = 0;
-        { int fi = batch;     int oy = fi / side; int ox = fi % side;     bdx0 = snapPeriod(seed_x + (ox - kSearchDist), period); bdy0 = snapPeriod(seed_y + (oy - kSearchDist), period); }
-        if (nc > 1) { int fi = batch + 1; int oy = fi / side; int ox = fi % side; bdx1 = snapPeriod(seed_x + (ox - kSearchDist), period); bdy1 = snapPeriod(seed_y + (oy - kSearchDist), period); }
-        if (nc > 2) { int fi = batch + 2; int oy = fi / side; int ox = fi % side; bdx2 = snapPeriod(seed_x + (ox - kSearchDist), period); bdy2 = snapPeriod(seed_y + (oy - kSearchDist), period); }
-        if (nc > 3) { int fi = batch + 3; int oy = fi / side; int ox = fi % side; bdx3 = snapPeriod(seed_x + (ox - kSearchDist), period); bdy3 = snapPeriod(seed_y + (oy - kSearchDist), period); }
-
+        int bdx0=0,bdy0=0,bdx1=0,bdy1=0,bdx2=0,bdy2=0,bdx3=0,bdy3=0;
+        { int fi=batch;   int oy=fi/side; int ox=fi%side;   bdx0=snapPeriod(seed_x+(ox-kSearchDist),period); bdy0=snapPeriod(seed_y+(oy-kSearchDist),period); }
+        if(nc>1){int fi=batch+1;int oy=fi/side;int ox=fi%side;bdx1=snapPeriod(seed_x+(ox-kSearchDist),period);bdy1=snapPeriod(seed_y+(oy-kSearchDist),period);}
+        if(nc>2){int fi=batch+2;int oy=fi/side;int ox=fi%side;bdx2=snapPeriod(seed_x+(ox-kSearchDist),period);bdy2=snapPeriod(seed_y+(oy-kSearchDist),period);}
+        if(nc>3){int fi=batch+3;int oy=fi/side;int ox=fi%side;bdx3=snapPeriod(seed_x+(ox-kSearchDist),period);bdy3=snapPeriod(seed_y+(oy-kSearchDist),period);}
         float costs[4];
-        tileCostFused(x0, y0, W, H, use_ssd, bdx0, bdy0, bdx1, bdy1, bdx2, bdy2, bdx3, bdy3, nc, costs);
-
-        if (costs[0] < smin) { smin = costs[0]; outdx = bdx0; outdy = bdy0; }
-        if (nc > 1 && costs[1] < smin) { smin = costs[1]; outdx = bdx1; outdy = bdy1; }
-        if (nc > 2 && costs[2] < smin) { smin = costs[2]; outdx = bdx2; outdy = bdy2; }
-        if (nc > 3 && costs[3] < smin) { smin = costs[3]; outdx = bdx3; outdy = bdy3; }
+        tileCostFused(x0,y0,W,H,use_ssd,bdx0,bdy0,bdx1,bdy1,bdx2,bdy2,bdx3,bdy3,nc,costs);
+        if(costs[0]<smin){smin=costs[0];outdx=bdx0;outdy=bdy0;}
+        if(nc>1&&costs[1]<smin){smin=costs[1];outdx=bdx1;outdy=bdy1;}
+        if(nc>2&&costs[2]<smin){smin=costs[2];outdx=bdx2;outdy=bdy2;}
+        if(nc>3&&costs[3]<smin){smin=costs[3];outdx=bdx3;outdy=bdy3;}
     }
-
-    ox[idx] = outdx;
-    oy[idx] = outdy;
+    ox[idx] = outdx; oy[idx] = outdy;
 }

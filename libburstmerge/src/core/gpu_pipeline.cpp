@@ -830,6 +830,26 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
             vk.Dispatch("warp_tilefield", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 4);
         }
         vk.FlushFrame();
+        if (std::getenv("BURSTMERGE_DUMP_TILES"))
+        {
+            int dx_count = dense ? align_tiles_x : tiles_x;
+            int dy_count = dense ? align_tiles_y : tiles_y;
+            size_t tc = static_cast<size_t>(dx_count) * dy_count;
+            std::vector<int> hx(tc), hy(tc);
+            vk.DownloadFloats(tsx, reinterpret_cast<float*>(hx.data()), tc);
+            vk.DownloadFloats(tsy, reinterpret_cast<float*>(hy.data()), tc);
+            char dpath[256];
+            std::snprintf(dpath, sizeof(dpath), "%s\\tilefield_gpu_f%zu.txt",
+                          std::getenv("BURSTMERGE_DUMP_TILES"), child_idx);
+            std::FILE* df = std::fopen(dpath, "w");
+            if (df)
+            {
+                std::fprintf(df, "%d %d\n", dx_count, dy_count);
+                for (size_t ti = 0; ti < tc; ++ti)
+                    std::fprintf(df, "%d %d\n", hx[ti], hy[ti]);
+                std::fclose(df);
+            }
+        }
         for (auto& lvl : cmp_pyr) if (lvl.handle != gray[child_idx]) vk.DestroyBuffer(lvl.handle);
         // Comparison frame gray/plane consumed; warped buffer is the aligned
         // result. GPU is idle (just flushed), so DestroyBuffer is immediate.
