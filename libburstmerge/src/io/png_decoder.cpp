@@ -23,6 +23,34 @@ static void PngReadData(png_structp png_ptr, png_bytep data, png_size_t length)
     (void)n;
 }
 
+namespace
+{
+struct FileGuard
+{
+    FILE* fp;
+    explicit FileGuard(FILE* f) : fp(f) {}
+    ~FileGuard()
+    {
+        if (fp) std::fclose(fp);
+    }
+    FileGuard(const FileGuard&) = delete;
+    FileGuard& operator=(const FileGuard&) = delete;
+};
+
+struct PngReadGuard
+{
+    png_structp png;
+    png_infop info;
+    PngReadGuard(png_structp p, png_infop i) : png(p), info(i) {}
+    ~PngReadGuard()
+    {
+        if (png) png_destroy_read_struct(&png, info ? &info : nullptr, nullptr);
+    }
+    PngReadGuard(const PngReadGuard&) = delete;
+    PngReadGuard& operator=(const PngReadGuard&) = delete;
+};
+} // namespace
+
 class PngDecoder : public ImageDecoder
 {
 public:
@@ -43,34 +71,31 @@ public:
         {
             throw std::runtime_error("PngDecoder: cannot open " + path);
         }
+        FileGuard fp_guard(fp);
 
         uint8_t sig[8];
         std::fread(sig, 1, 8, fp);
         if (png_sig_cmp(sig, 0, 8))
         {
-            std::fclose(fp);
             throw std::runtime_error("PngDecoder: not a PNG file");
         }
 
         png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
         if (!png)
         {
-            std::fclose(fp);
             throw std::runtime_error("PngDecoder: png_create_read_struct failed");
         }
 
-        png_infop info = png_create_info_struct(png);
+        png_infop info = nullptr;
+        PngReadGuard png_guard(png, info);
+        info = png_create_info_struct(png);
         if (!info)
         {
-            png_destroy_read_struct(&png, nullptr, nullptr);
-            std::fclose(fp);
             throw std::runtime_error("PngDecoder: png_create_info_struct failed");
         }
 
         if (setjmp(png_jmpbuf(png)))
         {
-            png_destroy_read_struct(&png, &info, nullptr);
-            std::fclose(fp);
             throw std::runtime_error("PngDecoder: decode error");
         }
 
@@ -164,9 +189,6 @@ public:
                 }
             }
         }
-
-        png_destroy_read_struct(&png, &info, nullptr);
-        std::fclose(fp);
 
         return result;
     }

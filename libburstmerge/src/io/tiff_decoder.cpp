@@ -18,6 +18,23 @@ namespace io
 
 #ifdef BURSTMERGE_HAVE_TIFF
 
+namespace
+{
+struct TiffGuard
+{
+    TIFF* p;
+    explicit TiffGuard(TIFF* t) : p(t) {}
+    ~TiffGuard()
+    {
+        if (p) TIFFClose(p);
+    }
+    TiffGuard(const TiffGuard&) = delete;
+    TiffGuard& operator=(const TiffGuard&) = delete;
+    explicit operator bool() const { return p != nullptr; }
+    operator TIFF*() const { return p; }
+};
+} // namespace
+
 class TiffDecoder : public ImageDecoder
 {
 public:
@@ -33,7 +50,7 @@ public:
 
     DecodedImage Decode(const std::string& path) override
     {
-        TIFF* tif = TIFFOpen(path.c_str(), "r");
+        TiffGuard tif(TIFFOpen(path.c_str(), "r"));
         if (!tif)
         {
             throw std::runtime_error("TiffDecoder: cannot open " + path);
@@ -52,13 +69,11 @@ public:
 
         if (w == 0 || h == 0 || bps == 0)
         {
-            TIFFClose(tif);
             throw std::runtime_error("TiffDecoder: missing or invalid required tags (width/height/bps)");
         }
 
         if (photo == PHOTOMETRIC_SEPARATED) // CMYK
         {
-            TIFFClose(tif);
             throw std::runtime_error("TiffDecoder: CMYK TIFF not supported (only grayscale and RGB)");
         }
 
@@ -68,7 +83,6 @@ public:
 
         if (!is_float && bps != 8 && bps != 16 && bps != 32)
         {
-            TIFFClose(tif);
             throw std::runtime_error("TiffDecoder: unsupported bit depth " + std::to_string(bps) + " (only 8, 16, 32 supported)");
         }
 
@@ -131,7 +145,6 @@ public:
             {
                 if (TIFFReadScanline(tif, scanline.data(), y) < 0)
                 {
-                    TIFFClose(tif);
                     throw std::runtime_error("TiffDecoder: read error");
                 }
                 for (uint32_t x = 0; x < w; ++x)
@@ -153,7 +166,6 @@ public:
                 {
                     if (TIFFReadScanline(tif, scanline.data(), y) < 0)
                     {
-                        TIFFClose(tif);
                         throw std::runtime_error("TiffDecoder: read error");
                     }
                     for (uint32_t x = 0; x < w; ++x)
@@ -173,7 +185,6 @@ public:
                 {
                     if (TIFFReadScanline(tif, scanline.data(), y) < 0)
                     {
-                        TIFFClose(tif);
                         throw std::runtime_error("TiffDecoder: read error");
                     }
                     for (uint32_t x = 0; x < w; ++x)
@@ -196,7 +207,6 @@ public:
                 {
                     if (TIFFReadScanline(tif, scanline.data(), y) < 0)
                     {
-                        TIFFClose(tif);
                         throw std::runtime_error("TiffDecoder: read error");
                     }
                     for (uint32_t x = 0; x < w; ++x)
@@ -216,7 +226,6 @@ public:
                 {
                     if (TIFFReadScanline(tif, scanline.data(), y) < 0)
                     {
-                        TIFFClose(tif);
                         throw std::runtime_error("TiffDecoder: read error");
                     }
                     for (uint32_t x = 0; x < w; ++x)
@@ -239,7 +248,6 @@ public:
                 {
                     if (TIFFReadScanline(tif, scanline.data(), y) < 0)
                     {
-                        TIFFClose(tif);
                         throw std::runtime_error("TiffDecoder: read error");
                     }
                     for (uint32_t x = 0; x < w; ++x)
@@ -259,7 +267,6 @@ public:
                 {
                     if (TIFFReadScanline(tif, scanline.data(), y) < 0)
                     {
-                        TIFFClose(tif);
                         throw std::runtime_error("TiffDecoder: read error");
                     }
                     for (uint32_t x = 0; x < w; ++x)
@@ -274,7 +281,6 @@ public:
             }
         }
 
-        TIFFClose(tif);
         return result;
     }
 };

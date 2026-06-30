@@ -138,6 +138,18 @@ const char* AlignmentModeTag(AlignmentMode mode)
     }
 }
 
+struct FileGuard
+{
+    std::FILE* fp;
+    explicit FileGuard(std::FILE* f) : fp(f) {}
+    ~FileGuard()
+    {
+        if (fp) std::fclose(fp);
+    }
+    FileGuard(const FileGuard&) = delete;
+    FileGuard& operator=(const FileGuard&) = delete;
+};
+
 void WriteGrayBmpRgba(const char* path,
                      const FloatImage& gray,
                      float white_level,
@@ -151,6 +163,7 @@ void WriteGrayBmpRgba(const char* path,
 
     std::FILE* f = std::fopen(path, "wb");
     if (!f) return;
+    FileGuard f_guard(f);
 
     const uint32_t width = gray.width;
     const uint32_t height = gray.height;
@@ -268,7 +281,6 @@ void WriteGrayBmpRgba(const char* path,
         }
         std::fwrite(row.data(), 1, row.size(), f);
     }
-    std::fclose(f);
 }
 
 void DumpWarpedGrayBmp(const FloatImage& gray_src,

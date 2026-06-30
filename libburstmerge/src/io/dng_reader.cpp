@@ -146,17 +146,14 @@ struct DngReaderImpl
 };
 
 DngReader::DngReader(const char* path)
-    : impl_(new DngReaderImpl(path))
+    : impl_(std::make_unique<DngReaderImpl>(path))
 {}
 
-DngReader::~DngReader()
-{
-    delete static_cast<DngReaderImpl*>(impl_);
-}
+DngReader::~DngReader() = default;
 
 RawImage DngReader::Read()
 {
-    auto* p = static_cast<DngReaderImpl*>(impl_);
+    auto* p = impl_.get();
 #ifdef _WIN32
     std::wstring wpath = io::Utf8ToWide(p->filepath);
     dng_file_stream stream(wpath.c_str(), false);

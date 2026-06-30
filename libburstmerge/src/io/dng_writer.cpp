@@ -28,15 +28,12 @@ struct DngWriterImpl
 
 // Takes ownership via reference: sets source pointer to nullptr
 DngWriter::DngWriter(io::DngNegativeHolder*& ref_negative)
-    : impl_(new DngWriterImpl(ref_negative))
+    : impl_(std::make_unique<DngWriterImpl>(ref_negative))
 {
     ref_negative = nullptr;
 }
 
-DngWriter::~DngWriter()
-{
-    delete static_cast<DngWriterImpl*>(impl_);
-}
+DngWriter::~DngWriter() = default;
 
 static bool GetDngType(const HostBuffer& buf, uint32_t& outPixelType, uint32_t& outPixelSize)
 {
@@ -66,7 +63,7 @@ static uint32_t GetPlanes(PixelFormat fmt)
 
 void DngWriter::Write(const char* out_path, const RawImage& image)
 {
-    auto* p = static_cast<DngWriterImpl*>(impl_);
+    auto* p = impl_.get();
     if (!p->holder || !io::GetNegative(p->holder))
         throw std::runtime_error("DngWriter: no valid DNG negative");
 
