@@ -1,5 +1,6 @@
 ﻿#include "burstmerge/api_c.h"
 #include "burstmerge/api.h"
+#include <memory>
 #include <string>
 #include <cstring>
 
@@ -20,7 +21,7 @@ extern "C"
 
 BM_Context BM_Create(int backend_type)
 {
-    auto* ctx = new CContext();
+    auto ctx = std::make_unique<CContext>();
     switch (backend_type)
     {
         case 0:
@@ -30,7 +31,7 @@ BM_Context BM_Create(int backend_type)
             ctx->bm = new burstmerge::BurstMerge(burstmerge::BackendType::Vulkan);
             break;
     }
-    return ctx;
+    return ctx.release();
 }
 
 void BM_Destroy(BM_Context ctx)

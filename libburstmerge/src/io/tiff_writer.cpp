@@ -18,6 +18,23 @@ namespace io
 
 #ifdef BURSTMERGE_HAVE_TIFF
 
+namespace
+{
+struct TiffGuard
+{
+    TIFF* p;
+    explicit TiffGuard(TIFF* t) : p(t) {}
+    ~TiffGuard()
+    {
+        if (p) TIFFClose(p);
+    }
+    TiffGuard(const TiffGuard&) = delete;
+    TiffGuard& operator=(const TiffGuard&) = delete;
+    explicit operator bool() const { return p != nullptr; }
+    operator TIFF*() const { return p; }
+};
+} // namespace
+
 static uint16_t DepthToSampleFormat(uint32_t bit_depth)
 {
     return (bit_depth == 32) ? SAMPLEFORMAT_IEEEFP : SAMPLEFORMAT_UINT;
@@ -41,7 +58,7 @@ public:
             throw std::runtime_error("TiffWriter: only 1, 3, or 4 channel images supported");
         }
 
-        TIFF* tif = TIFFOpen(path.c_str(), "w");
+        TiffGuard tif(TIFFOpen(path.c_str(), "w"));
         if (!tif)
         {
             throw std::runtime_error("TiffWriter: cannot open " + path);
@@ -83,7 +100,6 @@ public:
                 }
                 if (TIFFWriteScanline(tif, scanline.data(), y) < 0)
                 {
-                    TIFFClose(tif);
                     throw std::runtime_error("TiffWriter: write error");
                 }
             }
@@ -104,13 +120,10 @@ public:
                 }
                 if (TIFFWriteScanline(tif, scanline.data(), y) < 0)
                 {
-                    TIFFClose(tif);
                     throw std::runtime_error("TiffWriter: write error");
                 }
             }
         }
-
-        TIFFClose(tif);
     }
 };
 

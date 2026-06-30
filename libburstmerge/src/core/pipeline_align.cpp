@@ -138,6 +138,18 @@ const char* AlignmentModeTag(AlignmentMode mode)
     }
 }
 
+struct FileGuard
+{
+    std::FILE* fp;
+    explicit FileGuard(std::FILE* f) : fp(f) {}
+    ~FileGuard()
+    {
+        if (fp) std::fclose(fp);
+    }
+    FileGuard(const FileGuard&) = delete;
+    FileGuard& operator=(const FileGuard&) = delete;
+};
+
 void WriteGrayBmpRgba(const char* path,
                      const FloatImage& gray,
                      float white_level,
@@ -151,6 +163,7 @@ void WriteGrayBmpRgba(const char* path,
 
     std::FILE* f = std::fopen(path, "wb");
     if (!f) return;
+    FileGuard f_guard(f);
 
     const uint32_t width = gray.width;
     const uint32_t height = gray.height;
@@ -268,7 +281,6 @@ void WriteGrayBmpRgba(const char* path,
         }
         std::fwrite(row.data(), 1, row.size(), f);
     }
-    std::fclose(f);
 }
 
 void DumpWarpedGrayBmp(const FloatImage& gray_src,
@@ -386,6 +398,21 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         }
 
         DumpWarpedGrayBmp(gray_src, ar, float_images.size(), source_idx, AlignmentModeTag(params.mode), false, wl);
+
+        if (std::getenv("BURSTMERGE_DUMP_TILES"))
+        {
+            char dpath[256];
+            std::snprintf(dpath, sizeof(dpath), "%s\\tilefield_cpu_f%zu.txt",
+                          std::getenv("BURSTMERGE_DUMP_TILES"), source_idx);
+            std::FILE* df = std::fopen(dpath, "w");
+            if (df)
+            {
+                std::fprintf(df, "%u %u\n", ar.tiles_x, ar.tiles_y);
+                for (size_t ti = 0; ti < ar.tile_shift_x.size(); ++ti)
+                    std::fprintf(df, "%d %d\n", static_cast<int>(ar.tile_shift_x[ti]), static_cast<int>(ar.tile_shift_y[ti]));
+                std::fclose(df);
+            }
+        }
 
         Report(progress,
                PipelineConstants::kProgressWarpStart + PipelineConstants::kProgressWarpRange *

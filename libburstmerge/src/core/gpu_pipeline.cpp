@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -131,8 +132,10 @@ float EstimateNoiseFloorGPU(VulkanBackend& vk, uint64_t plane_h, int w, int h, i
     vk.FlushFrame();
     int gw = (w + int(step) - 1) / int(step);
     int gh = (h + int(step) - 1) / int(step);
+    int n = gw * gh;
+    int numWg = (n + 255) / 256;
     uint64_t scratch = vk.CreateBuffer(gw * gh);
-    uint64_t partials = vk.CreateBuffer(4096);
+    uint64_t partials = vk.CreateBuffer(numWg);
     uint64_t result = vk.CreateHostBuffer(1);
     vk.BeginFrame();
     {
@@ -140,7 +143,6 @@ float EstimateNoiseFloorGPU(VulkanBackend& vk, uint64_t plane_h, int w, int h, i
         Binding b[3] = {{0, plane_h, 0}, {1, blurred, 0}, {2, scratch, 0}};
         vk.Dispatch("extract", pc, gw, gh, 1, b, 3);
     }
-    int n = gw * gh; int numWg = (n + 255) / 256;
     {
         ShaderPC pc{}; pc.i0 = n; pc.i1 = 0; pc.i2 = 0;
         Binding b[2] = {{0, scratch, 0}, {1, partials, 0}};
@@ -162,13 +164,14 @@ float EstimateNoiseFloorGPU(VulkanBackend& vk, uint64_t plane_h, int w, int h, i
 }
 
 float EstimateLinearNoiseGPU(VulkanBackend& vk, uint64_t plane_h, uint64_t blurred_h,
-                             int w, int h, int ch, uint32_t step)
+                              int w, int h, int ch, uint32_t step)
 {
     int gw = (w + int(step) - 1) / int(step);
     int gh = (h + int(step) - 1) / int(step);
     int n = gw * gh;
+    int numWg = (n + 255) / 256;
     uint64_t scratch = vk.CreateBuffer(std::max(1, n));
-    uint64_t partials = vk.CreateBuffer(4096);
+    uint64_t partials = vk.CreateBuffer(numWg);
     uint64_t result = vk.CreateHostBuffer(1);
     vk.BeginFrame();
     {
@@ -176,7 +179,6 @@ float EstimateLinearNoiseGPU(VulkanBackend& vk, uint64_t plane_h, uint64_t blurr
         Binding b[3] = {{0, plane_h, 0}, {1, blurred_h, 0}, {2, scratch, 0}};
         vk.Dispatch("extract", pc, gw, gh, 1, b, 3);
     }
-    int numWg = (n + 255) / 256;
     {
         ShaderPC pc{}; pc.i0 = n; pc.i1 = 0; pc.i2 = 0;
         Binding b[2] = {{0, scratch, 0}, {1, partials, 0}};
@@ -196,8 +198,10 @@ float EstimateLinearNoiseGPU(VulkanBackend& vk, uint64_t plane_h, uint64_t blurr
 
 float ReduceMaxAbsGPU(VulkanBackend& vk, uint64_t img, int w, int h, int ch)
 {
+    int n = w * h;
+    int numWg = (n + 255) / 256;
     uint64_t scratch = vk.CreateBuffer(w * h);
-    uint64_t partials = vk.CreateBuffer(4096);
+    uint64_t partials = vk.CreateBuffer(numWg);
     uint64_t result = vk.CreateHostBuffer(1);
     vk.BeginFrame();
     {
@@ -205,7 +209,6 @@ float ReduceMaxAbsGPU(VulkanBackend& vk, uint64_t img, int w, int h, int ch)
         Binding b[2] = {{0, img, 0}, {2, scratch, 0}};
         vk.Dispatch("extract", pc, w, h, 1, b, 2);
     }
-    int n = w * h; int numWg = (n + 255) / 256;
     {
         ShaderPC pc{}; pc.i0 = n; pc.i1 = 1; pc.i2 = 0;
         Binding b[2] = {{0, scratch, 0}, {1, partials, 0}};
@@ -639,16 +642,17 @@ AlignmentResult GpuEstimateTranslation(const FloatImage& ref_gray,
         DenseAlignGPU(vk, ref_pyr, cmp_pyr, gw, gh, tile_size, pyr_n, tsx, tsy);
     else
     {
+        // 2-pass parallel standard refinement (see tile_refine_diag.comp header
+        // for CPU-vs-GPU equivalence analysis). NOT bit-identical to CPU
+        // wavefront (1-hop vs full-chain propagation, float vs double cost).
         ShaderPC pc{};
         pc.w = gw; pc.h = gh; pc.channels = 1;
         pc.i0 = tile_size; pc.i1 = local_radius; pc.i2 = tiles_x; pc.i3 = tiles_y; pc.i5 = 1;
-        int diags = tiles_x + tiles_y - 1;
-        for (int d = 0; d < diags; ++d)
-        {
-            pc.i4 = d;
-            Binding b[5] = {{0, ref_h, 0}, {1, cmp_h, 0}, {2, global_shift, 0}, {3, tsx, 0}, {4, tsy, 0}};
-            vk.Dispatch("tile_refine_diag", pc, 1, 1, 1, b, 5);
-        }
+        Binding b[5] = {{0, ref_h, 0}, {1, cmp_h, 0}, {2, global_shift, 0}, {3, tsx, 0}, {4, tsy, 0}};
+        pc.i4 = 0;
+        vk.Dispatch("tile_refine_diag", pc, (tiles_x + 7) / 8, (tiles_y + 7) / 8, 1, b, 5);
+        pc.i4 = 1;
+        vk.Dispatch("tile_refine_diag", pc, (tiles_x + 7) / 8, (tiles_y + 7) / 8, 1, b, 5);
     }
     vk.FlushFrame();
 
@@ -804,14 +808,17 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
             pc.w = pw; pc.h = ph; pc.channels = 1;
             pc.i0 = tile_size; pc.i1 = local_radius; pc.i2 = tiles_x; pc.i3 = tiles_y;
             pc.i5 = 1;
-            int diags = tiles_x + tiles_y - 1;
-            for (int d = 0; d < diags; ++d)
-            {
-                pc.i4 = d;
-                Binding b[5] = {{0, parent_gray, 0}, {1, gray[child_idx], 0},
-                                {2, global_shift, 0}, {3, tsx, 0}, {4, tsy, 0}};
-                vk.Dispatch("tile_refine_diag", pc, 1, 1, 1, b, 5);
-            }
+            Binding b[5] = {{0, parent_gray, 0}, {1, gray[child_idx], 0},
+                            {2, global_shift, 0}, {3, tsx, 0}, {4, tsy, 0}};
+            // Two-pass parallel refinement replaces the serial diagonal wavefront
+            // (which dispatched one workgroup per diagonal, leaving the GPU at
+            // ~1% SM utilisation). Pass 0 seeds from global shift; pass 1 adds
+            // one round of left/top neighbour propagation. Each dispatch covers
+            // the full tile grid, engaging all SMs.
+            pc.i4 = 0;
+            vk.Dispatch("tile_refine_diag", pc, (tiles_x + 7) / 8, (tiles_y + 7) / 8, 1, b, 5);
+            pc.i4 = 1;
+            vk.Dispatch("tile_refine_diag", pc, (tiles_x + 7) / 8, (tiles_y + 7) / 8, 1, b, 5);
         }
         uint64_t warped = vk.CreateBuffer(size_t(pw) * ph * ch);
         {
@@ -823,6 +830,26 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
             vk.Dispatch("warp_tilefield", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 4);
         }
         vk.FlushFrame();
+        if (std::getenv("BURSTMERGE_DUMP_TILES"))
+        {
+            int dx_count = dense ? align_tiles_x : tiles_x;
+            int dy_count = dense ? align_tiles_y : tiles_y;
+            size_t tc = static_cast<size_t>(dx_count) * dy_count;
+            std::vector<int> hx(tc), hy(tc);
+            vk.DownloadFloats(tsx, reinterpret_cast<float*>(hx.data()), tc);
+            vk.DownloadFloats(tsy, reinterpret_cast<float*>(hy.data()), tc);
+            char dpath[256];
+            std::snprintf(dpath, sizeof(dpath), "%s\\tilefield_gpu_f%zu.txt",
+                          std::getenv("BURSTMERGE_DUMP_TILES"), child_idx);
+            std::FILE* df = std::fopen(dpath, "w");
+            if (df)
+            {
+                std::fprintf(df, "%d %d\n", dx_count, dy_count);
+                for (size_t ti = 0; ti < tc; ++ti)
+                    std::fprintf(df, "%d %d\n", hx[ti], hy[ti]);
+                std::fclose(df);
+            }
+        }
         for (auto& lvl : cmp_pyr) if (lvl.handle != gray[child_idx]) vk.DestroyBuffer(lvl.handle);
         // Comparison frame gray/plane consumed; warped buffer is the aligned
         // result. GPU is idle (just flushed), so DestroyBuffer is immediate.

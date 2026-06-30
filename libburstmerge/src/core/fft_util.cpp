@@ -4,20 +4,33 @@
 
 namespace burstmerge
 {
+namespace
+{
+
+struct PlanOwner
+{
+    cfft_plan p = nullptr;
+    ~PlanOwner()
+    {
+        if (p) destroy_cfft_plan(p);
+    }
+};
+
+} // namespace
 
 cfft_plan GetCachedCfftPlan(size_t n)
 {
-    thread_local cfft_plan plans[16] = {};
+    thread_local PlanOwner plans[16];
     if (n < 16)
     {
-        if (!plans[n]) plans[n] = make_cfft_plan(n);
-        return plans[n];
+        if (!plans[n].p) plans[n].p = make_cfft_plan(n);
+        return plans[n].p;
     }
-    thread_local std::map<size_t, cfft_plan> cache;
+    thread_local std::map<size_t, PlanOwner> cache;
     auto it = cache.find(n);
-    if (it != cache.end()) return it->second;
+    if (it != cache.end()) return it->second.p;
     cfft_plan plan = make_cfft_plan(n);
-    cache.emplace(n, plan);
+    cache.emplace(n, PlanOwner{plan});
     return plan;
 }
 

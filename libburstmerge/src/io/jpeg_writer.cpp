@@ -17,6 +17,33 @@ namespace io
 
 #ifdef BURSTMERGE_HAVE_JPEG
 
+namespace
+{
+struct FileGuard
+{
+    FILE* fp;
+    explicit FileGuard(FILE* f) : fp(f) {}
+    ~FileGuard()
+    {
+        if (fp) std::fclose(fp);
+    }
+    FileGuard(const FileGuard&) = delete;
+    FileGuard& operator=(const FileGuard&) = delete;
+};
+
+struct JpegCompressGuard
+{
+    jpeg_compress_struct* cinfo = nullptr;
+    explicit JpegCompressGuard(jpeg_compress_struct* c) : cinfo(c) {}
+    ~JpegCompressGuard()
+    {
+        if (cinfo) jpeg_destroy_compress(cinfo);
+    }
+    JpegCompressGuard(const JpegCompressGuard&) = delete;
+    JpegCompressGuard& operator=(const JpegCompressGuard&) = delete;
+};
+} // namespace
+
 class JpegWriter : public ImageWriter
 {
 public:
@@ -40,13 +67,14 @@ public:
         jpeg_error_mgr jerr;
         cinfo.err = jpeg_std_error(&jerr);
         jpeg_create_compress(&cinfo);
+        JpegCompressGuard cinfo_guard(&cinfo);
 
         FILE* fp = std::fopen(path.c_str(), "wb");
         if (!fp)
         {
-            jpeg_destroy_compress(&cinfo);
             throw std::runtime_error("JpegWriter: cannot open " + path);
         }
+        FileGuard fp_guard(fp);
 
         jpeg_stdio_dest(&cinfo, fp);
 
@@ -79,8 +107,6 @@ public:
         }
 
         jpeg_finish_compress(&cinfo);
-        jpeg_destroy_compress(&cinfo);
-        std::fclose(fp);
     }
 
 private:
