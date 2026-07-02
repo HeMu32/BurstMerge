@@ -1,0 +1,3 @@
+add_executable(burstmerge_raw_resize main.cpp)
+target_link_libraries(burstmerge_raw_resize PRIVATE burstmerge)
+target_include_directories(burstmerge_raw_resize PRIVATE ${CXXOPTS_INCLUDE})

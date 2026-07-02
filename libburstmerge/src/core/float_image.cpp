@@ -376,6 +376,135 @@ FloatImage ConvertPlanesToGrayscale(const FloatImage& src)
     return dst;
 }
 
+namespace
+{
+
+float SampleBilinear(const FloatImage& src, float x, float y, uint32_t c)
+{
+    int ix = static_cast<int>(std::floor(x));
+    int iy = static_cast<int>(std::floor(y));
+    float fx = x - std::floor(x);
+    float fy = y - std::floor(y);
+
+    int ix1 = std::min(ix + 1, static_cast<int>(src.width) - 1);
+    int iy1 = std::min(iy + 1, static_cast<int>(src.height) - 1);
+    ix = std::max(ix, 0);
+    iy = std::max(iy, 0);
+
+    float v00 = src.At(static_cast<uint32_t>(ix), static_cast<uint32_t>(iy), c);
+    float v10 = src.At(static_cast<uint32_t>(ix1), static_cast<uint32_t>(iy), c);
+    float v01 = src.At(static_cast<uint32_t>(ix), static_cast<uint32_t>(iy1), c);
+    float v11 = src.At(static_cast<uint32_t>(ix1), static_cast<uint32_t>(iy1), c);
+
+    float v0 = v00 + fx * (v10 - v00);
+    float v1 = v01 + fx * (v11 - v01);
+    return v0 + fy * (v1 - v0);
+}
+
+float CubicKernel(float t)
+{
+    // Catmull-Rom: a = -0.5
+    float at = std::abs(t);
+    float at2 = at * at;
+    float at3 = at2 * at;
+    if (at < 1.0f) return 1.5f * at3 - 2.5f * at2 + 1.0f;
+    if (at < 2.0f) return -0.5f * at3 + 2.5f * at2 - 4.0f * at + 2.0f;
+    return 0.0f;
+}
+
+float SampleBicubic(const FloatImage& src, float x, float y, uint32_t c)
+{
+    int ix = static_cast<int>(std::floor(x));
+    int iy = static_cast<int>(std::floor(y));
+    float fx = x - std::floor(x);
+    float fy = y - std::floor(y);
+
+    float sum = 0.0f;
+    float norm = 0.0f;
+    int hw = static_cast<int>(src.width);
+    int hh = static_cast<int>(src.height);
+
+    for (int dy = -1; dy <= 2; ++dy)
+    {
+        int sy = iy + dy;
+        if (sy < 0) sy = 0;
+        if (sy >= hh) sy = hh - 1;
+        float wy = CubicKernel(static_cast<float>(dy) - fy);
+
+        for (int dx = -1; dx <= 2; ++dx)
+        {
+            int sx = ix + dx;
+            if (sx < 0) sx = 0;
+            if (sx >= hw) sx = hw - 1;
+            float w = wy * CubicKernel(static_cast<float>(dx) - fx);
+            sum += w * src.At(static_cast<uint32_t>(sx), static_cast<uint32_t>(sy), c);
+            norm += w;
+        }
+    }
+    return norm > 0.0f ? sum / norm : 0.0f;
+}
+
+} // namespace
+
+FloatImage ResizeImage(const FloatImage& src,
+                       uint32_t dst_width, uint32_t dst_height,
+                       InterpolationMethod method)
+{
+    if (dst_width == 0) dst_width = 1;
+    if (dst_height == 0) dst_height = 1;
+
+    FloatImage out;
+    out.width = dst_width;
+    out.height = dst_height;
+    out.channels = src.channels;
+    out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels, 0.0f);
+
+    float scale_x = static_cast<float>(src.width) / static_cast<float>(dst_width);
+    float scale_y = static_cast<float>(src.height) / static_cast<float>(dst_height);
+
+    const float half_texel_x = scale_x * 0.5f;
+    const float half_texel_y = scale_y * 0.5f;
+
+    if (method == InterpolationMethod::Bilinear)
+    {
+        ParallelForRows(out.height, RecommendedImageRowGrain(out.width, out.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
+        {
+            for (uint32_t y = y_begin; y < y_end; ++y)
+            {
+                float sy = static_cast<float>(y) * scale_y + half_texel_y;
+                for (uint32_t x = 0; x < out.width; ++x)
+                {
+                    float sx = static_cast<float>(x) * scale_x + half_texel_x;
+                    for (uint32_t c = 0; c < out.channels; ++c)
+                    {
+                        out.At(x, y, c) = SampleBilinear(src, sx, sy, c);
+                    }
+                }
+            }
+        }, "resize_bilinear");
+    }
+    else
+    {
+        ParallelForRows(out.height, RecommendedImageRowGrain(out.width, out.channels, kRowGrainMinPixels, kRowGrainCoarseRows), [&](uint32_t y_begin, uint32_t y_end)
+        {
+            for (uint32_t y = y_begin; y < y_end; ++y)
+            {
+                float sy = static_cast<float>(y) * scale_y + half_texel_y;
+                for (uint32_t x = 0; x < out.width; ++x)
+                {
+                    float sx = static_cast<float>(x) * scale_x + half_texel_x;
+                    for (uint32_t c = 0; c < out.channels; ++c)
+                    {
+                        out.At(x, y, c) = SampleBicubic(src, sx, sy, c);
+                    }
+                }
+            }
+        }, "resize_bicubic");
+    }
+
+    return out;
+}
+
 float MaxValue(const FloatImage& src)
 {
     if (src.data.empty()) return 0.0f;

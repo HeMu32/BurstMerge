@@ -19,6 +19,7 @@ add_subdirectory(libburstmerge)
 # ---- 前端 ----
 add_subdirectory(apps/cli)
 add_subdirectory(apps/console)
+add_subdirectory(apps/raw_resize)
 
 # ---- 测试 ----
 option(BUILD_TESTS "Build tests" ON)

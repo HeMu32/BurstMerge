@@ -90,5 +90,9 @@ void ExtractExposureMetadata(DngNegativeHolder* holder,
 void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level);
 void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4]);
 
+// Update dimension-sensitive metadata when image size changes (e.g. after resize).
+void SetDngDimensions(DngNegativeHolder* holder, uint32_t width, uint32_t height);
+void ClearDngOriginalSizes(DngNegativeHolder* holder);
+
 } // namespace io
 } // namespace burstmerge

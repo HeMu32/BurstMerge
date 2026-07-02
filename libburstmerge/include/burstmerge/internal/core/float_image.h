@@ -40,6 +40,16 @@ FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
                                      uint32_t mosaic_width,
                                      uint32_t mosaic_height,
                                      uint32_t cfa_period);
+enum class InterpolationMethod
+{
+    Bilinear,
+    Bicubic
+};
+
+FloatImage ResizeImage(const FloatImage& src,
+                       uint32_t dst_width, uint32_t dst_height,
+                       InterpolationMethod method);
+
 // Average all channels of a plane image into a single grayscale image.
 // For Bayer plane images (channels=4, CFA period=2) this is equivalent
 // to averaging each 2×2 RGGB block of the original mosaic.

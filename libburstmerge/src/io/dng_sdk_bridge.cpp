@@ -310,6 +310,21 @@ void ClearDngMosaicInfo(DngNegativeHolder* holder)
     holder->negative->ClearMosaicInfo();
 }
 
+void SetDngDimensions(DngNegativeHolder* holder, uint32_t width, uint32_t height)
+{
+    if (!holder || !holder->negative) return;
+    dng_negative& neg = *holder->negative;
+    neg.SetDefaultCropSize(width, height);
+    neg.SetDefaultCropOrigin(0, 0);
+    neg.SetActiveArea(dng_rect(0, 0, static_cast<int32>(height), static_cast<int32>(width)));
+}
+
+void ClearDngOriginalSizes(DngNegativeHolder* holder)
+{
+    if (!holder || !holder->negative) return;
+    holder->negative->ClearOriginalSizes();
+}
+
 } // namespace io
 
 // ============================================================

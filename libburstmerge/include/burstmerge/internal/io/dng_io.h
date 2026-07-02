@@ -142,6 +142,8 @@ void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level);
 void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4]);
 void SetDngBaselineExposure(DngNegativeHolder* holder, double exposure);
 void ClearDngMosaicInfo(DngNegativeHolder* holder);
+void SetDngDimensions(DngNegativeHolder* holder, uint32_t width, uint32_t height);
+void ClearDngOriginalSizes(DngNegativeHolder* holder);
 }
 
 } // namespace burstmerge
