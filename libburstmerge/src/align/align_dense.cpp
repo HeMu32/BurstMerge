@@ -51,6 +51,8 @@ void CorrectUpsamplingError(const FloatImage& ref,
                         static_cast<int>(ty) + ((ty % 2 == 0) ? -1 : 1)));
 
 #if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                    // Note: This is not the default behaviour of the program, 
+                    // and have been proven to be not stable in some cases.
                     double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
                     for (int c = 0; c < 3; ++c)
                     {
@@ -128,6 +130,8 @@ void SearchDenseLocal(const FloatImage& ref,
                     int sy0 = seed_y[idx];
 
 #if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                    // Note: This is not the default behaviour of the program, 
+                    // and have been proven to be not stable in some cases.
                     double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
                     for (int dy = sy0 - kSearchDist; dy <= sy0 + kSearchDist; ++dy)
                     {

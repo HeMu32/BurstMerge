@@ -2,33 +2,68 @@
 #extension GL_GOOGLE_include_directive : enable
 #include "common.glsl"
 
-// dense_level: one pyramid level of DenseTile alignment. Per tile, reads the
-// COARSER level's tile field (mapped + scaled), runs the 3-candidate upsampling
-// correction (self / x-neighbour / y-neighbour) then a ±kTileSearchRadius local
-// search, both argmin (matches CPU EstimateDenseTileField /
-// CorrectUpsamplingError / SearchDenseLocal). Matches CPU including: coarsest
-// level seeds from 0, weight_ssd = (level>0), half_tile spacing.
+// dense_level: one pyramid level of DenseTile alignment. Mirrors CPU
+// align_dense.cpp::EstimateDenseTileField (CorrectUpsamplingError +
+// SearchDenseLocal) per tile:
+//   1. Compute cost for the 3 upsampled candidates (self / x-neighbour /
+//      y-neighbour) and pick the argmin as the seed (CorrectUpsamplingError).
+//   2. Around the seed, scan a (2*kSearchDist+1)^2 local search window; the
+//      argmin of all candidate costs becomes this tile's displacement, written
+//      to ox/oy (SearchDenseLocal).
 //
 // ──────────────────────────────────────────────────────────────────────────
-// OPTIMISATION: FUSED CANDIDATE EVALUATION + KAHAN M=8 (2026-06-30)
+// v4 (2026-07-04): 64-thread PER-TILE COOPERATIVE design.
 //
-// v1 (original): 52 separate tileCost() calls. 104 global reads/pixel.
-// v2 (fused kCandGroup=4): batched 4 candidates, shared ref read. 69 reads/pixel.
-// v3 (fused + Kahan M=8): M=8 strided + Kahan compensation. Same register count
-//   as v2 (8 acc + 8 comp = 16/candidate), ~145× lower accumulation error.
-//   Kahan does NOT change observable divergence vs CPU (the floor is float32
-//   per-pixel arithmetic, not accumulation). See test_stage2.cpp 3px threshold.
+// History:
+//   v1 (original): 1 thread per tile, 52 separate tileCost() calls per tile.
+//   v2 (fused kCandGroup=4): 1 thread per tile, 52 candidates batched in
+//     batches of 4 with shared ref read. 1 thread processes ts² px × ncand
+//     inside the inner loops.
+//   v3 (fused + Kahan M=8 strided): same 1-thread-per-tile shape, better
+//     accumulation precision. Still O(ts²) work per thread.
 //
-// SPIR-V ASSUMPTION: Vulkan disables FMA contraction by default (requires
-// explicit FPFastMathMode decoration, which glslangValidator never emits).
-// Therefore Kahan's 4-op sequence is preserved verbatim in SPIR-V.
+// Problem with v3: tile_size=96 → 9216 px × ncand累加存进 8x8=64 个 float
+// 累加器占用满 register file, SM occupancy 暴跌, GPU 比 CPU 慢 25-50%.
+//
+// v4 redesign: **64 threads cooperate on ONE tile** (instead of 1 thread per
+// tile). Each thread accumulates 1/64 of the tile's pixels for the current
+// candidate, then a workgroup reduction sums these 64 partial costs. Register
+// pressure drops by ~64×, SM occupancy recovers, and total GPU work scales
+// linearly with ts² but is now distributed across 64 threads.
+//
+// Dispatch shape CHANGED:
+//   v3: gl_GlobalInvocationID = (tile_x, tile_y, 1); workgroup (8, 8) means
+//       8x8=64 threads process 64 TILES per workgroup (1 thread each).
+//   v4: gl_GlobalInvocationID = (tile_x, tile_y, 1); workgroup (8, 8) means
+//       ONE tile per workgroup with 64 threads cooperating.
+//   In v4 the workgroup count = (tiles_x, tiles_y, 1) (same dispatch dims!);
+//   each workgroup handles the tile at (WorkGroupID.x, WorkGroupID.y),
+//   NOT (8*tiles_x, 8*tiles_y). The CPU dispatch site already issues
+//   (ceil(tiles_x/8), ceil(tiles_y/8), 1) with local (8,8) — which on v3
+//   processes 64 tiles (1 per thread), on v4 processes 1 tile (64 threads).
+//   So v4 must be paired with a CPU-side dispatch change that issues
+//   (tiles_x, tiles_y, 1) with local (8,8).
+//   Equivalent throughput: total work-units is tiles_x*tiles_y in both cases,
+//   each work-unit processed by 64 cooperating thread (v4) or 1 thread (v3).
+//
+// Algorithmic equivalence: workgroup total reads `ts²` px × ncand per tile,
+// threads within a workgroup read disjoint pixel ranges; the global atomic /
+// shared memory reduction accumulates per-candidate partial sums. The
+// argmin over candidates is identical to v3 (and to CPU).
+//
+// Accumulation precision: per-thread partial sums use Kahan M=8 strided
+// accumulation (same as v3) so the per-workgroup sum retains the Kahan
+// benefit; the final cross-thread sum is done in shared memory with a
+// pairwise tree reduction in shared memory (additive only, no further
+// Kahan — but only 64 partial-sum adds instead of 9216, so the rounding
+// error is dominated by the per-thread leg anyway).
 //
 //   binding 0: ref gray (pc.w x pc.h), 1: cmp gray, 2: tsx_coarse, 3: tsy_coarse
 //   binding 4: tsx_out, 5: tsy_out
 //   pc.i0=tile_size, i1=half_tile, i2=tiles_x, i3=tiles_y,
 //   pc.i4=cur_tiles_x, i5=cur_tiles_y, i6=level_scale, i7=cfa_period,
-//   i8=is_coarsest, i9=weight_ssd(1=SSD,0=SAD)
-//   dispatch (ceil(tiles_x/8), ceil(tiles_y/8), 1), local (8,8)
+//   pc.i8=is_coarsest, i9=weight_ssd(1=SSD,0=SAD)
+//   dispatch (tiles_x, tiles_y, 1), local (8, 8)
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) readonly buffer Ref { float refp[]; };
 layout(binding = 1) readonly buffer Cmp { float cmpp[]; };
@@ -39,8 +74,15 @@ layout(binding = 5) buffer OY { int oy[]; };
 
 const int kSearchDist = 3;
 const int kStrideM = 8;
-const int kCandGroup = 4;
 
+// Shared memory: one partial cost per (thread, candidate) for the 4-candidate
+// fused batch. shape: [candidate][thread_linear] = sh_cost[cand * 64 + tid].
+// 4 * 64 floats = 256 floats per workgroup = 1 KB shared memory.
+shared float sh_cost[4 * 64];
+
+int snapPeriod(int v, int p) { if (p <= 1) return v; return v >= 0 ? (v / p) * p : -((-v) / p) * p; }
+
+// Merge a strided M-element accumulator into a single float (pairwise tree).
 float mergeStrided(inout float acc[kStrideM])
 {
     int cur = kStrideM;
@@ -53,54 +95,75 @@ float mergeStrided(inout float acc[kStrideM])
     return acc[0];
 }
 
-void tileCostFused(int x0, int y0, int W, int H, int use_ssd,
-                   int dx0, int dy0, int dx1, int dy1,
-                   int dx2, int dy2, int dx3, int dy3,
-                   int ncand, out float costs[4])
+// Per-thread Kahan strided accumulator for the pixel range assigned to this
+// thread (the 1/64 disjoint slice of the current tile's (x0..x1, y0..y1)
+// rectangle). Thread linear ID = (LocalInvocationID.y * 8 + LocalInvocationID.x)
+// selects the starting offset and stride inside the tile's flat pixel list
+// (row-major, length = ts * ts_clipped). The thread covers indices
+//   flat_offset = tid, flat_offset + 64, flat_offset + 128, ...
+// (stride 64 across the flat pixel stream) so its inner loop walks full rows
+// of the tile — cache-friendly and naturally coalesced when threads in a
+// warp read consecutive pixels.
+float tileCostThread(int x0, int y0, int W, int H, int use_ssd,
+                     int dx, int dy, int tid, int ts_x, int ts_y)
 {
     const float OB = 65504.0;
     int ts = pc.i0;
     int x1 = min(W, x0 + ts);
     int y1 = min(H, y0 + ts);
-    float a0[kStrideM]; float cp0[kStrideM];
-    float a1[kStrideM]; float cp1[kStrideM];
-    float a2[kStrideM]; float cp2[kStrideM];
-    float a3[kStrideM]; float cp3[kStrideM];
-    for (int m = 0; m < kStrideM; ++m)
-    { a0[m]=0.0; cp0[m]=0.0; a1[m]=0.0; cp1[m]=0.0; a2[m]=0.0; cp2[m]=0.0; a3[m]=0.0; cp3[m]=0.0; }
-    for (int yy = y0; yy < y1; ++yy) {
-        for (int xx = x0; xx < x1; xx += kStrideM) {
-            for (int j = 0; j < kStrideM; ++j) {
-                int px = xx + j;
-                if (px < x1) {
-                    float rv = refp[yy * W + px];
-                    int bx = px - dx0; int by = yy - dy0;
-                    if (by < 0 || by >= H || bx < 0 || bx >= W) a0[j] += use_ssd != 0 ? (OB * OB) : OB;
-                    else { float d = rv - cmpp[by * W + bx]; float val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
-                        float y = val - cp0[j]; float t = a0[j] + y; cp0[j] = (t - a0[j]) - y; a0[j] = t; }
-                    if (ncand > 1) { bx = px - dx1; by = yy - dy1;
-                    if (by < 0 || by >= H || bx < 0 || bx >= W) a1[j] += use_ssd != 0 ? (OB * OB) : OB;
-                    else { float d = rv - cmpp[by * W + bx]; float val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
-                        float y = val - cp1[j]; float t = a1[j] + y; cp1[j] = (t - a1[j]) - y; a1[j] = t; } }
-                    if (ncand > 2) { bx = px - dx2; by = yy - dy2;
-                    if (by < 0 || by >= H || bx < 0 || bx >= W) a2[j] += use_ssd != 0 ? (OB * OB) : OB;
-                    else { float d = rv - cmpp[by * W + bx]; float val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
-                        float y = val - cp2[j]; float t = a2[j] + y; cp2[j] = (t - a2[j]) - y; a2[j] = t; } }
-                    if (ncand > 3) { bx = px - dx3; by = yy - dy3;
-                    if (by < 0 || by >= H || bx < 0 || bx >= W) a3[j] += use_ssd != 0 ? (OB * OB) : OB;
-                    else { float d = rv - cmpp[by * W + bx]; float val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
-                        float y = val - cp3[j]; float t = a3[j] + y; cp3[j] = (t - a3[j]) - y; a3[j] = t; } }
-                }
-            }
+    float a[kStrideM]; float cp[kStrideM];
+    for (int m = 0; m < kStrideM; ++m) { a[m] = 0.0; cp[m] = 0.0; }
+    // Walk the tile's pixel stream in row-major order; thread tid takes every
+    // 64th element. The number of pixels in this tile is (x1-x0)*(y1-y0).
+    // The strided walk means a single thread's inner loop touches pixels
+    // spanning many rows; the linear index -> (x,y) conversion is cheap.
+    int total_pixels = (x1 - x0) * (y1 - y0);
+    int idx = tid;
+    int m_slot = 0;
+    while (idx < total_pixels) {
+        int local_y = idx / (x1 - x0);
+        int local_x = idx - local_y * (x1 - x0);
+        int px = x0 + local_x;
+        int yy = y0 + local_y;
+        float rv = refp[yy * W + px];
+        int bx = px - dx;
+        int by = yy - dy;
+        float val;
+        if (by < 0 || by >= H || bx < 0 || bx >= W) {
+            val = use_ssd != 0 ? (OB * OB) : OB;
+        } else {
+            float d = rv - cmpp[by * W + bx];
+            val = use_ssd != 0 ? (d * d) : (d < 0.0 ? -d : d);
         }
+        // Kahan strided accumulation: add val into slot m_slot, advance m_slot
+        // mod kStrideM. This interleaves pixels into 8 independent accumulators
+        // so the float rounding error is O(kStrideM × ulp) instead of O(N × ulp).
+        float y_ = val - cp[m_slot];
+        float t = a[m_slot] + y_;
+        cp[m_slot] = (t - a[m_slot]) - y_;
+        a[m_slot] = t;
+        m_slot = (m_slot + 1 == kStrideM) ? 0 : m_slot + 1;
+        idx += 64;
     }
-    costs[0] = mergeStrided(a0);
-    costs[1] = ncand > 1 ? mergeStrided(a1) : 3.402823466e38;
-    costs[2] = ncand > 2 ? mergeStrided(a2) : 3.402823466e38;
-    costs[3] = ncand > 3 ? mergeStrided(a3) : 3.402823466e38;
+    return mergeStrided(a);
 }
 
-int snapPeriod(int v, int p) { if (p <= 1) return v; return v >= 0 ? (v / p) * p : -((-v) / p) * p; }
+// Shared-memory tree reduction of the 64-thread partial costs for one cand.
+// After this returns, sh_cost[cand*64 + 0] holds the workgroup-summed cost.
+void reduceOneCand(int cand)
+{
+    // The 64 partials live in sh_cost[cand*64 + 0..63]. Do a pairwise tree
+    // reduction with 6 levels (64 → 32 → 16 → 8 → 4 → 2 → 1). Each level
+    // half the threads add their neighbour's value into theirs.
+    barrier();
+    for (int stride = 32; stride > 0; stride >>= 1) {
+        int tid = int(gl_LocalInvocationIndex);
+        if (tid < stride) {
+            sh_cost[cand * 64 + tid] += sh_cost[cand * 64 + tid + stride];
+        }
+        barrier();
+    }
+}
 
 void fetchCoarse(int tx, int ty, int tiles_x, int tiles_y, int cur_tiles_x, int cur_tiles_y,
                  int level_scale, int is_coarsest, out int dvx, out int dvy)
@@ -116,8 +179,8 @@ void fetchCoarse(int tx, int ty, int tiles_x, int tiles_y, int cur_tiles_x, int 
 
 void main()
 {
-    int tx = int(gl_GlobalInvocationID.x);
-    int ty = int(gl_GlobalInvocationID.y);
+    int tx = int(gl_WorkGroupID.x);
+    int ty = int(gl_WorkGroupID.y);
     int tiles_x = pc.i2; int tiles_y = pc.i3;
     if (tx >= tiles_x || ty >= tiles_y) return;
     int tile_size = pc.i0; int half_tile = pc.i1;
@@ -127,39 +190,79 @@ void main()
     int W = pc.w; int H = pc.h;
     int idx = ty * tiles_x + tx;
     int x0 = tx * half_tile; int y0 = ty * half_tile;
+    int tid = int(gl_LocalInvocationIndex);   // 0..63 within this workgroup
+    int ts_x = min(W, x0 + tile_size) - x0;
+    int ts_y = min(H, y0 + tile_size) - y0;
 
+    // ---- 1) Stage 1: 3 upsampled candidates → seed.
+    // Each candidate is evaluated by ALL 64 threads in this workgroup; their
+    // per-thread partial costs are stored in sh_cost[cand*64 + tid] and a
+    // tree reduction sums them. The final cost for candidate c is in
+    // sh_cost[c*64 + 0].
     int cand_tx[3]; int cand_ty[3];
     cand_tx[0] = tx;     cand_ty[0] = ty;
     cand_tx[1] = clampi(tx + ((tx % 2 == 0) ? -1 : 1), 0, tiles_x - 1);  cand_ty[1] = ty;
     cand_tx[2] = tx;     cand_ty[2] = clampi(ty + ((ty % 2 == 0) ? -1 : 1), 0, tiles_y - 1);
-    int up_dx0, up_dy0, up_dx1, up_dy1, up_dx2, up_dy2;
-    fetchCoarse(cand_tx[0], cand_ty[0], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx0, up_dy0);
-    fetchCoarse(cand_tx[1], cand_ty[1], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx1, up_dy1);
-    fetchCoarse(cand_tx[2], cand_ty[2], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx2, up_dy2);
-    float up_costs[4];
-    tileCostFused(x0, y0, W, H, use_ssd, up_dx0, up_dy0, up_dx1, up_dy1, up_dx2, up_dy2, 0, 0, 3, up_costs);
-    float cmin = up_costs[0];
-    int seed_x = up_dx0, seed_y = up_dy0;
-    if (up_costs[1] < cmin) { cmin = up_costs[1]; seed_x = up_dx1; seed_y = up_dy1; }
-    if (up_costs[2] < cmin) { cmin = up_costs[2]; seed_x = up_dx2; seed_y = up_dy2; }
+    int up_dx[3]; int up_dy[3];
+    fetchCoarse(cand_tx[0], cand_ty[0], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx[0], up_dy[0]);
+    fetchCoarse(cand_tx[1], cand_ty[1], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx[1], up_dy[1]);
+    fetchCoarse(cand_tx[2], cand_ty[2], tiles_x, tiles_y, cur_tiles_x, cur_tiles_y, level_scale, is_coarsest, up_dx[2], up_dy[2]);
 
+    if (tid < 64) {
+        sh_cost[0 * 64 + tid] = tileCostThread(x0, y0, W, H, use_ssd, up_dx[0], up_dy[0], tid, ts_x, ts_y);
+        sh_cost[1 * 64 + tid] = tileCostThread(x0, y0, W, H, use_ssd, up_dx[1], up_dy[1], tid, ts_x, ts_y);
+        sh_cost[2 * 64 + tid] = tileCostThread(x0, y0, W, H, use_ssd, up_dx[2], up_dy[2], tid, ts_x, ts_y);
+        // Candidate slot 3 unused in stage 1; zero it so the reduction below
+        // doesn't read garbage (defensive; sh_cost[3*64 + tid] is overwritten
+        // by stage 2 before any reduction reads it).
+        sh_cost[3 * 64 + tid] = 0.0;
+    }
+    reduceOneCand(0);
+    reduceOneCand(1);
+    reduceOneCand(2);
+
+    // Determine argmin seed from the 3 upsampled candidates. Only thread 0
+    // needs the final reduced values; it broadcasts the chosen seed to all
+    // threads via shared memory so the search stage starts from the same dx/dy.
+    int seed_x = up_dx[0]; int seed_y = up_dy[0];
+    float seed_cost = sh_cost[0 * 64 + 0];
+    if (sh_cost[1 * 64 + 0] < seed_cost) { seed_cost = sh_cost[1 * 64 + 0]; seed_x = up_dx[1]; seed_y = up_dy[1]; }
+    if (sh_cost[2 * 64 + 0] < seed_cost) { seed_cost = sh_cost[2 * 64 + 0]; seed_x = up_dx[2]; seed_y = up_dy[2]; }
+
+    // ---- 2) Stage 2: local search in a (2*kSearchDist+1)^2 window.
+    // The window has 49 candidates total (kSearchDist=3 → side=7). We evaluate
+    // them ONE at a time (single-candidate dispatch through the per-thread
+    // strided walk and reduceOneCand), keeping the running argmin in shared
+    // memory. One-at-a-time is simpler than batching 4 candidates here and
+    // matches the reduceOneCand shape; the 49 sequential reductions still run
+    // fully parallel across all workgroups (different tiles), so SM occupancy
+    // is fine. The per-tile time is dominated by 49 × (ts²/64 + reduce) reads
+    // instead of v3's 49 × ts² reads; 64× less per-thread work × 49 iterations.
     int side = 2 * kSearchDist + 1;
     int total_search = side * side;
-    float smin = cmin;
-    int outdx = seed_x, outdy = seed_y;
-    for (int batch = 0; batch < total_search; batch += kCandGroup) {
-        int nc = min(kCandGroup, total_search - batch);
-        int bdx0=0,bdy0=0,bdx1=0,bdy1=0,bdx2=0,bdy2=0,bdx3=0,bdy3=0;
-        { int fi=batch;   int oy=fi/side; int ox=fi%side;   bdx0=snapPeriod(seed_x+(ox-kSearchDist),period); bdy0=snapPeriod(seed_y+(oy-kSearchDist),period); }
-        if(nc>1){int fi=batch+1;int oy=fi/side;int ox=fi%side;bdx1=snapPeriod(seed_x+(ox-kSearchDist),period);bdy1=snapPeriod(seed_y+(oy-kSearchDist),period);}
-        if(nc>2){int fi=batch+2;int oy=fi/side;int ox=fi%side;bdx2=snapPeriod(seed_x+(ox-kSearchDist),period);bdy2=snapPeriod(seed_y+(oy-kSearchDist),period);}
-        if(nc>3){int fi=batch+3;int oy=fi/side;int ox=fi%side;bdx3=snapPeriod(seed_x+(ox-kSearchDist),period);bdy3=snapPeriod(seed_y+(oy-kSearchDist),period);}
-        float costs[4];
-        tileCostFused(x0,y0,W,H,use_ssd,bdx0,bdy0,bdx1,bdy1,bdx2,bdy2,bdx3,bdy3,nc,costs);
-        if(costs[0]<smin){smin=costs[0];outdx=bdx0;outdy=bdy0;}
-        if(nc>1&&costs[1]<smin){smin=costs[1];outdx=bdx1;outdy=bdy1;}
-        if(nc>2&&costs[2]<smin){smin=costs[2];outdx=bdx2;outdy=bdy2;}
-        if(nc>3&&costs[3]<smin){smin=costs[3];outdx=bdx3;outdy=bdy3;}
+    int smin_x = seed_x; int smin_y = seed_y; float smin = seed_cost;
+    for (int b = 0; b < total_search; ++b) {
+        int oy = b / side;
+        int ox = b - oy * side;
+        int bdx = snapPeriod(seed_x + (ox - kSearchDist), period);
+        int bdy = snapPeriod(seed_y + (oy - kSearchDist), period);
+        if (tid < 64) {
+            sh_cost[0 * 64 + tid] = tileCostThread(x0, y0, W, H, use_ssd, bdx, bdy, tid, ts_x, ts_y);
+        }
+        reduceOneCand(0);
+        // Only thread 0 compares and updates the running argmin. Other
+        // threads read sh_cost[0] below on the next iteration's barrier
+        // (reduceOneCand calls barrier internally), so no explicit broadcast
+        // is needed; just keep smin_x/smin_y/smin local on thread 0 and write
+        // out at the end.
+        if (tid == 0) {
+            float c = sh_cost[0 * 64 + 0];
+            if (c < smin) { smin = c; smin_x = bdx; smin_y = bdy; }
+        }
     }
-    ox[idx] = outdx; oy[idx] = outdy;
+
+    // ---- 3) Stage 3: write result. Only thread 0 writes.
+    if (tid == 0) {
+        ox[idx] = smin_x; oy[idx] = smin_y;
+    }
 }

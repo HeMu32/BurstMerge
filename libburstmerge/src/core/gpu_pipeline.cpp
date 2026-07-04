@@ -539,7 +539,12 @@ void DenseAlignGPU(VulkanBackend& vk,
         }
         Binding b[6] = {{0, ref_pyr[level].handle, 0}, {1, cmp_lvl, 0},
                         {2, csx, 0}, {3, csy, 0}, {4, out_sx, 0}, {5, out_sy, 0}};
-        vk.Dispatch(dense_shader, pc, (tx_L + 7) / 8, (ty_L + 7) / 8, 1, b, 6);
+        // dense_level.comp v4 dispatch: ONE workgroup per tile (8x8 = 64
+        // threads cooperate on the tile's ts² pixel work). v3 dispatched
+        // (ceil(tiles_x/8), ceil(tiles_y/8)) with 1 thread per tile; v4 needs
+        // (tiles_x, tiles_y) workgroups, each handling one tile with 64 threads.
+        // Out-of-range workgroups are guarded by the shader's tx>=tiles_x check.
+        vk.Dispatch(dense_shader, pc, tx_L, ty_L, 1, b, 6);
     }
     vk.DestroyBuffer(sc_sx[0]); vk.DestroyBuffer(sc_sx[1]);
     vk.DestroyBuffer(sc_sy[0]); vk.DestroyBuffer(sc_sy[1]);

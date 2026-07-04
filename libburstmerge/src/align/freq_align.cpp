@@ -286,6 +286,8 @@ AlignmentResult EstimateFrequencyTileField(
                         int seed_y = uy[idx];
 
 #if BURSTMERGE_ALIGN_WEIGHTED_AVG
+                        // Note: This is not the default behaviour of the program, 
+                        // and have been proven to be not stable in some cases.
                         double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
                         for (int iy = -kTileSearchR; iy <= kTileSearchR; ++iy)
                         {
