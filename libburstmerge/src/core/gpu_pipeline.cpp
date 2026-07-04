@@ -797,9 +797,7 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
                 vk.Dispatch("select_min", pc, 1, 1, 1, b, 3);
             }
         }
-        vk.FlushFrame();
 
-        vk.BeginFrame();
         if (settings.alignment_mode == AlignmentMode::DenseTile)
             DenseAlignGPU(vk, parent_pyr, cmp_pyr, pw, ph, tile_size, pyr_n, tsx, tsy);
         else

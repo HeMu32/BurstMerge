@@ -30,7 +30,7 @@ PATH中有exiftool, ffmepg (含ffprobe), dcraw.exe 可用. 你可能会用到它
 	- 不允许使用 MSVC 编译, 但源码中保留了少量 `#ifdef _WIN32` / MSVC 分支以备未来, 不要删除. 
 	- 第三方 RAW 解码 (LibRaw 等) 源代码禁止引入; LibRaw 仅用于查证 RAW 字段含义. 
 	- 不引入 stb_image; 每种图像格式由对应专用库 (libjpeg-turbo / libpng / libtiff) 处理, BMP 为手写. 
-	- 默认情况下不要添加注释, 除非用户要求. 
+	- 默认情况下添加注释, 清楚解释算法的流程, 保证可读性, 除非用户要求. 
 
 ==============================
 项目整体架构 (Architecture)
