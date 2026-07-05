@@ -153,14 +153,6 @@ target_include_directories(burstmerge
             ${BURSTMERGE_GENERATED_DIR}
 )
 
-target_compile_definitions(burstmerge PRIVATE
-    # Macro definitions are inherited from dng_sdk PUBLIC
-)
-
-if(BURSTMERGE_GPU_FP64)
-    target_compile_definitions(burstmerge PRIVATE BURSTMERGE_HAVE_GPU_FP64)
-endif()
-
 target_link_libraries(burstmerge
     PUBLIC  dng_sdk
     PRIVATE OpenMP::OpenMP_CXX

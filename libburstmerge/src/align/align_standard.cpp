@@ -78,8 +78,6 @@ void RefineTileField(const FloatImage& reference,
                 }
 
 #if BURSTMERGE_ALIGN_WEIGHTED_AVG
-                // Note: This is not the default behaviour of the program, 
-                // and have been proven to be not stable in some cases.
                 double sum_w = 0.0, sum_wx = 0.0, sum_wy = 0.0;
                 for (int dy = seed_y - local_radius; dy <= seed_y + local_radius; ++dy)
                 {

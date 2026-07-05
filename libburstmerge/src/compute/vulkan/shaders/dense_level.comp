@@ -58,6 +58,21 @@
 // Kahan — but only 64 partial-sum adds instead of 9216, so the rounding
 // error is dominated by the per-thread leg anyway).
 //
+// ──────────────────────────────────────────────────────────────────────────
+// 跨厂商兼容性考量 (理论分析, 未实测):
+//   v3 (1-thread-per-tile) 依赖单 thread 持有 64 个 Kahan 累加器, 在 NVIDIA
+//   大寄存器文件 SM 上能硬抗 register spill; 但在 AMD RDNA / Intel Arc 等
+//   寄存器 file 相对较小或时钟较低的平台, v3 的 spill 会显著放大 "GPU 慢
+//   于 CPU" 现象. v4 把 64 个累加器分散到 64 thread (每 thread 持 8 个),
+//   让工作负载"通用化": 在 NV / AMD / Intel 三家 occupancy 模型里都能达到
+//   中高 occupancy, 跨厂商不应有明确的缓存/寄存器惩罚. 这是设计上的副产
+//   品优化, **尚未在 AMD / Intel GPU 上实测验证**, 仅理论推断.
+//   - shared memory 1 KB / workgroup (远低于任何厂商 L1 上限)
+//   - 不使用 shared memory atomics (AMD 上较慢, 已规避)
+//   - 所有 barrier 均在 workgroup-uniform 分支内 (不违反 SPIR-V 规则)
+//   - line 145 的 ternary 表达式规避了 dynamic local array indexing
+// ──────────────────────────────────────────────────────────────────────────
+//
 //   binding 0: ref gray (pc.w x pc.h), 1: cmp gray, 2: tsx_coarse, 3: tsy_coarse
 //   binding 4: tsx_out, 5: tsy_out
 //   pc.i0=tile_size, i1=half_tile, i2=tiles_x, i3=tiles_y,

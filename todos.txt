@@ -62,7 +62,12 @@ ImageMetadata::tags: 从未被写入
     用户案例 GPU 现 8.09s vs CPU 16.27s, GPU 快 2.0×.
   - 一致性回归: LongUnder2 dense t=96 包围曝光 + 高光恢复, CPU vs GPU v4 MAD 0.022,
     16-bit 量级单 LSB 抖动 (与 v3 旧路径 MAD ~0.016% 量级一致, 没有发散放大).
-  - 遗留: dense_level_fp64.comp 仍是 v3 形状 (1-thread-per-tile), 待后续也做 v4 重写.
+  - [完成 2026-07-05] dense_level_fp64.comp v4 重写: 同 fp32 v4 的 64-thread-per-tile
+    协同设计 (workgroup 8×8), 朴素 double 累加 (无 Kahan, double 52-bit 精度足够),
+    shared float sh_cost[4*64] 1KB 与 fp32 一致. dispatch (tx_L, ty_L, 1) fp32/fp64 共用.
+    RTX 3080 实测: LongUnder2 t=96 GPU 10.96s vs CPU 18.46s MAD 0.0037 (优于 fp32 v4
+    0.022); ExBkt t=64 GPU 6.53s vs CPU 9.26s, max 1 LSB / 3 / 6100万 像素 (0.000005%);
+    ExBkt t=128 GPU 6.79s vs CPU 8.97s, bit-identical (0 差异 / 0 MAD).
     AGENTS.md "GPU 已知性能陷阱" 段同步更新.
 
 [已完成] 包围曝光平均 (ExpBracketAverage):
