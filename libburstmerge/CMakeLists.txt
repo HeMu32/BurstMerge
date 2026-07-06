@@ -3,6 +3,7 @@ add_library(burstmerge STATIC
     src/api.cpp
     src/api_c.cpp
     src/core/float_image.cpp
+    src/core/dither.cpp
     src/core/profiler.cpp
     src/core/fft_util.cpp
     src/core/pipeline.cpp

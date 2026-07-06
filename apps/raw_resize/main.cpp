@@ -1,4 +1,5 @@
 #include "burstmerge/api.h"
+#include "burstmerge/internal/core/dither.h"
 #include "burstmerge/internal/core/float_image.h"
 #include "burstmerge/internal/io/dng_io.h"
 #include "cxxopts.hpp"
@@ -122,8 +123,8 @@ int main(int argc, char* argv[])
         ("scale", "Uniform scale factor (alternative to --width/--height)", cxxopts::value<double>())
         ("interp", "Interpolation method: bilinear, bicubic (default), area (area-average; recommended for heavy downscale), gaussian-area >=3x downscale only), 50percent (half-sample; >=2x downscale only)", cxxopts::value<std::string>()->default_value("bicubic"))
         ("bit-depth", "Output bit depth: 8, 10, 12, 14, 16 (default 16)", cxxopts::value<std::string>()->default_value("16"))
-        ("pseudo-olpf", "Apply a pseudo optical low-pass filter (gaussian pre-blur) before downscale to suppress moire. Sigma auto-adapts to downscale factor.", cxxopts::value<bool>())
-        ("olpf-strength", "Strength coefficient for --pseudo-olpf gaussian sigma (sigma = strength * log2(downscale)). Default 0.5.", cxxopts::value<double>()->default_value("0.5"))
+        ("pseudo-olpf", "Pseudo optical low-pass filter strength (gaussian pre-blur before downscale to suppress moire; sigma = strength * log2(downscale)). Default 0 (disabled).", cxxopts::value<double>()->default_value("0"))
+        ("dither", "TPDF dither amplitude in output LSB applied before uint16 quantisation to decorrelate quantisation noise. Default 0 (disabled). 1.0 = full ±1 LSB TPDF.", cxxopts::value<double>()->default_value("0"))
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -364,10 +365,9 @@ int main(int argc, char* argv[])
         burstmerge::FloatImage fin = burstmerge::HostBufferToFloatImage(raw.pixels);
 
         // ---- Process based on CFA type ----
-        const bool want_olpf = args.count("pseudo-olpf") > 0 && args["pseudo-olpf"].as<bool>();
-        const float olpf_strength = static_cast<float>(args["olpf-strength"].as<double>());
+        const float olpf_strength = static_cast<float>(args["pseudo-olpf"].as<double>());
         float olpf_sigma = 0.0f;
-        if (want_olpf)
+        if (olpf_strength > 0.0f)
         {
             const float src_w_eff = is_linear_rgb ? static_cast<float>(src_mosaic_w) : static_cast<float>(src_plane_w);
             const float dst_w_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_w) : static_cast<float>(dst_plane_w);
@@ -418,6 +418,15 @@ int main(int argc, char* argv[])
 
             std::cout << "Converting plane back to mosaic..." << std::endl;
             result = burstmerge::ConvertPlaneImageToMosaic(resized, dst_mosaic_w, dst_mosaic_h, period);
+        }
+
+        // ---- Optional dither (must operate on already-scaled float image,
+        //      before uint16 quantisation) ----
+        const float dither_amp = static_cast<float>(args["dither"].as<double>());
+        if (dither_amp > 0.0f)
+        {
+            std::cout << "Applying dither (amplitude=" << dither_amp << " LSB)..." << std::endl;
+            burstmerge::ApplyQuantizationDither(result, dither_amp);
         }
 
         // ---- Convert back to uint16 ----
