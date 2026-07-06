@@ -24,8 +24,14 @@ bool ParseInterpolation(const std::string& value, burstmerge::InterpolationMetho
 {
     std::string v = value;
     for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (v == "bilinear") { out = burstmerge::InterpolationMethod::Bilinear; return true; }
-    if (v == "bicubic")  { out = burstmerge::InterpolationMethod::Bicubic; return true; }
+    if (v == "bilinear")   { out = burstmerge::InterpolationMethod::Bilinear; return true; }
+    if (v == "bicubic")     { out = burstmerge::InterpolationMethod::Bicubic; return true; }
+    if (v == "area" || v == "area-average" || v == "area_average")
+        { out = burstmerge::InterpolationMethod::AreaAverage; return true; }
+    if (v == "gauss" || v == "gaussian" || v == "gaussian-area" || v == "gauss-area")
+        { out = burstmerge::InterpolationMethod::GaussianArea; return true; }
+    if (v == "50percent" || v == "half" || v == "half-sample" || v == "half_sample")
+        { out = burstmerge::InterpolationMethod::HalfSample; return true; }
     return false;
 }
 
@@ -33,8 +39,11 @@ const char* InterpName(burstmerge::InterpolationMethod m)
 {
     switch (m)
     {
-        case burstmerge::InterpolationMethod::Bilinear: return "bilinear";
-        case burstmerge::InterpolationMethod::Bicubic:  return "bicubic";
+        case burstmerge::InterpolationMethod::Bilinear:      return "bilinear";
+        case burstmerge::InterpolationMethod::Bicubic:       return "bicubic";
+        case burstmerge::InterpolationMethod::AreaAverage:   return "area-average";
+        case burstmerge::InterpolationMethod::GaussianArea:  return "gaussian-area";
+        case burstmerge::InterpolationMethod::HalfSample:    return "50percent";
     }
     return "unknown";
 }
@@ -111,8 +120,10 @@ int main(int argc, char* argv[])
         ("W,width", "Output mosaic width in pixels (must be multiple of CFA period, typically 2)", cxxopts::value<uint32_t>())
         ("H,height", "Output mosaic height in pixels (must be multiple of CFA period, typically 2)", cxxopts::value<uint32_t>())
         ("scale", "Uniform scale factor (alternative to --width/--height)", cxxopts::value<double>())
-        ("interp", "Interpolation method: bilinear, bicubic (default)", cxxopts::value<std::string>()->default_value("bicubic"))
+        ("interp", "Interpolation method: bilinear, bicubic (default), area (area-average; recommended for heavy downscale), gaussian-area >=3x downscale only), 50percent (half-sample; >=2x downscale only)", cxxopts::value<std::string>()->default_value("bicubic"))
         ("bit-depth", "Output bit depth: 8, 10, 12, 14, 16 (default 16)", cxxopts::value<std::string>()->default_value("16"))
+        ("pseudo-olpf", "Apply a pseudo optical low-pass filter (gaussian pre-blur) before downscale to suppress moire. Sigma auto-adapts to downscale factor.", cxxopts::value<bool>())
+        ("olpf-strength", "Strength coefficient for --pseudo-olpf gaussian sigma (sigma = strength * log2(downscale)). Default 0.5.", cxxopts::value<double>()->default_value("0.5"))
         ("h,help", "Print help");
 
     cxxopts::ParseResult args;
@@ -303,23 +314,107 @@ int main(int argc, char* argv[])
         std::cout << std::endl;
         std::cout << "  Target white level: " << target_white << std::endl;
 
+        // Gaussian-area algorithm requires a downscale factor of at least 3x
+        // (on either axis) for its advantage over plain area-average to
+        // materialise; below that, fall back to area-average to avoid the
+        // wasted expf() cost and degraded anti-alias approximation.
+        burstmerge::InterpolationMethod effective_interp = interp;
+        if (effective_interp == burstmerge::InterpolationMethod::GaussianArea)
+        {
+            const float src_w_eff = is_linear_rgb ? static_cast<float>(src_mosaic_w) : static_cast<float>(src_plane_w);
+            const float dst_w_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_w) : static_cast<float>(dst_plane_w);
+            const float src_h_eff = is_linear_rgb ? static_cast<float>(src_mosaic_h) : static_cast<float>(src_plane_h);
+            const float dst_h_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_h) : static_cast<float>(dst_plane_h);
+            const float downscale_x = (dst_w_eff > 0) ? src_w_eff / dst_w_eff : 1.0f;
+            const float downscale_y = (dst_h_eff > 0) ? src_h_eff / dst_h_eff : 1.0f;
+            const float min_downscale = std::min(downscale_x, downscale_y);
+            if (min_downscale < 3.0f)
+            {
+                std::cout << "  Warning: gaussian-area requires downscale >=3x, "
+                          << "current min downscale is "
+                          << static_cast<int>(std::lround(min_downscale * 100.0f)) / 100.0f
+                          << "x; falling back to area-average" << std::endl;
+                effective_interp = burstmerge::InterpolationMethod::AreaAverage;
+            }
+        }
+
+        // 50-percent algorithm samples only the top-left half of each downscale
+        // block; if the min downscale is below 2x the half-block collapses to
+        // 0 and the algorithm is degenerate. Fall back to area-average.
+        if (effective_interp == burstmerge::InterpolationMethod::HalfSample)
+        {
+            const float src_w_eff = is_linear_rgb ? static_cast<float>(src_mosaic_w) : static_cast<float>(src_plane_w);
+            const float dst_w_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_w) : static_cast<float>(dst_plane_w);
+            const float src_h_eff = is_linear_rgb ? static_cast<float>(src_mosaic_h) : static_cast<float>(src_plane_h);
+            const float dst_h_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_h) : static_cast<float>(dst_plane_h);
+            const float downscale_x = (dst_w_eff > 0) ? src_w_eff / dst_w_eff : 1.0f;
+            const float downscale_y = (dst_h_eff > 0) ? src_h_eff / dst_h_eff : 1.0f;
+            const float min_downscale = std::min(downscale_x, downscale_y);
+            if (min_downscale < 2.0f)
+            {
+                std::cout << "  Warning: 50percent requires downscale >=2x, "
+                          << "current min downscale is "
+                          << static_cast<int>(std::lround(min_downscale * 100.0f)) / 100.0f
+                          << "x; falling back to area-average" << std::endl;
+                effective_interp = burstmerge::InterpolationMethod::AreaAverage;
+            }
+        }
+
         // ---- Convert to FloatImage ----
         burstmerge::FloatImage fin = burstmerge::HostBufferToFloatImage(raw.pixels);
 
         // ---- Process based on CFA type ----
+        const bool want_olpf = args.count("pseudo-olpf") > 0 && args["pseudo-olpf"].as<bool>();
+        const float olpf_strength = static_cast<float>(args["olpf-strength"].as<double>());
+        float olpf_sigma = 0.0f;
+        if (want_olpf)
+        {
+            const float src_w_eff = is_linear_rgb ? static_cast<float>(src_mosaic_w) : static_cast<float>(src_plane_w);
+            const float dst_w_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_w) : static_cast<float>(dst_plane_w);
+            const float src_h_eff = is_linear_rgb ? static_cast<float>(src_mosaic_h) : static_cast<float>(src_plane_h);
+            const float dst_h_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_h) : static_cast<float>(dst_plane_h);
+            const float down_x = (dst_w_eff > 0) ? src_w_eff / dst_w_eff : 1.0f;
+            const float down_y = (dst_h_eff > 0) ? src_h_eff / dst_h_eff : 1.0f;
+            const float down_avg = 0.5f * (down_x + down_y);
+            if (down_avg > 1.5f)
+            {
+                olpf_sigma = olpf_strength * std::log2(down_avg);
+                std::cout << "  Pseudo-OLPF: sigma=" << olpf_sigma
+                          << " (strength=" << olpf_strength
+                          << ", downscale avg=" << static_cast<int>(std::lround(down_avg * 100.0f)) / 100.0f
+                          << "x)" << std::endl;
+            }
+            else
+            {
+                std::cout << "  Pseudo-OLPF: skipped (downscale <= 1.5x)" << std::endl;
+            }
+        }
+
         burstmerge::FloatImage result;
         if (is_linear_rgb)
         {
+            burstmerge::FloatImage src_for_resize = fin;
+            if (olpf_sigma > 0.0f)
+            {
+                std::cout << "Applying pseudo-OLPF (LinearRaw)..." << std::endl;
+                src_for_resize = burstmerge::GaussianBlur(fin, olpf_sigma);
+            }
             std::cout << "Resizing (LinearRaw, 3ch)..." << std::endl;
-            result = burstmerge::ResizeImage(fin, dst_mosaic_w, dst_mosaic_h, interp);
+            result = burstmerge::ResizeImage(src_for_resize, dst_mosaic_w, dst_mosaic_h, effective_interp);
         }
         else
         {
             std::cout << "Converting mosaic to plane image..." << std::endl;
             burstmerge::FloatImage plane = burstmerge::ConvertMosaicToPlaneImage(fin, period);
 
-            std::cout << "Resizing plane image (" << InterpName(interp) << ")..." << std::endl;
-            burstmerge::FloatImage resized = burstmerge::ResizeImage(plane, dst_plane_w, dst_plane_h, interp);
+            if (olpf_sigma > 0.0f)
+            {
+                std::cout << "Applying pseudo-OLPF (plane)..." << std::endl;
+                plane = burstmerge::GaussianBlur(plane, olpf_sigma);
+            }
+
+            std::cout << "Resizing plane image (" << InterpName(effective_interp) << ")..." << std::endl;
+            burstmerge::FloatImage resized = burstmerge::ResizeImage(plane, dst_plane_w, dst_plane_h, effective_interp);
 
             std::cout << "Converting plane back to mosaic..." << std::endl;
             result = burstmerge::ConvertPlaneImageToMosaic(resized, dst_mosaic_w, dst_mosaic_h, period);

@@ -325,6 +325,24 @@ void ClearDngOriginalSizes(DngNegativeHolder* holder)
     holder->negative->ClearOriginalSizes();
 }
 
+void ClearDngCameraHints(DngNegativeHolder* holder)
+{
+    if (!holder || !holder->negative) return;
+    dng_negative& neg = *holder->negative;
+
+    dng_urational invalid;
+    invalid.Clear();
+    neg.SetAntiAliasStrength(invalid);
+    neg.SetChromaBlurRadius(invalid);
+
+    neg.SetBaselineSharpness(static_cast<real64>(0.0));
+    neg.SetBaselineNoise(static_cast<real64>(1.0));
+
+    neg.SetNoiseProfile(dng_noise_profile());
+
+    neg.SetGreenSplit(static_cast<uint32>(0));
+}
+
 } // namespace io
 
 // ============================================================

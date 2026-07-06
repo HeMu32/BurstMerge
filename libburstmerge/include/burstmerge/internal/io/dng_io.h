@@ -144,6 +144,7 @@ void SetDngBaselineExposure(DngNegativeHolder* holder, double exposure);
 void ClearDngMosaicInfo(DngNegativeHolder* holder);
 void SetDngDimensions(DngNegativeHolder* holder, uint32_t width, uint32_t height);
 void ClearDngOriginalSizes(DngNegativeHolder* holder);
+void ClearDngCameraHints(DngNegativeHolder* holder);
 }
 
 } // namespace burstmerge
