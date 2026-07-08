@@ -1,4 +1,5 @@
 #include "burstmerge/api.h"
+#include "burstmerge/internal/core/chroma_effects.h"
 #include "burstmerge/internal/core/dither.h"
 #include "burstmerge/internal/core/float_image.h"
 #include "burstmerge/internal/core/image_resize.h"
@@ -9,9 +10,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -22,6 +25,57 @@
 #endif
 
 namespace {
+
+// ---- Diagnostic stage-timer -------------------------------------------------
+// Same env-var and debug/release semantics as the project-wide profiler (see
+// profiler.cpp::ProfileEnabled) and the chroma-effects timing (see
+// chroma_effects.cpp `ChromaTimingEnabled`):
+//
+//   * In a Release build (NDEBUG defined) the entire StageTimer struct and
+//     the macro STAGE_TIMER expand to nothing, so the resize utility has
+//     zero overhead and stays bit-identical to a build that never had them.
+//   * In a Debug build, the tier is selected at RUNTIME by the
+//     BURSTMERGE_PROFILE environment variable. When it is unset or set to
+//     "0", the timers are constructed but report nothing. When set to any
+//     other value, each StageTimer prints a stage-tag and wall-clock
+//     millisecond count on scope exit to stderr (so stdout progress
+//     messages stay clean).
+//
+// This unifies the resize tool's diagnostics with the rest of the project:
+// one env var controls both StageTimer in main.cpp and ChromaTimer inside
+// chroma_effects.cpp.
+#ifndef NDEBUG
+
+inline bool StageTimingEnabled()
+{
+    static int enabled = []()
+    {
+        const char* env = std::getenv("BURSTMERGE_PROFILE");
+        return (env && env[0] && env[0] != '0') ? 1 : 0;
+    }();
+    return enabled != 0;
+}
+
+struct StageTimer
+{
+    const char* tag;
+    std::chrono::steady_clock::time_point t0;
+    explicit StageTimer(const char* t) : tag(t), t0(std::chrono::steady_clock::now()) {}
+    ~StageTimer()
+    {
+        if (!StageTimingEnabled()) return;
+        auto t1 = std::chrono::steady_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        std::fprintf(stderr, "[stage-timing] %-36s %8lld ms\n", tag, static_cast<long long>(ms));
+    }
+};
+#define STAGE_TIMER(tag) StageTimer _stage_t(tag)
+
+#else  // NDEBUG
+
+#define STAGE_TIMER(tag) ((void)0)
+
+#endif  // NDEBUG
 
 bool ParseInterpolation(const std::string& value, burstmerge::InterpolationMethod& out)
 {
@@ -216,9 +270,12 @@ int main(int argc, char* argv[])
             std::cout << "  Temp dir: " << convert_dir << std::endl;
             std::vector<std::string> single_input = { input_path };
             std::vector<std::string> converted;
-            if (!burstmerge::RunAdobeDngConverter(single_input, convert_dir, converted) || converted.empty())
             {
-                throw std::runtime_error("Adobe DNG Converter failed or timed out");
+                STAGE_TIMER("AdobeDngConverter (ARW -> DNG)");
+                if (!burstmerge::RunAdobeDngConverter(single_input, convert_dir, converted) || converted.empty())
+                {
+                    throw std::runtime_error("Adobe DNG Converter failed or timed out");
+                }
             }
             dng_path = converted[0];
             std::cout << "  Converted: " << dng_path << std::endl;
@@ -228,9 +285,19 @@ int main(int argc, char* argv[])
         }
 
         // ---- Read DNG ----
+        // Wrap DngReader construction + Read in a small IIFE block scope so
+        // the StageTimer's destructor fires (and prints to stderr) BEFORE the
+        // following std::cout metadata log dump — the resize tool's stdout
+        // progress (`Source: ...`, `Target mosaic: ...`) arrives right after
+        // DNG parsing completes, but the stage timing should land just on its
+        // heels rather than after the metadata logging.
         std::cout << "Reading DNG..." << std::endl;
-        burstmerge::DngReader reader(dng_path.c_str());
-        burstmerge::RawImage raw = reader.Read();
+        burstmerge::RawImage raw = [&]() -> burstmerge::RawImage
+        {
+            STAGE_TIMER("DngReader::Read (parse+decode)");
+            burstmerge::DngReader reader(dng_path.c_str());
+            return reader.Read();
+        }();
         burstmerge::RawMetadata& meta = raw.metadata;
 
         uint32_t src_mosaic_w = meta.width;
@@ -381,6 +448,19 @@ int main(int argc, char* argv[])
         // ---- Convert to FloatImage ----
         burstmerge::FloatImage fin = burstmerge::HostBufferToFloatImage(raw.pixels);
 
+        // ---- Optional chromatic-aberration Lo-Fi effect -------------------
+        // Driven completely by compile-time macros (see
+        // burstmerge/internal/core/chroma_effects.h). All geometry is measured
+        // in the input image's own pixel units, so this MUST run before the
+        // resize step. The function is a no-op when EFFECT_CA_Enabled is 0.
+        {
+            STAGE_TIMER("ApplyChromaticEffects (chroma, full-res)");
+            burstmerge::ApplyChromaticEffects(fin,
+                                               meta.mosaic_pattern_width,
+                                               meta.mosaic_pattern,
+                                               static_cast<float>(meta.white_level));
+        }
+
         // ---- Process based on CFA type ----
         const float olpf_strength = static_cast<float>(args["pseudo-olpf"].as<double>());
         float olpf_sigma = 0.0f;
@@ -414,27 +494,43 @@ int main(int argc, char* argv[])
             if (olpf_sigma > 0.0f)
             {
                 std::cout << "Applying pseudo-OLPF (LinearRaw)..." << std::endl;
+                STAGE_TIMER("GaussianBlur (OLPF, LinearRaw)");
                 src_for_resize = burstmerge::GaussianBlur(fin, olpf_sigma);
             }
             std::cout << "Resizing (LinearRaw, 3ch)..." << std::endl;
-            result = burstmerge::ResizeImage(src_for_resize, dst_mosaic_w, dst_mosaic_h, effective_interp);
+            {
+                STAGE_TIMER("ResizeImage (LinearRaw)");
+                result = burstmerge::ResizeImage(src_for_resize, dst_mosaic_w, dst_mosaic_h, effective_interp);
+            }
         }
         else
         {
             std::cout << "Converting mosaic to plane image..." << std::endl;
-            burstmerge::FloatImage plane = burstmerge::ConvertMosaicToPlaneImage(fin, period);
+            burstmerge::FloatImage plane;
+            {
+                STAGE_TIMER("ConvertMosaicToPlaneImage (pre-resize)");
+                plane = burstmerge::ConvertMosaicToPlaneImage(fin, period);
+            }
 
             if (olpf_sigma > 0.0f)
             {
                 std::cout << "Applying pseudo-OLPF (plane)..." << std::endl;
+                STAGE_TIMER("GaussianBlur (OLPF, plane)");
                 plane = burstmerge::GaussianBlur(plane, olpf_sigma);
             }
 
             std::cout << "Resizing plane image (" << InterpName(effective_interp) << ")..." << std::endl;
-            burstmerge::FloatImage resized = burstmerge::ResizeImage(plane, dst_plane_w, dst_plane_h, effective_interp);
+            burstmerge::FloatImage resized;
+            {
+                STAGE_TIMER("ResizeImage (plane, Bayer)");
+                resized = burstmerge::ResizeImage(plane, dst_plane_w, dst_plane_h, effective_interp);
+            }
 
             std::cout << "Converting plane back to mosaic..." << std::endl;
-            result = burstmerge::ConvertPlaneImageToMosaic(resized, dst_mosaic_w, dst_mosaic_h, period);
+            {
+                STAGE_TIMER("ConvertPlaneImageToMosaic");
+                result = burstmerge::ConvertPlaneImageToMosaic(resized, dst_mosaic_w, dst_mosaic_h, period);
+            }
         }
 
         // ---- Bit-depth scale (must run before dither and quantisation so
@@ -453,12 +549,17 @@ int main(int argc, char* argv[])
         if (dither_amp > 0.0f)
         {
             std::cout << "Applying dither (amplitude=" << dither_amp << " LSB)..." << std::endl;
+            STAGE_TIMER("ApplyQuantizationDither");
             burstmerge::ApplyQuantizationDither(result, dither_amp);
         }
 
         // ---- Convert back to uint16 ----
         std::cout << "Quantizing to uint16..." << std::endl;
-        burstmerge::HostBuffer averaged = burstmerge::FloatImageToUint16HostBuffer(result, target_white);
+        burstmerge::HostBuffer averaged;
+        {
+            STAGE_TIMER("FloatImageToUint16HostBuffer (quantize)");
+            averaged = burstmerge::FloatImageToUint16HostBuffer(result, target_white);
+        }
 
         // ---- Prepare output RawImage ----
         burstmerge::RawImage output;
@@ -490,7 +591,10 @@ int main(int argc, char* argv[])
             burstmerge::io::SetDngBlackLevel(output.metadata.dng_negative, output.metadata.black_level);
         }
         burstmerge::DngWriter writer(output.metadata.dng_negative);
-        writer.Write(output_path.c_str(), output);
+        {
+            STAGE_TIMER("DngWriter::Write (encode + disk)");
+            writer.Write(output_path.c_str(), output);
+        }
 
         std::cout << "Done: " << output_path << std::endl;
         std::cout << "  " << dst_mosaic_w << "x" << dst_mosaic_h

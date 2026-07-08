@@ -5,6 +5,7 @@ add_library(burstmerge STATIC
     src/core/float_image.cpp
     src/core/dither.cpp
     src/core/image_resize.cpp
+    src/core/chroma_effects.cpp
     src/core/profiler.cpp
     src/core/fft_util.cpp
     src/core/pipeline.cpp
@@ -130,6 +131,7 @@ target_compile_definitions(burstmerge PRIVATE
 if(BURSTMERGE_GPU_FP64)
     target_compile_definitions(burstmerge PRIVATE BURSTMERGE_HAVE_GPU_FP64)
 endif()
+
 
 target_link_libraries(burstmerge
     PUBLIC  dng_sdk
