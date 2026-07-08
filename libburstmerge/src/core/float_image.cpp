@@ -579,12 +579,33 @@ FloatImage ResizeImage(const FloatImage& src,
             const int32_t sw = static_cast<int32_t>(src.width);
             const int32_t sh = static_cast<int32_t>(src.height);
 
-            // Bayer 2x2 deinterleaved plane: route each of the 4 channels to a
-            // distinct 2x2 quadrant of the source block matching its physical
-            // bayer offset, so channel windows tile without overlap. Each
-            // channel still consumes 50% of the block width and 50% of the
-            // block height. Other channel counts fall back to the original
-            // centered-window behavior.
+            // Half-sample geometry (Bayer-aware path, src.channels == 4).
+            //
+            // Input is a 4-channel plane image from a 2x2 Bayer CFA deinterleave
+            // (ConvertMosaicToPlaneImage): plane pixel (px, py) channel c maps
+            // back to raw bayer pixel (2*py + (c>>1), 2*px + (c&1)). Each output
+            // plane pixel covers a source plane block of width ~step_x and
+            // height ~step_y (block_w, block_h), i.e. 2*step_x * 2*step_y raw
+            // bayer pixels = step_x * step_y bayer periods containing a total
+            // of (step_x*step_y) samples per channel.
+            //
+            // The source block is split into a 2x2 quadrant grid; each channel
+            // is routed to the quadrant matching its physical bayer offset, so
+            // every pair of channels samples disjoint source pixels. Per channel
+            // each quadrant is quar_w x quar_h = block_w/2 x block_h/2 plane
+            // pixels = block_w*block_h/4 samples of that channel (50% of the
+            // block on each axis == 25% of the block area, hence 25% of the
+            // per-channel raw samples available in the block).
+            //
+            // The four channel quadrants tile the source block exactly (4 *
+            // 25% = 100%), which is the theoretical utilization ceiling for the
+            // "no cross-channel overlap" constraint: enlarging any channel
+            // window would have to invade the source plane region consumed by a
+            // sibling channel, mixing spatial phases and re-introducing the
+            // cross-channel aliasing this layout was designed to remove.
+            //
+            // For non-Bayer inputs (linear RGB / X-Trans / other channel counts)
+            // fall back to the original centered-window behaviour below.
             const bool bayer_quadrant = (out.channels == 4);
 
             if (bayer_quadrant)
@@ -610,6 +631,10 @@ FloatImage ResizeImage(const FloatImage& src,
 
                             for (uint32_t c = 0; c < out.channels; ++c)
                             {
+                                // Pick the quadrant matching this channel's
+                                // physical bayer offset within the 2x2 CFA:
+                                // c=0 -> (0,0) top-left, c=1 -> (1,0) top-right,
+                                // c=2 -> (0,1) bottom-left, c=3 -> (1,1) bottom-right.
                                 const int32_t qx = (c & 1) * quar_w;
                                 const int32_t qy = (c >> 1) * quar_h;
                                 int32_t sx_lo = block_x_lo + qx;

@@ -288,11 +288,26 @@ int main(int argc, char* argv[])
             }
         }
 
-        uint32_t target_white = static_cast<uint32_t>(
-            std::lround(static_cast<double>(meta.white_level) *
-                        static_cast<double>((1u << bit_depth) - 1) / 65535.0));
+        // Output white level fills the entire target bit-depth container, so
+        // bit_scale = target_white / sensor_white re-maps sensor LSB into
+        // output LSB and the dither amplitude is naturally expressed in
+        // output LSB. This matches ResolveTargetWhiteLevel in the main
+        // pipeline (libburstmerge/src/core/pipeline.cpp).
+        uint32_t target_white = (1u << bit_depth) - 1u;
         if (target_white > 65535) target_white = 65535;
         if (target_white < 1) target_white = 1;
+
+        // Bit-depth scaling factor: rebase float-image values from the sensor
+        // (input) LSB scale to the output LSB scale before quantisation. The
+        // main pipeline applies this in pipeline.cpp; without it, downscaled
+        // bit_depth below input bit_depth would clamp most pixels to the
+        // (tiny) output range and dither amplitudes would be expressed in
+        // input LSB rather than output LSB.
+        const uint32_t sensor_white = meta.white_level;
+        const float bit_scale = (sensor_white > 0 && target_white != sensor_white)
+            ? static_cast<float>(target_white) / static_cast<float>(sensor_white)
+            : 1.0f;
+
 
         uint32_t src_plane_w = src_mosaic_w;
         uint32_t src_plane_h = src_mosaic_h;
@@ -420,7 +435,17 @@ int main(int argc, char* argv[])
             result = burstmerge::ConvertPlaneImageToMosaic(resized, dst_mosaic_w, dst_mosaic_h, period);
         }
 
-        // ---- Optional dither (must operate on already-scaled float image,
+        // ---- Bit-depth scale (must run before dither and quantisation so
+        //      pixel values and dither amplitude are both in output LSB) ----
+        if (bit_scale != 1.0f)
+        {
+            std::cout << "Applying bit-depth scale (x" << bit_scale
+                      << ", sensor_white=" << sensor_white
+                      << " -> target_white=" << target_white << ")..." << std::endl;
+            for (float& v : result.data) v *= bit_scale;
+        }
+
+        // ---- Optional dither (operates on output-LSB-scaled float image,
         //      before uint16 quantisation) ----
         const float dither_amp = static_cast<float>(args["dither"].as<double>());
         if (dither_amp > 0.0f)
@@ -439,6 +464,11 @@ int main(int argc, char* argv[])
         output.metadata.width = dst_mosaic_w;
         output.metadata.height = dst_mosaic_h;
         output.metadata.white_level = target_white;
+        if (bit_scale != 1.0f)
+        {
+            for (int i = 0; i < 4; ++i)
+                output.metadata.black_level[i] = meta.black_level[i] * bit_scale;
+        }
         output.pixels = std::move(averaged);
 
         if (is_linear_rgb || result.channels == 3)
@@ -453,6 +483,10 @@ int main(int argc, char* argv[])
         // ---- Write DNG ----
         std::cout << "Writing DNG..." << std::endl;
         burstmerge::io::SetDngWhiteLevel(output.metadata.dng_negative, output.metadata.white_level);
+        if (bit_scale != 1.0f)
+        {
+            burstmerge::io::SetDngBlackLevel(output.metadata.dng_negative, output.metadata.black_level);
+        }
         burstmerge::DngWriter writer(output.metadata.dng_negative);
         writer.Write(output_path.c_str(), output);
 
