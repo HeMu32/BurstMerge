@@ -4,6 +4,7 @@ add_library(burstmerge STATIC
     src/api_c.cpp
     src/core/float_image.cpp
     src/core/dither.cpp
+    src/core/image_resize.cpp
     src/core/profiler.cpp
     src/core/fft_util.cpp
     src/core/pipeline.cpp
@@ -25,6 +26,7 @@ add_library(burstmerge STATIC
     src/denoise/temporal.cpp
     src/exposure/exposure.cpp
     src/io/dng_sdk_bridge.cpp
+    src/io/dng_sdk_bridge_resize.cpp
     src/io/dng_reader.cpp
     src/io/dng_writer.cpp
     src/io/image_decoder.cpp

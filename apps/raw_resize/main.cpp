@@ -1,7 +1,9 @@
 #include "burstmerge/api.h"
 #include "burstmerge/internal/core/dither.h"
 #include "burstmerge/internal/core/float_image.h"
+#include "burstmerge/internal/core/image_resize.h"
 #include "burstmerge/internal/io/dng_io.h"
+#include "burstmerge/internal/io/dng_sdk_bridge_resize.h"
 #include "cxxopts.hpp"
 
 #include <algorithm>

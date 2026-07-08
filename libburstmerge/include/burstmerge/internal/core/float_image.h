@@ -34,30 +34,12 @@ void Downsample2x(const FloatImage& src, FloatImage& dst);
 FloatImage Downsample4x(const FloatImage& src);
 void Downsample4x(const FloatImage& src, FloatImage& dst);
 FloatImage BoxBlur(const FloatImage& src, int radius);
-// Separable Gaussian blur applied per channel independently. sigma is the
-// standard deviation in pixels. radius defaults to ceil(3*sigma) when not
-// supplied. Used as a pseudo-OLPF pre-filter before aggressive downscale
-// to suppress moiré that the chosen resampler would otherwise alias.
-FloatImage GaussianBlur(const FloatImage& src, float sigma, int radius = -1);
 FloatImage WarpTranslate(const FloatImage& src, float shift_x, float shift_y);
 FloatImage ConvertMosaicToPlaneImage(const FloatImage& src, uint32_t cfa_period);
 FloatImage ConvertPlaneImageToMosaic(const FloatImage& src,
                                      uint32_t mosaic_width,
                                      uint32_t mosaic_height,
                                      uint32_t cfa_period);
-enum class InterpolationMethod
-{
-    Bilinear,
-    Bicubic,
-    AreaAverage,
-    GaussianArea,
-    HalfSample
-};
-
-FloatImage ResizeImage(const FloatImage& src,
-                       uint32_t dst_width, uint32_t dst_height,
-                       InterpolationMethod method);
-
 // Average all channels of a plane image into a single grayscale image.
 // For Bayer plane images (channels=4, CFA period=2) this is equivalent
 // to averaging each 2×2 RGGB block of the original mosaic.
