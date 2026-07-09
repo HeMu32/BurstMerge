@@ -612,15 +612,32 @@ void ApplyLaCAOnLinearRGB(FloatImage& img, const PrimaryMask& mask, float width_
 //     resulting gray image has the original (mosaic) width/height.
 FloatImage BuildGrayMosaic(const FloatImage& img, uint32_t period)
 {
+    // When the input is already a plane image (channels == period² for Bayer /
+    // multi-channel for LinearRaw), average across all channels to produce a
+    // single-channel grayscale in the same pixel grid — no mosaic bloom needed
+    // because the caller already committed to plane-domain processing.
+    const bool input_is_plane = (img.channels > 1 && period > 1);
+
     FloatImage gray;
-    gray.width = img.width;
-    gray.height = img.height;
+    if (input_is_plane)
+    {
+        // Plane input: grayscale in plane-pixel dimensions.
+        gray.width = img.width;
+        gray.height = img.height;
+    }
+    else
+    {
+        // Mosaic input: grayscale in mosaic-pixel dimensions.
+        gray.width = img.width;
+        gray.height = img.height;
+    }
     gray.channels = 1;
     gray.data.resize(static_cast<size_t>(gray.width) * gray.height, 0.0f);
 
-    if (period <= 1 || img.channels != 1)
+    if (period <= 1 || img.channels > 1)
     {
-        // LinearRaw / 3-channel: average all channels per pixel.
+        // LinearRaw (3ch) or plane image (period² channels): average all
+        // channels per pixel.
         const uint32_t ch = std::max<uint32_t>(1, img.channels);
         const float inv_ch = 1.0f / static_cast<float>(ch);
         ParallelForRows(img.height,
@@ -640,9 +657,9 @@ FloatImage BuildGrayMosaic(const FloatImage& img, uint32_t period)
         return gray;
     }
 
-    // Bayer: deinterleave to plane (ch=period²), average all planes to a
-    // single-channel plane grayscale, then bloom each plane pixel into its
-    // period×period mosaic block.
+    // Bayer mosaic input (1 channel, period > 1): deinterleave to plane,
+    // average all planes to a single-channel plane grayscale, then bloom
+    // each plane pixel into its period×period mosaic block.
     const FloatImage plane = ConvertMosaicToPlaneImage(img, period);
     const uint32_t plane_ch = plane.channels; // period²
     const float inv_ch = 1.0f / static_cast<float>(plane_ch);
@@ -799,9 +816,24 @@ void ApplyLoCA(FloatImage& img,
 {
     if (strength <= 0.0f) return;
 
-    // Image diagonal in MOSAIC pixels — the unit Width% is referenced to.
-    const float mosaic_w = static_cast<float>(img.width);
-    const float mosaic_h = static_cast<float>(img.height);
+    // Detect plane-domain input: when the caller has already deinterleaved
+    // the mosaic to a plane image (channels == period², period>1). In that
+    // case all geometric quantities must be projected back to MOSAIC pixel
+    // units (the unit the user's Width% knob references) by multiplying the
+    // plane dimensions by the actual CFA period; the Sobel kernel/box blur
+    // operate in the plane grid, but the box-blur radius (in plane pixels)
+    // must be the mosaic-domain radius divided by period.
+    const bool input_is_plane = (period > 1 && img.channels > 1);
+
+    // Image dimensions in MOSAIC pixels — the unit Width% is referenced to.
+    // For a plane-domain input each plane pixel spans `period` mosaic pixels
+    // along both axes, so the mosaic dimensions are plane dims × period.
+    const float mosaic_w = input_is_plane
+        ? static_cast<float>(img.width)  * static_cast<float>(period)
+        : static_cast<float>(img.width);
+    const float mosaic_h = input_is_plane
+        ? static_cast<float>(img.height) * static_cast<float>(period)
+        : static_cast<float>(img.height);
     const float diag_mosaic = std::sqrt(mosaic_w * mosaic_w + mosaic_h * mosaic_h);
     if (diag_mosaic <= 0.0f) return;
 
@@ -809,7 +841,16 @@ void ApplyLoCA(FloatImage& img,
     // so the radius of the box blur is exactly half_width).
     const float half_width_mosaic =
         static_cast<float>(width_percent) * 0.01f * diag_mosaic * 0.5f;
-    int radius = static_cast<int>(std::lround(half_width_mosaic));
+    // Convert mosaic-pixel radius to plane-pixel radius when running in the
+    // plane domain. We round to the nearest whole plane pixel; this preserves
+    // the "Width% of mosaic diagonal" semantics exactly because half_width
+    // was already computed in mosaic pixels via diag_mosaic above.
+    float half_width_grid = half_width_mosaic;
+    if (input_is_plane)
+    {
+        half_width_grid /= static_cast<float>(period);
+    }
+    int radius = static_cast<int>(std::lround(half_width_grid));
     if (radius < 0) radius = 0;
 
     // 1) Grayscale mosaic image (averaged across all colour channels).
@@ -826,9 +867,14 @@ void ApplyLoCA(FloatImage& img,
         boost = ComputeLoCABoostMap(gray_mosaic, strength, min_sensi, white_level);
     }
 
-    // 3) Box diffusion in the mosaic domain. radius 0 = no blur (Keeps the
-    // effect strictly on the Sobel-positive pixels). For LinearRaw (3ch)
-    // the diffusion happens at full mosaic (= LinearRaw) resolution.
+    // 3) Box diffusion in the working-domain grid (mosaic or plane). radius
+    //    0 = no blur (keeps the effect strictly on the Sobel-positive pixels).
+    //    For the legacy mosaic path the diffusion happens at full mosaic
+    //    resolution; for the plane-domain path the radius has already been
+    //    scaled to plane pixels above, so the diffusion happens at plane
+    //    resolution. In both cases the fringing band covers the equivalent
+    //    physical extent on the original sensor image because the radius
+    //    scaling uses the actual `period` of the input.
     //
     // We use the separable (2-pass horizontal+vertical) implementation defined
     // above in this TU: it is O(N·(2r+1)) rather than O(N·(2r+1)²), giving
@@ -854,8 +900,48 @@ void ApplyLoCA(FloatImage& img,
     //      CFA phase code at (py*period + px) matches one of the preset-
     //      selected primaries. The two green Bayer phases are both affected
     //      when the preset touches G, exactly like in LaCA.
+    //    * Bayer plane (period² channels): same phase selection logic but
+    //      applied at the channel index level — plane channel c corresponds
+    //      to mosaic_pattern[c] (0=R, 1=G, 2=B). No per-pixel phase dispatch
+    //      is needed because in the plane domain all pixels of a given channel
+    //      share the same CFA colour.
     const PrimaryMask mask = ResolveLoCAMask();
-    if (period > 1 && img.channels == 1)
+    if (period > 1 && img.channels > 1)
+    {
+        // Bayer plane input: per-channel phase lookup, then per-(pixel,channel)
+        // addition. Each channel c is a fixed CFA colour (mosaic_pattern[c]).
+        const float wl = static_cast<float>(white_level);
+        const uint32_t total_ch = img.channels;
+        std::vector<uint8_t> channel_selected(total_ch, 0);
+        for (uint32_t c = 0; c < total_ch && c < 36; ++c)
+        {
+            if (PrimaryMatches(mosaic_pattern[c], mask))
+                channel_selected[c] = 1;
+        }
+
+        ParallelForRows(img.height,
+            RecommendedImageRowGrain(img.width, 1, kRowGrainMinPixels, kRowGrainCoarseRows),
+            [&](uint32_t y_begin, uint32_t y_end)
+        {
+            for (uint32_t y = y_begin; y < y_end; ++y)
+            {
+                for (uint32_t x = 0; x < img.width; ++x)
+                {
+                    const float add = boost.At(x, y, 0) * wl;
+                    if (add <= 0.0f) continue;
+                    for (uint32_t c = 0; c < total_ch; ++c)
+                    {
+                        if (!channel_selected[c]) continue;
+                        float v = img.At(x, y, c) + add;
+                        if (v > wl) v = wl;
+                        else if (v < 0.0f) v = 0.0f;
+                        img.At(x, y, c) = v;
+                    }
+                }
+            }
+        }, "chroma_loca_boost_bayer_plane");
+    }
+    else if (period > 1 && img.channels == 1)
     {
         // Bayer mosaic: per-pixel phase lookup.
         const float wl = static_cast<float>(white_level);
@@ -957,6 +1043,7 @@ void ApplyChromaticEffects(FloatImage& img,
                 if (period > 1 && img.channels == 1)
                 {
                     // Bayer mosaic: jump to plane, rescale, jump back.
+                    // (Legacy path: caller passed in a 1-channel mosaic.)
                     FloatImage plane;
                     {
                         BURSTMERGE_CHROMA_SCOPE_TIMER("  ConvertMosaicToPlaneImage");
@@ -971,6 +1058,20 @@ void ApplyChromaticEffects(FloatImage& img,
                         BURSTMERGE_CHROMA_SCOPE_TIMER("  ConvertPlaneImageToMosaic");
                         img = ConvertPlaneImageToMosaic(plane, img.width, img.height, period);
                     }
+                }
+                else if (period > 1 && img.channels > 1)
+                {
+                    // Bayer plane: caller has already deinterleaved the mosaic
+                    // to a plane image (channels == period²). Apply LaCA
+                    // in the plane domain directly — no mosaic↔plane round-
+                    // trip. The downstream resize/assembly happens once at the
+                    // caller side.  ApplyLaCAOnPlane internally projects the
+                    // plane dimensions back to mosaic pixel units (× period)
+                    // for all radial geometry, so the Width% knob references
+                    // the SAME mosaic diagonal as in the legacy path.
+                    BURSTMERGE_CHROMA_SCOPE_TIMER("  ApplyLaCAOnPlane (in-place)");
+                    ApplyLaCAOnPlane(img, period, mosaic_pattern, mask,
+                                     static_cast<float>(width_pct));
                 }
                 else if (img.channels == 3)
                 {

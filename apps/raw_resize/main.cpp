@@ -453,12 +453,41 @@ int main(int argc, char* argv[])
         // burstmerge/internal/core/chroma_effects.h). All geometry is measured
         // in the input image's own pixel units, so this MUST run before the
         // resize step. The function is a no-op when EFFECT_CA_Enabled is 0.
+        //
+        // For Bayer mosaic input we deinterleave to a plane image ONCE here
+        // and run CA in the plane domain, so the downstream resize receives a
+        // plane image directly. Applying LaCA in the plane domain (rather
+        // than round-tripping plane→mosaic→plane between LaCA and resize)
+        // avoids the channel-misalignment artefact that the previous mosaic-
+        // domain re-interleave + plane-domain half-sample combination pro-
+        // duced on continuous edges.  See chroma_effects.cpp for the equiva-
+        // lence argument: ApplyLaCAOnPlane internally projects plane dimen-
+        // sions back to mosaic pixel units (× period), so the Width% knob
+        // references the same mosaic diagonal as the legacy mosaic path.
+        const bool ca_plane_path = (!is_linear_rgb) && (period > 1);
+        burstmerge::FloatImage plane_for_ca;
+        if (ca_plane_path)
+        {
+            std::cout << "Converting mosaic to plane image (pre-CA)..." << std::endl;
+            STAGE_TIMER("ConvertMosaicToPlaneImage (pre-CA)");
+            plane_for_ca = burstmerge::ConvertMosaicToPlaneImage(fin, period);
+        }
         {
             STAGE_TIMER("ApplyChromaticEffects (chroma, full-res)");
-            burstmerge::ApplyChromaticEffects(fin,
-                                               meta.mosaic_pattern_width,
-                                               meta.mosaic_pattern,
-                                               static_cast<float>(meta.white_level));
+            if (ca_plane_path)
+            {
+                burstmerge::ApplyChromaticEffects(plane_for_ca,
+                                                  meta.mosaic_pattern_width,
+                                                  meta.mosaic_pattern,
+                                                  static_cast<float>(meta.white_level));
+            }
+            else
+            {
+                burstmerge::ApplyChromaticEffects(fin,
+                                                  meta.mosaic_pattern_width,
+                                                  meta.mosaic_pattern,
+                                                  static_cast<float>(meta.white_level));
+            }
         }
 
         // ---- Process based on CFA type ----
@@ -505,12 +534,10 @@ int main(int argc, char* argv[])
         }
         else
         {
-            std::cout << "Converting mosaic to plane image..." << std::endl;
-            burstmerge::FloatImage plane;
-            {
-                STAGE_TIMER("ConvertMosaicToPlaneImage (pre-resize)");
-                plane = burstmerge::ConvertMosaicToPlaneImage(fin, period);
-            }
+            // Bayer path: plane_for_ca was deinterleaved once above (before
+            // CA) and has already had chromatic effects applied in place.
+            // No second mosaic→plane conversion is needed here.
+            burstmerge::FloatImage plane = std::move(plane_for_ca);
 
             if (olpf_sigma > 0.0f)
             {

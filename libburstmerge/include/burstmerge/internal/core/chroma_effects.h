@@ -136,6 +136,7 @@ enum LoCAColor
 #endif
 
 #ifndef EFFECT_LaCA_Width
+// Note: Always introduce bad (jaggy) artifacts. 
 #define EFFECT_LaCA_Width 0.0       // [% of image diagonal; corner displacement]
 #endif
 
@@ -148,11 +149,11 @@ enum LoCAColor
 #endif
 
 #ifndef EFFECT_LoCA_Width
-#define EFFECT_LoCA_Width 0.1       // [% of image diagonal; fringing band width]
+#define EFFECT_LoCA_Width 0.05       // [% of image diagonal; fringing band width]
 #endif
 
 #ifndef EFFECT_LoCA_MinSensi
-#define EFFECT_LoCA_MinSensi 0.06    // Raw-detection floor (applied BEFORE Strength)
+#define EFFECT_LoCA_MinSensi 0.08    // Raw-detection floor (applied BEFORE Strength)
 #endif
 
 // ----------------------------------------------------------------------------
