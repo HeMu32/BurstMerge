@@ -539,7 +539,15 @@ void DenseAlignGPU(VulkanBackend& vk,
         }
         Binding b[6] = {{0, ref_pyr[level].handle, 0}, {1, cmp_lvl, 0},
                         {2, csx, 0}, {3, csy, 0}, {4, out_sx, 0}, {5, out_sy, 0}};
-        vk.Dispatch(dense_shader, pc, (tx_L + 7) / 8, (ty_L + 7) / 8, 1, b, 6);
+        // dense_level v4 dispatch: ONE workgroup per tile (8x8 = 64 threads
+        // cooperate on the tile's ts² pixel work). v3 dispatched
+        // (ceil(tiles_x/8), ceil(tiles_y/8)) with 1 thread per tile; v4 needs
+        // (tiles_x, tiles_y) workgroups, each handling one tile with 64 threads.
+        // Out-of-range workgroups are guarded by the shader's tx>=tiles_x check.
+        // dense_shader may resolve to "dense_level_fp64" (BURSTMERGE_GPU_FP64=ON
+        // + hardware shaderFloat64); the fp64 variant is also v4-shaped since
+        // 2026-07-05 and shares this exact dispatch form (tx_L, ty_L, 1, local 8x8).
+        vk.Dispatch(dense_shader, pc, tx_L, ty_L, 1, b, 6);
     }
     vk.DestroyBuffer(sc_sx[0]); vk.DestroyBuffer(sc_sx[1]);
     vk.DestroyBuffer(sc_sy[0]); vk.DestroyBuffer(sc_sy[1]);
@@ -797,9 +805,7 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
                 vk.Dispatch("select_min", pc, 1, 1, 1, b, 3);
             }
         }
-        vk.FlushFrame();
 
-        vk.BeginFrame();
         if (settings.alignment_mode == AlignmentMode::DenseTile)
             DenseAlignGPU(vk, parent_pyr, cmp_pyr, pw, ph, tile_size, pyr_n, tsx, tsy);
         else

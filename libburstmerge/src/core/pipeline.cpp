@@ -172,18 +172,6 @@ static std::string ResolveImageOutputPath(const std::string& output_path_or_dir,
     return (out / ("burstmerge_output" + std::string(def_ext))).string();
 }
 
-static std::vector<uint8_t> ReadFileToMemory(const std::string& path)
-{
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) throw std::runtime_error("Failed to open file: " + path);
-    auto size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<uint8_t> buf(static_cast<size_t>(size));
-    if (!file.read(reinterpret_cast<char*>(buf.data()), buf.size()))
-        throw std::runtime_error("Failed to read file: " + path);
-    return buf;
-}
-
 } // namespace
 
 PipelineOrchestrator::PipelineOrchestrator(BackendType backend, Settings settings)
@@ -428,24 +416,10 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         }
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 
-// DNG read Phase 1: read all DNG files into memory (sequential I/O)
-        constexpr float kReadFraction = 0.3f;
-        const float kReadEnd = PipelineConstants::kProgressDecodeStart +
-                               PipelineConstants::kProgressDecodeRange * kReadFraction;
-        Report(progress, PipelineConstants::kProgressDecodeStart, "Reading DNG files");
-        std::vector<std::vector<uint8_t>> file_buffers(dng_paths.size());
-        for (size_t i = 0; i < dng_paths.size(); ++i)
-        {
-            file_buffers[i] = ReadFileToMemory(dng_paths[i]);
-            float p = PipelineConstants::kProgressDecodeStart +
-                      (kReadEnd - PipelineConstants::kProgressDecodeStart) *
-                          static_cast<float>(i + 1) / static_cast<float>(dng_paths.size());
-            Report(progress, p, "Read file " + std::to_string(i + 1) + "/" + std::to_string(dng_paths.size()));
-        }
-
-// DNG read Phase 2: decode all DNGs from memory in parallel (CPU-bound)
-        const float kDecodeStart = kReadEnd;
-        Report(progress, kDecodeStart, "Decoding DNG files");
+// Decode all DNGs directly from disk in parallel.
+// dng_host is not thread-safe, but DngReader::Read() internally
+// constructs a fresh dng_host each call, so it is safe.
+        Report(progress, PipelineConstants::kProgressDecodeStart, "Decoding DNG files");
         std::vector<RawImage> images(dng_paths.size());
         {
         ProfileScope _ps("time.pipeline.decode_dng");
@@ -455,26 +429,20 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             {
                 for (size_t i = begin; i < end; ++i)
                 {
-                    images[i] = ReadDngFromBuffer(file_buffers[i].data(),
-                                                   static_cast<uint32_t>(file_buffers[i].size()));
+                    DngReader reader(dng_paths[i].c_str());
+                    images[i] = reader.Read();
                     int done = decoded_count.fetch_add(1) + 1;
                     {
                         std::lock_guard<std::mutex> lock(pm);
-                        float p = kDecodeStart +
-                                  (PipelineConstants::kProgressDecodeStart +
-                                   PipelineConstants::kProgressDecodeRange - kDecodeStart) *
+                        float p = PipelineConstants::kProgressDecodeStart +
+                                  PipelineConstants::kProgressDecodeRange *
                                       static_cast<float>(done) / static_cast<float>(dng_paths.size());
                             Report(progress, p,
                                    "Decoded image " + std::to_string(done) + "/" + std::to_string(dng_paths.size()));
                     }
                 }
             }, "decode_dng" /* named tag for profiler */);
-        }
-        // DNG file bytes are no longer needed — decoded images hold their own
-        // copies. Release ~30-50 MB per frame of system RAM before the GPU
-        // pipeline begins.
-        file_buffers.clear();
-        file_buffers.shrink_to_fit();
+        };
 
         // Topology consistency check: LinearRaw (demosaiced RGB, mosaic=0) and
         // Bayer CFA (mosaic>=2) inputs cannot be merged together — they differ
