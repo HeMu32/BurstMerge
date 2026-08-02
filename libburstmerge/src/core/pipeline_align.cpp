@@ -473,42 +473,17 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 #endif
 
     // exposure_order is already sorted ascending by EV (ClassifyExposureSequence).
+    // ref_idx is the darkest frame (exposure_order[0]). Process from dark to
+    // bright: each frame aligns against its already-aligned darker neighbor.
     const size_t total = float_images.size() > 0 ? float_images.size() - 1 : 0;
-    size_t root_pos = 0;
-    for (size_t pos = 0; pos < exposure_order.size(); ++pos)
-    {
-        if (exposure_order[pos].second == ref_idx)
-        {
-            root_pos = pos;
-            break;
-        }
-    }
-    const size_t root_idx = exposure_order[root_pos].second;
     std::vector<FloatImage> aligned_to_root(float_images.size());
     std::vector<uint8_t> has_aligned(float_images.size(), 0);
-    aligned_to_root[root_idx] = float_images[root_idx];
-    has_aligned[root_idx] = 1;
+    aligned_to_root[ref_idx] = float_images[ref_idx];
+    has_aligned[ref_idx] = 1;
 
     size_t processed = 0;
 
-    for (size_t pos = root_pos; pos > 0; --pos)
-    {
-        size_t parent_idx = exposure_order[pos].second;
-        size_t child_idx = exposure_order[pos - 1].second;
-#ifndef NDEBUG
-        std::fprintf(stderr, "[DEBUG] Chained align: frame #%zu (Ev=%.2f) -> parent #%zu (Ev=%.2f)\n",
-            child_idx, exposure_order[pos - 1].first,
-            parent_idx, exposure_order[pos].first);
-#endif
-        const FloatImage& parent_ref = has_aligned[parent_idx]
-            ? aligned_to_root[parent_idx] : float_images[parent_idx];
-        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);
-        aligned_to_root[child_idx] = std::move(child_aligned);
-        has_aligned[child_idx] = 1;
-        ++processed;
-    }
-
-    for (size_t pos = root_pos + 1; pos < exposure_order.size(); ++pos)
+    for (size_t pos = 1; pos < exposure_order.size(); ++pos)
     {
         size_t parent_idx = exposure_order[pos - 1].second;
         size_t child_idx = exposure_order[pos].second;
