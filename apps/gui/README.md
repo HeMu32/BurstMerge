@@ -3,6 +3,12 @@
 `burstmerge_gui` is the wxWidgets desktop frontend for BurstMerge. It links the
 `burstmerge` static library directly and does not invoke `burstmerge_cli`.
 
+The frontend is split into cohesive modules: `gui_utils` handles paths, output
+naming, platform theming, and generated badges; `panels` owns the Bin, Queue,
+Options, and drag-and-drop controls; `process_thread` owns worker events and
+queue execution; and `main_frame` coordinates the application workspace.
+`main.cpp` contains only the wx application entry point.
+
 ## wxWidgets Setup
 
 The GUI uses wxWidgets 3.2.5. The source tree is intentionally ignored by Git.

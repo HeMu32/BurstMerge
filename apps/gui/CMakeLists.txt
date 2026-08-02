@@ -7,8 +7,8 @@
 #   - 此文件仅在顶层 CMakeLists.txt 检测到 wx 源码可用后才被 add_subdirectory.
 #     没装 wx 时本文件根本不会被处理, 因此 CLI/console/tests/path 与 GUI 全解耦.
 #   - 不修改 apps/cli/* 和 apps/console/* 任何文件, GUI 与 CLI 平级共用核心 lib.
-#   - 主程序入口 apps/gui/main.cpp 直接 #include "burstmerge/api.h", 与 CLI 同方式
-#     驱动 PipelineOrchestrator; 不会 spawn CLI 进程, 二者完全独立.
+#   - process_thread.cpp 通过 burstmerge/api.h 驱动 PipelineOrchestrator;
+#     不会 spawn CLI 进程, GUI 与 CLI 完全独立.
 #
 # wxWidgets 编译策略:
 #   wxWidgets 3.2 的 CMake 模式自带 project() 指令 当 add_subdirectory 进来时会
@@ -35,14 +35,26 @@ add_subdirectory(
 # 中关于 wxBUILD_PRECOMP 等的 set CACHE FORCE 段).
 # 这里 add_subdirectory 完成后, wxcore/wxbase/... 等 target 已可被引用.
 
+set(BURSTMERGE_GUI_SOURCES
+    main.cpp
+    gui_utils.h
+    gui_utils.cpp
+    panels.h
+    panels.cpp
+    process_thread.h
+    process_thread.cpp
+    main_frame.h
+    main_frame.cpp
+)
+
 if(WIN32)
     add_executable(burstmerge_gui WIN32
-        main.cpp
+        ${BURSTMERGE_GUI_SOURCES}
         burstmerge_gui.rc
     )
 else()
     add_executable(burstmerge_gui
-        main.cpp
+        ${BURSTMERGE_GUI_SOURCES}
     )
 endif()
 
