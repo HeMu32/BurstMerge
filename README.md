@@ -121,6 +121,7 @@ The minimum invocation needs inputs (`-i` / `--folder`) and an output target (`-
 | `--smooth-tile-field` | off | Median-smooth the alignment tile displacement field. |
 | `--backend <name>` | `cpu` | Compute backend: `cpu`, `vulkan` (alias: `gpu`). |
 | `--gpu-device <int>` | `-1` | GPU index for the Vulkan backend (`-1` = automatic). (alias: `--gpu`) |
+| `--dng-convert-dir <path>` | — | Parent directory for the per-run `burstmerge_converted` folder used when non-DNG camera RAW must be converted via Adobe DNG Converter. Default (unset): the folder is created alongside the output path. Only the `burstmerge_converted` subfolder and its per-run children are cleaned up after processing — the directory pointed to by `<path>` itself is never removed. No effect for inputs that are already DNG. |
 | `--list-gpus` | — | List available Vulkan GPU devices and exit. |
 | `--frequency` | — | Deprecated shorthand for `--merge frequency`. |
 | `-h, --help` | — | Print help and exit. |
@@ -135,7 +136,7 @@ Notes:
 
 Frames flow through the stages below. Stages marked with an option list expose a user-selectable algorithm (linked to the flags above); the rest are fixed. The RAW path is the primary one; the RGB path is the same sequence with the RAW-only stages omitted.
 
-1. **Input preparation** — non-DNG camera RAW is converted to DNG via Adobe DNG Converter (Windows only). *(fixed)*
+1. **Input preparation** — non-DNG camera RAW is converted to DNG via Adobe DNG Converter (Windows only). By default the conversion work directory is created as `burstmerge_converted/run_<pid>_<tick>/` alongside the output path and removed after processing; `--dng-convert-dir` relocates the parent of that work directory to an arbitrary path (the directory itself is preserved). *(fixed; configurable location via `--dng-convert-dir`)*
 2. **Decode** — DNGs are read into memory sequentially, then decoded in parallel across frames. *(fixed; multi-threaded)*
 3. **Reference-frame selection** — automatic: darkest frame for a bracketed burst, middle frame otherwise (RGB always uses the middle frame). Manual selection is not exposed on the CLI. *(fixed)*
 4. **Hot-pixel repair** — outlier suppression on the RAW mosaic. *(fixed; RAW only, skipped on the GPU backend)*
@@ -189,6 +190,12 @@ Enumerate Vulkan GPUs and exit:
 ```powershell
 burstmerge_cli.exe --list-gpus
 ```
+
+Keep Adobe DNG Converter intermediates in a custom directory (e.g. a scratch disk) instead of next to the output:
+```powershell
+burstmerge_cli.exe -f .\seq1 --dng-convert-dir D:\scratch\bm_convert -o merged.dng
+```
+The per-run `burstmerge_converted\run_*` subfolder is removed after the run; `D:\scratch\bm_convert` itself is preserved.
 
 ## Dependency
 

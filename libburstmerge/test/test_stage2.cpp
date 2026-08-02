@@ -82,7 +82,7 @@ static GrayPair LoadGrayPair(const std::vector<std::string>& arw_files, const st
 
     std::string convert_dir = fs::temp_directory_path().string() + "/ts2_convert";
     std::vector<std::string> subset = {arw_files[0], arw_files[1]};
-    auto dng_paths = bm::PrepareDngInputs(subset, convert_dir,
+    auto dng_paths = bm::PrepareDngInputs(subset, convert_dir, std::string(),
         [](float, const std::string&){}, convert_dir);
     if (dng_paths.size() < 2) return gp;
 

@@ -1,4 +1,17 @@
-CLI应用: 指定缓存目录
+[已完成] CLI应用: 指定缓存目录
+  - 新增 Settings::dng_convert_dir (libburstmerge/include/burstmerge/api.h).
+    空 ("") = legacy 行为 (转换临时目录在 <输出路径父目录>/burstmerge_converted/run_<pid>_<tick>/
+    下, 处理完由 PipelineOrchestrator::CleanupConvertDir 整体删除); 非空时用作
+    "burstmerge_converted" 子文件夹的父级, 与输出位置解耦.
+  - PrepareDngInputs / MakeTempConvertDir (pipeline_io.cpp) 按 dng_convert_dir 是否为空分流;
+    OrphanSweep (24h) 仍扫 burstmerge_converted 下的 run_* 子目录; 仅清理 burstmerge_converted
+    子文件夹及 per-run 子目录, 不删用户指定目录本身.
+  - CLI: --dng-convert-dir <path> (apps/cli/main.cpp, 默认未指定 = 旧行为, 零回归).
+  - C ABI: BM_SetDngConvertDir (api_c.h / api_c.cpp, NULL/空串映射到 legacy 默认行为).
+  - 端到端验证: 两帧 ARW 分别走默认路径 (输出旁生成 burstmerge_converted, 处理完清理) 与
+    --dng-convert-dir 自定义路径 (自定义目录下生成 burstmerge_converted, 处理完清理
+    burstmerge_converted 但保留用户指定目录); 输出 DNG 一致, 清理边界符合设计.
+  - 测试同步: test_stage2.cpp 同步新签名 (插入空 string 维持原行为).
 
 CLI应用: 指定参考图
 

@@ -40,6 +40,11 @@ BM_API void        BM_SetNoiseReduction(BM_Context ctx, float strength);
 BM_API void        BM_SetExposureMode(BM_Context ctx, int mode);
 BM_API void        BM_SetMergeAlgorithm(BM_Context ctx, int algo);
 BM_API void        BM_SetExposureStops(BM_Context ctx, float stops);
+// Set the working directory used for Adobe DNG Converter intermediates.
+// Pass NULL or "" to use the legacy location (alongside the output path).
+// The directory pointed to by `dir` itself is never removed; only the
+// "burstmerge_converted" subfolder and its per-run children are cleaned up.
+BM_API void        BM_SetDngConvertDir(BM_Context ctx, const char* dir);
 BM_API void        BM_SetProgressCallback(BM_Context ctx, BM_ProgressCb cb, void* user);
 BM_API int         BM_Process(BM_Context ctx, const char* out_dir);
 BM_API const char* BM_GetLastError(BM_Context ctx);

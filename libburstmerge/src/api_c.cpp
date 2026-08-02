@@ -84,6 +84,17 @@ void BM_SetExposureStops(BM_Context ctx, float stops)
     }
 }
 
+void BM_SetDngConvertDir(BM_Context ctx, const char* dir)
+{
+    if (ctx)
+    {
+        // NULL or empty string both map to the legacy location (alongside
+        // the output path), matching Settings::dng_convert_dir's default.
+        static_cast<CContext*>(ctx)->settings.dng_convert_dir =
+            dir ? std::string(dir) : std::string();
+    }
+}
+
 void BM_SetProgressCallback(BM_Context ctx, BM_ProgressCb cb, void* user)
 {
     if (ctx)

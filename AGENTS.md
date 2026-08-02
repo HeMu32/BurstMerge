@@ -178,11 +178,12 @@ Vulkan GPU 后端 (已实现)
 	- HotPixel Suppression: "目前的算法好像是坏的" (另见 `Readme.md` TODOs: "current implementation not working well"). 
 	- `NormalizeFrames`: 只考虑 ISO 与快门速度, 不考虑其他因素及 EXIF 不准确问题. 
 	- `ImageMetadata::tags`: 字段从未被写入 (dead field). 
-	- CLI 待加: 指定缓存目录 / 指定参考图 / 拷贝元数据(含畸变) / 指定搜索位移限制. 
+	- CLI 待加: 指定参考图 / 拷贝元数据(含畸变) / 指定搜索位移限制. (注: "指定缓存目录" 已实现, 见下方"硬编码路径与平台假设"段 `--dng-convert-dir` 条目)
 
 ## 硬编码路径与平台假设
 	- Adobe DNG Converter 路径硬编码: `C:\Program Files\Adobe\Adobe DNG Converter\Adobe DNG Converter.exe` (`dng_converter.cpp:23,29`). 
-	- `apps/cli/main.cpp`: 后端默认 CPU, 可通过 `--backend cpu|vulkan|gpu` 选择. `--list-gpus` 列出可用 GPU 并退出. `--gpu-device N` / `--gpu N` 按序号选择 GPU (-1=自动). `Settings.gpu_device_index` 传递到 `vk.Initialize(device_index)`.
+	- `apps/cli/main.cpp`: 后端默认 CPU, 可通过 `--backend cpu|vulkan|gpu` 选择. `--list-gpus` 列出可用 GPU 并退出. `--gpu-device N` / `--gpu N` 按序号选择 GPU (-1=自动). `Settings.gpu_device_index` 传递到 `vk.Initialize(device_index)`. `--dng-convert-dir <path>` 把非 DNG RAW 转换的 per-run `burstmerge_converted` 工作目录父级从"输出目录旁"改到任意路径 (默认未指定 = 旧行为); 映射到 `Settings.dng_convert_dir` 透传到 `PrepareDngInputs` (`pipeline_io.cpp::MakeTempConvertDir` 按 `dng_convert_dir` 是否为空分流). 仅清理 `burstmerge_converted` 子文件夹及 per-run 子目录, 不删用户指定目录本身.
+	- DNG 转换临时目录: 默认位置为 `<输出路径父目录>/burstmerge_converted/run_<pid>_<tick>/` (`pipeline_io.cpp::MakeTempConvertDir`), 处理完后由 `PipelineOrchestrator::CleanupConvertDir` (`pipeline.cpp:982`) 整体删除. 自 2026-08 起位置可配置, 见上一条 `--dng-convert-dir`. 24h 孤儿清理 (`OrphanSweep`) 扫描 `burstmerge_converted` 下 `run_*` 子目录.
 	- `pipeline_align.cpp:244`: 调试 BMP dump 到硬编码 `R:\` (Windows 盘符), 由 `kEnableAlignmentGrayDump=false` 关闭. 
 	- 非显式 DNG 的 RAW 输入在非 Windows 平台会抛 `"Non-DNG RAW input requires pre-conversion on this platform"` (`pipeline_io.cpp:153`). 
 	- 根目录脚本大量硬编码本机路径: `SyncARWLensCorr.ps1` (`C:\MultiMediaTools\Bin\exiftool.exe`), `Scripts/benchmark_parallel.ps1` (`Z:\seq1/seq2`, 注意默认 CLI 路径用大写 `Build` 与实际不符), `_bench.ps1` (用 `NUL` 作输出, 传位置参数且用了未定义的 `--profiler`, **当前 CLI 下无法运行**). 

@@ -61,6 +61,16 @@ struct Settings
     int            gpu_device_index = -1;  // GPU device index for Vulkan backend (-1 = auto)
     // output_format: Auto = auto-infer (DNG for RAW, PNG for non-RAW)
     OutputFormat   output_format    = OutputFormat::Auto;
+    // Working directory used by Adobe DNG Converter when non-DNG RAW inputs
+    // need to be converted. Empty ("") = legacy behaviour: a folder named
+    // "burstmerge_converted" is created alongside the output path and a unique
+    // per-run subfolder is placed inside it (and removed after processing).
+    // When non-empty, this path is used as the parent of "burstmerge_converted"
+    // instead, decoupling intermediates from the output location. The per-run
+    // subfolder and (if empty afterwards) the "burstmerge_converted" folder are
+    // always cleaned up; the directory pointed to by dng_convert_dir itself is
+    // never removed. Has no effect for inputs that are already DNG.
+    std::string    dng_convert_dir;
 };
 
 struct Result

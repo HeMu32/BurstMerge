@@ -149,6 +149,7 @@ int main(int argc, char* argv[]) {
         ("smooth-tile-field", "Enable median smoothing of alignment tile fields", cxxopts::value<bool>()->default_value("false"))
         ("highlight-recovery", "Recover clipped green-channel highlights from R/B neighbours (default on)", cxxopts::value<bool>()->default_value("true"))
         ("hot-pixel-repair", "Suppress hot pixels on RAW mosaic (default off; may dim real point light sources in dark scenes)", cxxopts::value<bool>()->default_value("false"))
+        ("dng-convert-dir", "Directory used for Adobe DNG Converter intermediates when non-DNG RAW inputs need conversion (default: alongside output). The directory itself is never removed; only the per-run \"burstmerge_converted\" subfolder and its children are cleaned up after processing", cxxopts::value<std::string>())
         ("output-format", "Output format: auto, png, jpg, bmp, tiff, dng", cxxopts::value<std::string>()->default_value("auto"))
         ("backend", "Compute backend: cpu, vulkan (vulkan requires a GPU)", cxxopts::value<std::string>()->default_value("cpu"))
         ("gpu-device,gpu", "Select GPU by index (use --list-gpus to see available, -1 = auto)", cxxopts::value<int>()->default_value("-1"))
@@ -276,6 +277,9 @@ int main(int argc, char* argv[]) {
     settings.highlight_recovery = args["highlight-recovery"].as<bool>();
     settings.hot_pixel_repair = args["hot-pixel-repair"].as<bool>();
     settings.gpu_device_index = args["gpu-device"].as<int>();
+    if (args.count("dng-convert-dir")) {
+        settings.dng_convert_dir = args["dng-convert-dir"].as<std::string>();
+    }
     if (!ParseOutputFormat(args["output-format"].as<std::string>(), settings.output_format)) {
         std::cerr << "Invalid output format (use auto, png, jpg, bmp, tiff, or dng)" << std::endl;
         return 2;
