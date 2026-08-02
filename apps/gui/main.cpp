@@ -10,6 +10,7 @@
 #include <wx/listctrl.h>
 #include <wx/notebook.h>
 #include <wx/scrolwin.h>
+#include <wx/splitter.h>
 #include <wx/spinctrl.h>
 #include <wx/stdpaths.h>
 #include <wx/thread.h>
@@ -25,7 +26,6 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
-#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <iomanip>
@@ -50,15 +50,23 @@ enum
 {
     ID_START = wxID_HIGHEST + 1,
     ID_NEW_QUEUE,
+    ID_REMOVE_SELECTION,
     ID_CLEAR_BIN,
     ID_TOGGLE_OPTIONS,
     ID_ADD_FILES,
     ID_ADD_FOLDER,
     ID_OUTPUT_BROWSE,
+    ID_DNG_CACHE_BROWSE,
     ID_BACKEND,
     ID_MERGE_ALGORITHM,
     ID_EXPOSURE_MODE,
     ID_REMOVE_QUEUE_ITEM
+};
+
+enum class ActiveList
+{
+    Bin,
+    Queue
 };
 
 std::string PathKey(const std::filesystem::path& path)
@@ -91,6 +99,51 @@ std::optional<std::string> NormalizePath(const wxString& path)
         return std::nullopt;
     }
     return absolute.lexically_normal().u8string();
+}
+
+void AppendFolderFiles(const std::filesystem::path& folder, std::vector<std::string>& paths)
+{
+    std::vector<std::string> folder_files;
+    std::error_code error;
+    std::filesystem::directory_iterator it(folder, error);
+    const std::filesystem::directory_iterator end;
+    while (!error && it != end)
+    {
+        std::error_code type_error;
+        if (it->is_regular_file(type_error) && !type_error)
+        {
+            folder_files.push_back(it->path().lexically_normal().u8string());
+        }
+        it.increment(error);
+    }
+    std::sort(folder_files.begin(), folder_files.end());
+    paths.insert(paths.end(), folder_files.begin(), folder_files.end());
+}
+
+std::vector<std::string> ExpandDroppedPaths(const wxArrayString& dropped)
+{
+    std::vector<std::string> paths;
+    for (const wxString& item : dropped)
+    {
+        const std::optional<std::string> normalized = NormalizePath(item);
+        if (!normalized)
+        {
+            continue;
+        }
+
+        const std::filesystem::path path = std::filesystem::u8path(*normalized);
+        std::error_code error;
+        if (std::filesystem::is_directory(path, error) && !error)
+        {
+            // Match CLI -f: include immediate regular files, sorted, without recursion.
+            AppendFolderFiles(path, paths);
+        }
+        else if (!error && std::filesystem::is_regular_file(path, error) && !error)
+        {
+            paths.push_back(*normalized);
+        }
+    }
+    return paths;
 }
 
 wxString DisplayPath(const std::string& path)
@@ -131,6 +184,53 @@ bool IsRawPath(const std::string& path)
         return static_cast<char>(std::tolower(c));
     });
     return std::find(extensions.begin(), extensions.end(), extension) != extensions.end();
+}
+
+std::string OutputExtension(burstmerge::OutputFormat format, bool has_raw)
+{
+    switch (format)
+    {
+        case burstmerge::OutputFormat::PNG: return ".png";
+        case burstmerge::OutputFormat::JPEG: return ".jpg";
+        case burstmerge::OutputFormat::BMP: return ".bmp";
+        case burstmerge::OutputFormat::TIFF: return ".tif";
+        case burstmerge::OutputFormat::DNG: return ".dng";
+        default: return has_raw ? ".dng" : ".png";
+    }
+}
+
+std::string FormatOptionNumber(float value, int precision)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(precision) << value;
+    std::string text = stream.str();
+    while (text.size() > 1 && text.back() == '0')
+    {
+        text.pop_back();
+    }
+    if (!text.empty() && text.back() == '.')
+    {
+        text.pop_back();
+    }
+    return text;
+}
+
+std::string SanitizeFileStem(std::string stem)
+{
+    for (char& c : stem)
+    {
+        const unsigned char value = static_cast<unsigned char>(c);
+        if (value < 32 || c == '<' || c == '>' || c == ':' || c == '"' ||
+            c == '/' || c == '\\' || c == '|' || c == '?' || c == '*')
+        {
+            c = '_';
+        }
+    }
+    while (!stem.empty() && (stem.back() == '.' || stem.back() == ' '))
+    {
+        stem.pop_back();
+    }
+    return stem.empty() ? "burst" : stem;
 }
 
 std::vector<std::string> DecodePathList(const void* data, size_t size)
@@ -229,16 +329,7 @@ public:
 
     bool OnDropFiles(wxCoord, wxCoord, const wxArrayString& filenames) override
     {
-        std::vector<std::string> paths;
-        paths.reserve(filenames.size());
-        for (const wxString& filename : filenames)
-        {
-            const std::optional<std::string> path = NormalizePath(filename);
-            if (path)
-            {
-                paths.push_back(*path);
-            }
-        }
+        const std::vector<std::string> paths = ExpandDroppedPaths(filenames);
         if (paths.empty())
         {
             return false;
@@ -281,15 +372,7 @@ public:
         }
         else
         {
-            std::vector<std::string> paths;
-            for (const wxString& filename : files_->GetFilenames())
-            {
-                const std::optional<std::string> path = NormalizePath(filename);
-                if (path)
-                {
-                    paths.push_back(*path);
-                }
-            }
+            const std::vector<std::string> paths = ExpandDroppedPaths(files_->GetFilenames());
             if (paths.empty())
             {
                 return wxDragNone;
@@ -313,7 +396,7 @@ public:
     explicit BinPanel(wxWindow* parent)
         : wxPanel(parent)
     {
-        SetMinSize(FromDIP(wxSize(250, 300)));
+        SetMinSize(FromDIP(wxSize(180, 300)));
         ApplySystemTheme();
 
         wxBoxSizer* root = new wxBoxSizer(wxVERTICAL);
@@ -322,9 +405,10 @@ public:
         title_font.SetWeight(wxFONTWEIGHT_BOLD);
         title_font.SetPointSize(title_font.GetPointSize() + 1);
         title->SetFont(title_font);
-        root->Add(title, 0, wxLEFT | wxRIGHT | wxTOP, 12);
-        root->Add(new wxStaticText(this, wxID_ANY, "Stage files once, reuse them across queues."),
-            0, wxLEFT | wxRIGHT | wxTOP, 12);
+        root->Add(title, 0, wxLEFT | wxRIGHT | wxTOP, 8);
+        root->Add(new wxStaticText(this, wxID_ANY,
+            "Drop files or folders; reuse them across queues."),
+            0, wxLEFT | wxRIGHT | wxTOP, 8);
 
         list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
             wxLC_LIST);
@@ -332,7 +416,7 @@ public:
         ApplyWindowsExplorerTheme(list_);
 #endif
         RebuildImageList();
-        root->Add(list_, 1, wxEXPAND | wxALL, 10);
+        root->Add(list_, 1, wxEXPAND | wxALL, 6);
         SetSizer(root);
 
         list_->Bind(wxEVT_LIST_BEGIN_DRAG, &BinPanel::OnBeginDrag, this);
@@ -342,6 +426,27 @@ public:
     {
         file_handler_ = std::move(handler);
         list_->SetDropTarget(new FileDropTarget(file_handler_));
+    }
+
+    void SetActiveHandler(std::function<void()> handler)
+    {
+        active_handler_ = std::move(handler);
+        list_->Bind(wxEVT_SET_FOCUS, [this](wxFocusEvent& event)
+        {
+            if (active_handler_)
+            {
+                active_handler_();
+            }
+            event.Skip();
+        });
+        list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent& event)
+        {
+            if (active_handler_)
+            {
+                active_handler_();
+            }
+            event.Skip();
+        });
     }
 
     void AddPath(const std::string& path)
@@ -390,9 +495,32 @@ public:
         rows_.clear();
     }
 
+    void RemovePaths(const std::vector<std::string>& paths)
+    {
+        if (paths.empty())
+        {
+            return;
+        }
+        std::unordered_map<std::string, bool> removed;
+        for (const std::string& path : paths)
+        {
+            removed[PathKey(std::filesystem::u8path(path))] = true;
+        }
+        paths_.erase(std::remove_if(paths_.begin(), paths_.end(), [&](const std::string& path)
+        {
+            return removed.find(PathKey(std::filesystem::u8path(path))) != removed.end();
+        }), paths_.end());
+        RebuildList();
+    }
+
     void SetLocked(bool locked)
     {
         list_->Enable(!locked);
+    }
+
+    bool HasListFocus() const
+    {
+        return list_->HasFocus();
     }
 
     void ApplySystemTheme()
@@ -412,6 +540,19 @@ public:
     }
 
 private:
+    void RebuildList()
+    {
+        list_->DeleteAllItems();
+        rows_.clear();
+        for (size_t i = 0; i < paths_.size(); ++i)
+        {
+            const long row = list_->InsertItem(list_->GetItemCount(),
+                DisplayPath(std::filesystem::u8path(paths_[i]).filename().u8string()), 0);
+            list_->SetItemData(row, static_cast<wxUIntPtr>(i));
+            rows_[PathKey(std::filesystem::u8path(paths_[i]))] = row;
+        }
+    }
+
     void RebuildImageList()
     {
         const int icon_size = FromDIP(32);
@@ -445,6 +586,7 @@ private:
     std::vector<std::string> paths_;
     std::unordered_map<std::string, long> rows_;
     std::function<void(const std::vector<std::string>&)> file_handler_;
+    std::function<void()> active_handler_;
 };
 
 class QueuePanel final : public wxPanel
@@ -525,6 +667,27 @@ public:
             }));
     }
 
+    void SetActiveHandler(std::function<void()> handler)
+    {
+        active_handler_ = std::move(handler);
+        list_->Bind(wxEVT_SET_FOCUS, [this](wxFocusEvent& event)
+        {
+            if (active_handler_)
+            {
+                active_handler_();
+            }
+            event.Skip();
+        });
+        list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent& event)
+        {
+            if (active_handler_)
+            {
+                active_handler_();
+            }
+            event.Skip();
+        });
+    }
+
     bool AddPath(const std::string& path)
     {
         const std::string key = PathKey(std::filesystem::u8path(path));
@@ -564,6 +727,21 @@ public:
         return paths_;
     }
 
+    std::vector<std::string> SelectedPaths() const
+    {
+        std::vector<std::string> selected;
+        long row = -1;
+        while ((row = list_->GetNextItem(row, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) != -1)
+        {
+            const size_t index = static_cast<size_t>(list_->GetItemData(row));
+            if (index < paths_.size())
+            {
+                selected.push_back(paths_[index]);
+            }
+        }
+        return selected;
+    }
+
     int Number() const
     {
         return number_;
@@ -587,6 +765,11 @@ public:
         list_->Enable(!locked);
         add_button_->Enable(!locked);
         close_button_->Enable(!locked);
+    }
+
+    bool HasListFocus() const
+    {
+        return list_->HasFocus();
     }
 
     void ApplySystemTheme()
@@ -661,6 +844,7 @@ private:
     std::function<void(QueuePanel&)> on_close_;
     std::function<void(QueuePanel&, const std::vector<std::string>&, bool)> on_drop_;
     std::function<void(QueuePanel&, const std::string&)> on_remove_;
+    std::function<void()> active_handler_;
 };
 
 class OptionsPanel final : public wxPanel
@@ -741,7 +925,7 @@ public:
             case 3: settings.alignment_mode = burstmerge::AlignmentMode::Skip; break;
             default: settings.alignment_mode = burstmerge::AlignmentMode::Standard; break;
         }
-        settings.align_gamma = static_cast<float>(align_gamma_->GetValue()) / 20.0f;
+        settings.align_gamma = static_cast<float>(align_gamma_value_->GetValue());
         settings.smooth_tile_field = smooth_tile_field_->GetValue();
         switch (exposure_mode_->GetSelection())
         {
@@ -755,7 +939,7 @@ public:
         settings.exposure_stops = static_cast<float>(exposure_stops_->GetValue()) / 10.0f;
         settings.highlight_recovery = highlight_recovery_->GetValue();
         settings.hot_pixel_repair = hot_pixel_repair_->GetValue();
-        settings.noise_reduction = static_cast<float>(noise_reduction_->GetValue()) / 2.0f;
+        settings.noise_reduction = static_cast<float>(noise_reduction_value_->GetValue());
         if (!dng_convert_dir_->GetValue().empty())
         {
             const std::optional<std::string> path = NormalizePath(dng_convert_dir_->GetValue());
@@ -775,6 +959,86 @@ public:
             value = "./out";
         }
         return NormalizePath(value);
+    }
+
+    std::string OutputStem(const std::string& first_path, const burstmerge::Settings& settings) const
+    {
+        std::string merge;
+        switch (settings.merge_algo)
+        {
+            case burstmerge::MergeAlgorithm::Frequency:
+                switch (settings.frequency_mode)
+                {
+                    case burstmerge::FrequencyMode::WienerFft: merge = "frequency-wiener"; break;
+                    case burstmerge::FrequencyMode::WienerFftRobust: merge = "frequency-wiener-robust"; break;
+                    default: merge = "frequency-laplacian"; break;
+                }
+                break;
+            case burstmerge::MergeAlgorithm::TemporalAverage: merge = "temporal-average"; break;
+            case burstmerge::MergeAlgorithm::TemporalMedian: merge = "temporal-median"; break;
+            case burstmerge::MergeAlgorithm::ExpBracketAverage: merge = "exposure-bracket-average"; break;
+            default:
+                merge = settings.spatial_mode == burstmerge::SpatialMergeMode::Linear
+                    ? "spatial-linear"
+                    : "spatial-standard";
+                break;
+        }
+
+        std::string alignment;
+        switch (settings.alignment_mode)
+        {
+            case burstmerge::AlignmentMode::DenseTile: alignment = "dense"; break;
+            case burstmerge::AlignmentMode::Frequency: alignment = "frequency"; break;
+            case burstmerge::AlignmentMode::Skip: alignment = "skip"; break;
+            default: alignment = "standard"; break;
+        }
+
+        std::string exposure;
+        switch (settings.exposure_mode)
+        {
+            case burstmerge::ExposureMode::Linear: exposure = "linear"; break;
+            case burstmerge::ExposureMode::Curve:
+                exposure = settings.exposure_curve_mode == burstmerge::ExposureCurveMode::LocalReinhard
+                    ? "curve-local"
+                    : "curve-global";
+                break;
+            default: exposure = "off"; break;
+        }
+
+        std::string parameters = std::string(Backend() == burstmerge::BackendType::Vulkan
+                ? "vulkan"
+                : "cpu") +
+            "_" + merge + "_align-" + alignment +
+            "_g" + FormatOptionNumber(settings.align_gamma, 2) +
+            "_nr" + FormatOptionNumber(settings.noise_reduction, 1) +
+            "_exp-" + exposure;
+        if (settings.exposure_mode != burstmerge::ExposureMode::Off)
+        {
+            parameters += "-s" + FormatOptionNumber(settings.exposure_stops, 1);
+        }
+        if (settings.smooth_tile_field)
+        {
+            parameters += "_smooth";
+        }
+        parameters += settings.highlight_recovery ? "_hl" : "_nohl";
+        if (settings.hot_pixel_repair)
+        {
+            parameters += "_hotpix";
+        }
+        parameters +=
+            "_t" + std::to_string(settings.tile_size) +
+            "_b" + std::to_string(settings.bit_depth);
+        if (file_naming_->GetSelection() == 1)
+        {
+            wxString first_stem = DisplayPath(
+                std::filesystem::u8path(first_path).stem().u8string());
+            if (first_stem.length() > 64)
+            {
+                first_stem = first_stem.Left(64);
+            }
+            parameters = SanitizeFileStem(first_stem.utf8_string()) + "_" + parameters;
+        }
+        return SanitizeFileStem(parameters);
     }
 
     bool StopOnFirstError() const
@@ -825,6 +1089,10 @@ private:
         bit_depth_ = AddChoice(panel, grid, "Bit depth", {"8", "10", "12", "14", "16"}, 3);
         output_format_ = AddChoice(panel, grid, "Output format",
             {"Auto", "PNG", "JPEG", "BMP", "TIFF", "DNG"}, 0);
+        file_naming_ = AddChoice(panel, grid, "File naming",
+            {"Processing parameters", "First frame + parameters"}, 1);
+        file_naming_->SetToolTip(
+            "Outputs directly to the selected directory. Existing names receive a numeric suffix.");
 
         grid->Add(new wxStaticText(panel, wxID_ANY, "Output directory"), 0, wxALIGN_CENTER_VERTICAL);
         wxBoxSizer* output_row = new wxBoxSizer(wxHORIZONTAL);
@@ -846,9 +1114,23 @@ private:
 
         grid->Add(new wxStaticText(panel, wxID_ANY, "DNG conversion cache"),
             0, wxALIGN_CENTER_VERTICAL);
+        wxBoxSizer* cache_row = new wxBoxSizer(wxHORIZONTAL);
         dng_convert_dir_ = new wxTextCtrl(panel, wxID_ANY);
         dng_convert_dir_->SetHint("Default: alongside output");
-        grid->Add(dng_convert_dir_, 1, wxEXPAND);
+        wxButton* cache_browse = new wxButton(panel, ID_DNG_CACHE_BROWSE, "...",
+            wxDefaultPosition, FromDIP(wxSize(36, -1)), wxBU_EXACTFIT);
+        cache_row->Add(dng_convert_dir_, 1, wxRIGHT, FromDIP(4));
+        cache_row->Add(cache_browse, 0);
+        grid->Add(cache_row, 1, wxEXPAND);
+        cache_browse->Bind(wxEVT_BUTTON, [this](wxCommandEvent&)
+        {
+            wxDirDialog dialog(this, "Choose DNG conversion cache",
+                dng_convert_dir_->GetValue(), wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+            if (dialog.ShowModal() == wxID_OK)
+            {
+                dng_convert_dir_->SetValue(dialog.GetPath());
+            }
+        });
         SetPageSizer(panel, grid);
         return panel;
     }
@@ -872,8 +1154,8 @@ private:
         wxFlexGridSizer* grid = MakeGrid();
         alignment_mode_ = AddChoice(panel, grid, "Mode",
             {"Standard", "Dense tile", "Frequency", "Skip"}, 0);
-        align_gamma_ = AddSlider(panel, grid, "Alignment gamma", 2, 40, 20,
-            "0.10", "2.00");
+        align_gamma_ = AddLinkedSlider(panel, grid, "Alignment gamma", 0.1, 2.0, 1.0,
+            0.01, 0.05, 2, align_gamma_value_);
         smooth_tile_field_ = AddCheck(panel, grid, "Smooth tile field", false);
         SetPageSizer(panel, grid);
         return panel;
@@ -896,7 +1178,8 @@ private:
         wxFlexGridSizer* grid = MakeGrid();
         highlight_recovery_ = AddCheck(panel, grid, "Highlight recovery", true);
         hot_pixel_repair_ = AddCheck(panel, grid, "Hot-pixel repair", false);
-        noise_reduction_ = AddSlider(panel, grid, "Noise reduction", 0, 60, 26, "0", "30");
+        noise_reduction_ = AddLinkedSlider(panel, grid, "Noise reduction", 0.0, 30.0, 13.0,
+            0.1, 0.5, 1, noise_reduction_value_);
         stop_on_error_ = AddCheck(panel, grid, "Stop on first error", true);
         SetPageSizer(panel, grid);
         return panel;
@@ -961,6 +1244,48 @@ private:
         return slider;
     }
 
+    wxSlider* AddLinkedSlider(wxWindow* parent, wxFlexGridSizer* grid, const wxString& label,
+        double minimum, double maximum, double value, double slider_step,
+        double input_increment, int digits,
+        wxSpinCtrlDouble*& numeric)
+    {
+        grid->Add(new wxStaticText(parent, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
+        wxBoxSizer* row = new wxBoxSizer(wxHORIZONTAL);
+        const int steps = static_cast<int>(std::lround((maximum - minimum) / slider_step));
+        const int initial = static_cast<int>(std::lround((value - minimum) / slider_step));
+        wxSlider* slider = new wxSlider(parent, wxID_ANY, initial, 0, steps);
+        numeric = new wxSpinCtrlDouble(parent, wxID_ANY, wxEmptyString,
+            wxDefaultPosition, FromDIP(wxSize(82, -1)), wxSP_ARROW_KEYS,
+            minimum, maximum, value, input_increment);
+        numeric->SetDigits(digits);
+        numeric->SetToolTip("Enter a value directly or adjust the linked slider.");
+        row->Add(slider, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+        row->Add(numeric, 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(row, 1, wxEXPAND);
+
+        slider->Bind(wxEVT_SLIDER, [numeric, minimum, slider_step](wxCommandEvent& event)
+        {
+            numeric->SetValue(minimum + static_cast<double>(event.GetInt()) * slider_step);
+        });
+        numeric->Bind(wxEVT_SPINCTRLDOUBLE, [slider, minimum, slider_step](wxSpinDoubleEvent& event)
+        {
+            slider->SetValue(static_cast<int>(std::lround(
+                (event.GetValue() - minimum) / slider_step)));
+        });
+        numeric->Bind(wxEVT_TEXT,
+            [slider, numeric, minimum, maximum, slider_step](wxCommandEvent&)
+        {
+            double entered = 0.0;
+            if (numeric->GetTextValue().ToDouble(&entered))
+            {
+                entered = std::clamp(entered, minimum, maximum);
+                slider->SetValue(static_cast<int>(std::lround(
+                    (entered - minimum) / slider_step)));
+            }
+        });
+        return slider;
+    }
+
     wxCheckBox* AddCheck(wxWindow* parent, wxFlexGridSizer* grid, const wxString& label, bool value)
     {
         grid->Add(new wxStaticText(parent, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
@@ -976,6 +1301,7 @@ private:
         spatial_mode_->Enable(merge_algorithm_->GetSelection() == 0);
         frequency_mode_->Enable(merge_algorithm_->GetSelection() == 1);
         noise_reduction_->Enable(merge_algorithm_->GetSelection() <= 1);
+        noise_reduction_value_->Enable(merge_algorithm_->GetSelection() <= 1);
         curve_mode_->Enable(exposure_mode_->GetSelection() == 2);
         exposure_stops_->Enable(exposure_mode_->GetSelection() != 0);
     }
@@ -985,6 +1311,7 @@ private:
     wxSpinCtrl* tile_size_ = nullptr;
     wxChoice* bit_depth_ = nullptr;
     wxChoice* output_format_ = nullptr;
+    wxChoice* file_naming_ = nullptr;
     wxTextCtrl* output_dir_ = nullptr;
     wxTextCtrl* dng_convert_dir_ = nullptr;
     wxChoice* merge_algorithm_ = nullptr;
@@ -992,6 +1319,7 @@ private:
     wxChoice* frequency_mode_ = nullptr;
     wxChoice* alignment_mode_ = nullptr;
     wxSlider* align_gamma_ = nullptr;
+    wxSpinCtrlDouble* align_gamma_value_ = nullptr;
     wxCheckBox* smooth_tile_field_ = nullptr;
     wxChoice* exposure_mode_ = nullptr;
     wxChoice* curve_mode_ = nullptr;
@@ -999,6 +1327,7 @@ private:
     wxCheckBox* highlight_recovery_ = nullptr;
     wxCheckBox* hot_pixel_repair_ = nullptr;
     wxSlider* noise_reduction_ = nullptr;
+    wxSpinCtrlDouble* noise_reduction_value_ = nullptr;
     wxCheckBox* stop_on_error_ = nullptr;
 };
 
@@ -1006,7 +1335,7 @@ struct ProcessJob
 {
     int queue_number = 0;
     std::vector<std::string> paths;
-    std::string output_dir;
+    std::string output_path;
 };
 
 struct ProcessProgress
@@ -1058,7 +1387,6 @@ protected:
 
             try
             {
-                std::filesystem::create_directories(std::filesystem::u8path(job.output_dir));
                 burstmerge::BurstMerge merge(backend_);
                 for (const std::string& path : job.paths)
                 {
@@ -1080,7 +1408,7 @@ protected:
                     wxQueueEvent(target_, event);
                 });
 
-                const burstmerge::Result result = merge.Process(job.output_dir);
+                const burstmerge::Result result = merge.Process(job.output_path);
                 queue_result.success = result.success;
                 queue_result.output_path = result.output_path;
                 queue_result.error = result.error_msg;
@@ -1172,6 +1500,9 @@ private:
 
         wxMenu* edit = new wxMenu;
         edit->Append(ID_NEW_QUEUE, "New Queue\tCtrl+N");
+        edit->Append(ID_REMOVE_SELECTION, "Remove Selection");
+        edit->Append(ID_CLEAR_BIN, "Clear Bin");
+        edit->AppendSeparator();
         edit->Append(ID_TOGGLE_OPTIONS, "Toggle Options\tCtrl+,");
 
         wxMenu* process = new wxMenu;
@@ -1194,6 +1525,8 @@ private:
         toolbar->AddTool(ID_START, "Start", wxArtProvider::GetBitmap(wxART_GO_FORWARD));
         toolbar->AddSeparator();
         toolbar->AddTool(ID_NEW_QUEUE, "New Queue", wxArtProvider::GetBitmap(wxART_NEW));
+        toolbar->AddTool(ID_REMOVE_SELECTION, "Remove Sel.",
+            wxArtProvider::GetBitmap(wxART_MINUS));
         toolbar->AddTool(ID_CLEAR_BIN, "Clear Bin", wxArtProvider::GetBitmap(wxART_DELETE));
         toolbar->AddSeparator();
         toolbar->AddTool(ID_TOGGLE_OPTIONS, "Options", wxArtProvider::GetBitmap(wxART_LIST_VIEW));
@@ -1204,31 +1537,37 @@ private:
 
     void BuildWorkspace()
     {
-        wxPanel* center = new wxPanel(this);
-        center->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
-        wxBoxSizer* center_sizer = new wxBoxSizer(wxHORIZONTAL);
+        workspace_splitter_ = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition,
+            wxDefaultSize, wxSP_LIVE_UPDATE | wxSP_3D);
+        workspace_splitter_->SetMinimumPaneSize(FromDIP(160));
+        workspace_splitter_->SetSashGravity(0.22);
 
-        bin_ = new BinPanel(center);
+        bin_ = new BinPanel(workspace_splitter_);
         bin_->SetFileHandler([this](const std::vector<std::string>& paths)
         {
             AddToBin(paths);
         });
-        center_sizer->Add(bin_, 0, wxEXPAND | wxALL, 8);
+        bin_->SetActiveHandler([this]()
+        {
+            active_list_ = ActiveList::Bin;
+            active_queue_ = nullptr;
+        });
 
-        queue_scroll_ = new wxScrolledWindow(center, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+        queue_scroll_ = new wxScrolledWindow(workspace_splitter_, wxID_ANY,
+            wxDefaultPosition, wxDefaultSize,
             wxVSCROLL | wxBORDER_NONE);
         queue_scroll_->SetScrollRate(0, 12);
         queue_scroll_->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
         queue_sizer_ = new wxBoxSizer(wxVERTICAL);
         new_queue_button_ = new wxButton(queue_scroll_, ID_NEW_QUEUE, "+ New Queue",
             wxDefaultPosition, wxSize(-1, 38));
-        queue_sizer_->Add(new_queue_button_, 0, wxEXPAND | wxALL, 8);
+        queue_sizer_->Add(new_queue_button_, 0, wxEXPAND | wxALL, 4);
         queue_scroll_->SetSizer(queue_sizer_);
-        center_sizer->Add(queue_scroll_, 1, wxEXPAND | wxTOP | wxBOTTOM | wxRIGHT, 8);
-        center->SetSizer(center_sizer);
+        workspace_splitter_->SplitVertically(bin_, queue_scroll_, FromDIP(230));
 
         options_ = new OptionsPanel(this);
-        aui_.AddPane(center, wxAuiPaneInfo().Name("workspace").CenterPane().PaneBorder(false));
+        aui_.AddPane(workspace_splitter_,
+            wxAuiPaneInfo().Name("workspace").CenterPane().PaneBorder(false));
         aui_.AddPane(options_, wxAuiPaneInfo().Name("options").Caption("Options")
             .Right().BestSize(FromDIP(365), FromDIP(640)).MinSize(FromDIP(330), FromDIP(400)).Floatable(true)
             .Dockable(true).CloseButton(true).Show(true));
@@ -1259,16 +1598,19 @@ private:
         Bind(wxEVT_MENU, &MainFrame::OnAddFolder, this, ID_ADD_FOLDER);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, wxID_EXIT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { AddQueue(); }, ID_NEW_QUEUE);
+        Bind(wxEVT_MENU, &MainFrame::OnRemoveSelection, this, ID_REMOVE_SELECTION);
         Bind(wxEVT_MENU, &MainFrame::OnClearBin, this, ID_CLEAR_BIN);
         Bind(wxEVT_MENU, &MainFrame::OnToggleOptions, this, ID_TOGGLE_OPTIONS);
         Bind(wxEVT_MENU, &MainFrame::OnStart, this, ID_START);
         Bind(wxEVT_MENU, &MainFrame::OnAbout, this, wxID_ABOUT);
         Bind(wxEVT_TOOL, &MainFrame::OnStart, this, ID_START);
         Bind(wxEVT_TOOL, [this](wxCommandEvent&) { AddQueue(); }, ID_NEW_QUEUE);
+        Bind(wxEVT_TOOL, &MainFrame::OnRemoveSelection, this, ID_REMOVE_SELECTION);
         Bind(wxEVT_TOOL, &MainFrame::OnClearBin, this, ID_CLEAR_BIN);
         Bind(wxEVT_TOOL, &MainFrame::OnToggleOptions, this, ID_TOGGLE_OPTIONS);
         Bind(wxEVT_TOOL, &MainFrame::OnAbout, this, wxID_ABOUT);
         Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { AddQueue(); }, ID_NEW_QUEUE);
+        Bind(wxEVT_CHAR_HOOK, &MainFrame::OnCharHook, this);
         Bind(wxEVT_SIZE, [this](wxSizeEvent& event)
         {
             PositionGauge();
@@ -1309,8 +1651,13 @@ private:
             {
                 RemovePathFromQueue(target, path);
             });
+        queue->SetActiveHandler([this, queue]()
+        {
+            active_list_ = ActiveList::Queue;
+            active_queue_ = queue;
+        });
         queue_sizer_->Insert(queue_sizer_->GetItemCount() - 1, queue, 0,
-            wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 8);
+            wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 4);
         queues_.push_back(queue);
         queue_scroll_->FitInside();
         queue_scroll_->Layout();
@@ -1329,6 +1676,11 @@ private:
         auto it = std::find(queues_.begin(), queues_.end(), &queue);
         if (it != queues_.end())
         {
+            if (active_queue_ == &queue)
+            {
+                active_list_ = ActiveList::Bin;
+                active_queue_ = nullptr;
+            }
             queue_sizer_->Detach(&queue);
             queue.Destroy();
             queues_.erase(it);
@@ -1393,6 +1745,66 @@ private:
         }
     }
 
+    void OnRemoveSelection(wxCommandEvent&)
+    {
+        RemoveActiveSelection();
+    }
+
+    void OnCharHook(wxKeyEvent& event)
+    {
+        if (event.GetKeyCode() != WXK_DELETE || processing_)
+        {
+            event.Skip();
+            return;
+        }
+
+        const bool active_has_focus = active_list_ == ActiveList::Bin
+            ? bin_->HasListFocus()
+            : active_queue_ != nullptr && active_queue_->HasListFocus();
+        if (!active_has_focus)
+        {
+            event.Skip();
+            return;
+        }
+
+        RemoveActiveSelection();
+    }
+
+    void RemoveActiveSelection()
+    {
+        if (processing_)
+        {
+            return;
+        }
+
+        if (active_list_ == ActiveList::Queue && active_queue_ != nullptr)
+        {
+            const std::vector<std::string> selected = active_queue_->SelectedPaths();
+            for (const std::string& path : selected)
+            {
+                RemovePathFromQueue(*active_queue_, path);
+            }
+            return;
+        }
+
+        const std::vector<std::string> selected = bin_->SelectedPaths();
+        for (const std::string& path : selected)
+        {
+            for (QueuePanel* queue : queues_)
+            {
+                queue->RemovePath(path);
+            }
+            const std::string key = PathKey(std::filesystem::u8path(path));
+            bin_refs_.erase(key);
+            bin_paths_.erase(key);
+        }
+        bin_->RemovePaths(selected);
+        for (const auto& [key, path] : bin_paths_)
+        {
+            bin_->SetReferences(path, bin_refs_[key]);
+        }
+    }
+
     void DecrementReference(const std::string& path)
     {
         const std::string key = PathKey(std::filesystem::u8path(path));
@@ -1439,16 +1851,7 @@ private:
         }
 
         std::vector<std::string> paths;
-        std::error_code error;
-        for (const auto& entry : std::filesystem::directory_iterator(
-            FileSystemPath(dialog.GetPath()), error))
-        {
-            if (entry.is_regular_file())
-            {
-                paths.push_back(entry.path().u8string());
-            }
-        }
-        std::sort(paths.begin(), paths.end());
+        AppendFolderFiles(FileSystemPath(dialog.GetPath()), paths);
         AddToBin(paths);
     }
 
@@ -1544,40 +1947,45 @@ private:
             return;
         }
 
-        const std::string stamp = MakeTimestamp();
         std::vector<ProcessJob> jobs;
+        std::unordered_map<std::string, int> reserved_names;
         for (QueuePanel* queue : non_empty)
         {
             ProcessJob job;
             job.queue_number = queue->Number();
             job.paths = queue->Paths();
-            const std::string base_name = "q" + std::to_string(job.queue_number) + "_" + stamp;
-            std::filesystem::path queue_dir;
-            for (int suffix = 0; suffix < 1000; ++suffix)
+            const bool has_raw = std::any_of(job.paths.begin(), job.paths.end(), IsRawPath);
+            const std::string extension = OutputExtension(settings.output_format, has_raw);
+            const std::string base_name = options_->OutputStem(job.paths.front(), settings);
+            std::filesystem::path output_path;
+            for (int suffix = 1; suffix < 1000; ++suffix)
             {
-                const std::string name = suffix == 0
+                const std::string stem = suffix == 1
                     ? base_name
                     : base_name + "_" + std::to_string(suffix);
-                queue_dir = std::filesystem::u8path(output_root) / name;
+                const std::string key = PathKey(std::filesystem::u8path(stem + extension));
+                output_path = std::filesystem::u8path(output_root) / (stem + extension);
                 error.clear();
-                if (std::filesystem::create_directory(queue_dir, error))
-                {
-                    break;
-                }
+                const bool exists = std::filesystem::exists(output_path, error);
                 if (error)
                 {
-                    queue_dir.clear();
+                    output_path.clear();
                     break;
                 }
-                queue_dir.clear();
+                if (reserved_names.find(key) == reserved_names.end() && !exists)
+                {
+                    reserved_names[key] = 1;
+                    break;
+                }
+                output_path.clear();
             }
-            if (queue_dir.empty())
+            if (output_path.empty())
             {
-                wxMessageBox(wxString::Format("Cannot create a unique output directory for Queue %d.",
+                wxMessageBox(wxString::Format("Cannot create a unique output filename for Queue %d.",
                     job.queue_number), "Output error", wxOK | wxICON_ERROR, this);
                 return;
             }
-            job.output_dir = queue_dir.u8string();
+            job.output_path = output_path.u8string();
             jobs.push_back(std::move(job));
         }
 
@@ -1692,9 +2100,11 @@ private:
         processing_ = processing;
         toolbar_->EnableTool(ID_START, !processing);
         toolbar_->EnableTool(ID_NEW_QUEUE, !processing);
+        toolbar_->EnableTool(ID_REMOVE_SELECTION, !processing);
         toolbar_->EnableTool(ID_CLEAR_BIN, !processing);
         GetMenuBar()->Enable(ID_START, !processing);
         GetMenuBar()->Enable(ID_NEW_QUEUE, !processing);
+        GetMenuBar()->Enable(ID_REMOVE_SELECTION, !processing);
         GetMenuBar()->Enable(ID_CLEAR_BIN, !processing);
         new_queue_button_->Enable(!processing);
         bin_->SetLocked(processing);
@@ -1767,22 +2177,9 @@ private:
         log_->ShowPosition(log_->GetLastPosition());
     }
 
-    static std::string MakeTimestamp()
-    {
-        const std::time_t now = std::time(nullptr);
-        std::tm local{};
-#ifdef _WIN32
-        localtime_s(&local, &now);
-#else
-        localtime_r(&now, &local);
-#endif
-        std::ostringstream value;
-        value << std::put_time(&local, "%Y%m%d_%H%M%S");
-        return value.str();
-    }
-
     wxAuiManager aui_;
     wxToolBar* toolbar_ = nullptr;
+    wxSplitterWindow* workspace_splitter_ = nullptr;
     BinPanel* bin_ = nullptr;
     wxScrolledWindow* queue_scroll_ = nullptr;
     wxBoxSizer* queue_sizer_ = nullptr;
@@ -1794,6 +2191,8 @@ private:
     std::vector<QueuePanel*> queues_;
     std::unordered_map<std::string, int> bin_refs_;
     std::unordered_map<std::string, std::string> bin_paths_;
+    ActiveList active_list_ = ActiveList::Bin;
+    QueuePanel* active_queue_ = nullptr;
     ProcessThread* worker_ = nullptr;
     bool processing_ = false;
     std::string last_progress_key_;

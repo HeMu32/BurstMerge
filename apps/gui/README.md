@@ -87,15 +87,38 @@ CMake prints a status message and skips the GUI without failing configuration.
 
 ## Workflow
 
-1. Add or drag files into the Bin. This only stages paths; it performs no RAW
+1. Add or drag files or folders into the Bin. Dropped folders expand their
+   immediate regular files in sorted order, matching the CLI `-f` behavior
+   without recursive traversal. This only stages paths; it performs no RAW
    conversion or image processing.
 2. Select Bin entries and add or drag them to one or more queues. A yellow Bin
    badge shows how many queues reference each file.
 3. Configure pipeline, merge, alignment, exposure, and cleanup options.
 4. Press **Start**. Non-empty queues run serially from top to bottom on a worker
    thread.
-5. Each queue writes to `q<n>_<timestamp>` beneath the configured output root,
-   which defaults to `./out`.
+5. Each queue writes a file directly beneath the configured output root, which
+   defaults to `./out`. The Pipeline tab offers two naming modes: processing
+   parameters only, or the first frame's filename followed by processing
+   parameters. Names include merge/alignment/exposure modes, alignment gamma,
+   noise reduction, tile size, and bit depth. Existing names receive a numeric
+   suffix instead of being overwritten.
+
+Alignment gamma and noise reduction each provide a slider plus an editable
+numeric field. Moving either control updates the other. The Bin/Queue divider is
+draggable, and both the output directory and optional DNG conversion cache can
+be entered directly or selected with a native directory dialog.
+
+Folders may also be dropped directly on a Queue. Their immediate regular files
+are added to that Queue and synchronized into the Bin, exactly like externally
+dropped individual files.
+
+`Remove Selection` appears between `New Queue` and `Clear Bin` in the Edit menu
+and toolbar. It acts only on the most recently active Bin or Queue list, even if
+another list still shows an inactive selection. Pressing Delete performs the
+same action only while that active list retains keyboard focus, so Delete keeps
+its normal editing behavior in path and numeric fields. Removing Queue entries
+decrements their Bin reference badges; removing Bin entries also removes the
+same files from every Queue.
 
 The current BurstMerge API has no cancellation primitive, so the GUI does not
 offer a Stop button. The window remains open until active processing finishes.
