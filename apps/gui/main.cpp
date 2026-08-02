@@ -16,6 +16,11 @@
 #include <wx/wrapsizer.h>
 #include <wx/wx.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <uxtheme.h>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cctype>
@@ -93,6 +98,25 @@ wxString DisplayPath(const std::string& path)
     return wxString::FromUTF8(path);
 }
 
+#ifdef _WIN32
+void ApplyWindowsExplorerTheme(wxWindow* window)
+{
+    if (window != nullptr && window->GetHandle() != nullptr)
+    {
+        SetWindowTheme(static_cast<HWND>(window->GetHandle()), L"Explorer", nullptr);
+    }
+}
+#endif
+
+long QueueBorderStyle()
+{
+#ifdef _WIN32
+    return wxBORDER_THEME;
+#else
+    return wxBORDER_SIMPLE;
+#endif
+}
+
 bool IsRawPath(const std::string& path)
 {
     static const std::vector<std::string> extensions = {
@@ -144,38 +168,51 @@ std::string EncodePathList(const std::vector<std::string>& paths)
     return data;
 }
 
-wxBitmap MakeFileBadgeBitmap(int references)
+wxBitmap MakeFileBadgeBitmap(int references, int size)
 {
-    const int size = 32;
     wxBitmap bitmap(size, size, 32);
     wxMemoryDC dc(bitmap);
-    dc.SetBackground(wxBrush(wxColour(45, 52, 62)));
+    const wxColour window = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+    const wxColour text = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+    const wxColour accent = wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHT);
+    dc.SetBackground(wxBrush(window));
     dc.Clear();
 
-    dc.SetPen(wxPen(wxColour(177, 191, 205), 1));
-    dc.SetBrush(wxBrush(wxColour(109, 126, 145)));
-    wxPoint shape[] = {
-        wxPoint(7, 4), wxPoint(20, 4), wxPoint(26, 10),
-        wxPoint(26, 28), wxPoint(7, 28)
-    };
-    dc.DrawPolygon(5, shape);
-    dc.SetPen(wxPen(wxColour(215, 224, 231), 2));
-    dc.DrawLine(11, 15, 22, 15);
-    dc.DrawLine(11, 20, 22, 20);
+    const int inset = std::max(2, size / 8);
+    const int file_size = size - inset * 2;
+    const wxBitmap file = wxArtProvider::GetBitmap(wxART_NORMAL_FILE, wxART_OTHER,
+        wxSize(file_size, file_size));
+    if (file.IsOk())
+    {
+        dc.DrawBitmap(file, inset, inset, true);
+    }
+    else
+    {
+        dc.SetPen(wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNSHADOW), 1));
+        dc.SetBrush(wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE)));
+        dc.DrawRectangle(inset * 2, inset, size - inset * 3, size - inset * 2);
+        dc.SetPen(wxPen(text, 2));
+        dc.DrawLine(size / 3, size / 2, size * 3 / 4, size / 2);
+        dc.DrawLine(size / 3, size * 5 / 8, size * 3 / 4, size * 5 / 8);
+    }
 
     if (references > 0)
     {
         const wxString label = references >= 5 ? "5+" : wxString::Format("%d", references);
+        const int badge_width = std::max(15, size * 15 / 32);
+        const int badge_height = std::max(13, size * 13 / 32);
         dc.SetPen(*wxTRANSPARENT_PEN);
-        dc.SetBrush(wxBrush(wxColour(235, 179, 38)));
-        dc.DrawRoundedRectangle(17, 0, 15, 13, 3);
-        dc.SetTextForeground(*wxWHITE);
+        dc.SetBrush(wxBrush(accent));
+        dc.DrawRoundedRectangle(size - badge_width, 0, badge_width, badge_height,
+            std::max(3, size * 3 / 32));
+        dc.SetTextForeground(wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT));
         wxFont font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
-        font.SetPointSize(7);
+        font.SetPointSize(std::max(7, font.GetPointSize() - 1));
         font.SetWeight(wxFONTWEIGHT_BOLD);
         dc.SetFont(font);
         const wxSize text = dc.GetTextExtent(label);
-        dc.DrawText(label, 17 + (15 - text.x) / 2, (13 - text.y) / 2 - 1);
+        dc.DrawText(label, size - badge_width + (badge_width - text.x) / 2,
+            (badge_height - text.y) / 2 - 1);
     }
 
     dc.SelectObject(wxNullBitmap);
@@ -276,8 +313,8 @@ public:
     explicit BinPanel(wxWindow* parent)
         : wxPanel(parent)
     {
-        SetMinSize(wxSize(250, 300));
-        SetBackgroundColour(wxColour(32, 37, 44));
+        SetMinSize(FromDIP(wxSize(250, 300)));
+        ApplySystemTheme();
 
         wxBoxSizer* root = new wxBoxSizer(wxVERTICAL);
         wxStaticText* title = new wxStaticText(this, wxID_ANY, "BIN");
@@ -285,19 +322,16 @@ public:
         title_font.SetWeight(wxFONTWEIGHT_BOLD);
         title_font.SetPointSize(title_font.GetPointSize() + 1);
         title->SetFont(title_font);
-        title->SetForegroundColour(wxColour(223, 228, 234));
         root->Add(title, 0, wxLEFT | wxRIGHT | wxTOP, 12);
         root->Add(new wxStaticText(this, wxID_ANY, "Stage files once, reuse them across queues."),
             0, wxLEFT | wxRIGHT | wxTOP, 12);
 
         list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
             wxLC_LIST);
-        image_list_ = new wxImageList(32, 32, true, 6);
-        for (int refs = 0; refs <= 5; ++refs)
-        {
-            image_list_->Add(MakeFileBadgeBitmap(refs));
-        }
-        list_->AssignImageList(image_list_, wxIMAGE_LIST_SMALL);
+#ifdef _WIN32
+        ApplyWindowsExplorerTheme(list_);
+#endif
+        RebuildImageList();
         root->Add(list_, 1, wxEXPAND | wxALL, 10);
         SetSizer(root);
 
@@ -361,7 +395,35 @@ public:
         list_->Enable(!locked);
     }
 
+    void ApplySystemTheme()
+    {
+        SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
+        if (list_ != nullptr)
+        {
+#ifdef _WIN32
+            ApplyWindowsExplorerTheme(list_);
+#endif
+            list_->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+            list_->SetTextColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+            RebuildImageList();
+            list_->Refresh();
+        }
+        Refresh();
+    }
+
 private:
+    void RebuildImageList()
+    {
+        const int icon_size = FromDIP(32);
+        wxImageList* images = new wxImageList(icon_size, icon_size, true, 6);
+        for (int refs = 0; refs <= 5; ++refs)
+        {
+            images->Add(MakeFileBadgeBitmap(refs, icon_size));
+        }
+        list_->AssignImageList(images, wxIMAGE_LIST_SMALL);
+        image_list_ = images;
+    }
+
     void OnBeginDrag(wxListEvent&)
     {
         const std::vector<std::string> selected = SelectedPaths();
@@ -389,10 +451,12 @@ class QueuePanel final : public wxPanel
 {
 public:
     QueuePanel(wxWindow* parent, int number)
-        : wxPanel(parent, wxID_ANY), number_(number)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+            QueueBorderStyle()),
+          number_(number)
     {
-        SetBackgroundColour(wxColour(42, 48, 57));
-        SetMinSize(wxSize(-1, 132));
+        ApplySystemTheme();
+        SetMinSize(wxSize(-1, FromDIP(124)));
 
         wxBoxSizer* root = new wxBoxSizer(wxVERTICAL);
         wxBoxSizer* heading = new wxBoxSizer(wxHORIZONTAL);
@@ -400,10 +464,9 @@ public:
         wxFont title_font = title_->GetFont();
         title_font.SetWeight(wxFONTWEIGHT_BOLD);
         title_->SetFont(title_font);
-        title_->SetForegroundColour(wxColour(223, 228, 234));
         add_button_ = new wxButton(this, wxID_ANY, "Add Selected", wxDefaultPosition, wxDefaultSize,
             wxBU_EXACTFIT);
-        close_button_ = new wxButton(this, wxID_ANY, "x", wxDefaultPosition, wxSize(30, -1),
+        close_button_ = new wxButton(this, wxID_ANY, "Close", wxDefaultPosition, wxDefaultSize,
             wxBU_EXACTFIT);
         heading->Add(title_, 0, wxALIGN_CENTER_VERTICAL);
         heading->AddStretchSpacer();
@@ -413,8 +476,12 @@ public:
 
         list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
             wxLC_LIST);
-        wxImageList* images = new wxImageList(32, 32, true, 1);
-        images->Add(MakeFileBadgeBitmap(0));
+#ifdef _WIN32
+        ApplyWindowsExplorerTheme(list_);
+#endif
+        const int icon_size = FromDIP(32);
+        wxImageList* images = new wxImageList(icon_size, icon_size, true, 1);
+        images->Add(MakeFileBadgeBitmap(0, icon_size));
         list_->AssignImageList(images, wxIMAGE_LIST_SMALL);
         root->Add(list_, 1, wxEXPAND | wxALL, 8);
         SetSizer(root);
@@ -522,6 +589,21 @@ public:
         close_button_->Enable(!locked);
     }
 
+    void ApplySystemTheme()
+    {
+        SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+        if (list_ != nullptr)
+        {
+#ifdef _WIN32
+            ApplyWindowsExplorerTheme(list_);
+#endif
+            list_->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+            list_->SetTextColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+            list_->Refresh();
+        }
+        Refresh();
+    }
+
 private:
     void RebuildList()
     {
@@ -587,7 +669,7 @@ public:
     explicit OptionsPanel(wxWindow* parent)
         : wxPanel(parent)
     {
-        SetMinSize(wxSize(345, 500));
+        SetMinSize(FromDIP(wxSize(345, 500)));
         wxBoxSizer* root = new wxBoxSizer(wxVERTICAL);
         wxNotebook* notebook = new wxNotebook(this, wxID_ANY);
         notebook->AddPage(CreatePipelinePage(notebook), "Pipeline");
@@ -726,6 +808,12 @@ public:
         Enable(!locked);
     }
 
+    void ApplySystemTheme()
+    {
+        SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
+        Refresh();
+    }
+
 private:
     wxPanel* CreatePipelinePage(wxWindow* parent)
     {
@@ -761,7 +849,7 @@ private:
         dng_convert_dir_ = new wxTextCtrl(panel, wxID_ANY);
         dng_convert_dir_->SetHint("Default: alongside output");
         grid->Add(dng_convert_dir_, 1, wxEXPAND);
-        panel->SetSizer(grid);
+        SetPageSizer(panel, grid);
         return panel;
     }
 
@@ -774,7 +862,7 @@ private:
         spatial_mode_ = AddChoice(panel, grid, "Spatial mode", {"Standard", "Linear"}, 0);
         frequency_mode_ = AddChoice(panel, grid, "Frequency mode",
             {"Laplacian", "Wiener", "Wiener robust"}, 0);
-        panel->SetSizer(grid);
+        SetPageSizer(panel, grid);
         return panel;
     }
 
@@ -787,7 +875,7 @@ private:
         align_gamma_ = AddSlider(panel, grid, "Alignment gamma", 2, 40, 20,
             "0.10", "2.00");
         smooth_tile_field_ = AddCheck(panel, grid, "Smooth tile field", false);
-        panel->SetSizer(grid);
+        SetPageSizer(panel, grid);
         return panel;
     }
 
@@ -798,7 +886,7 @@ private:
         exposure_mode_ = AddChoice(panel, grid, "Mode", {"Off", "Linear", "Curve"}, 0);
         curve_mode_ = AddChoice(panel, grid, "Curve mode", {"Global", "Local Reinhard"}, 0);
         exposure_stops_ = AddSlider(panel, grid, "Stops", -30, 30, 0, "-3.0", "+3.0");
-        panel->SetSizer(grid);
+        SetPageSizer(panel, grid);
         return panel;
     }
 
@@ -810,8 +898,15 @@ private:
         hot_pixel_repair_ = AddCheck(panel, grid, "Hot-pixel repair", false);
         noise_reduction_ = AddSlider(panel, grid, "Noise reduction", 0, 60, 26, "0", "30");
         stop_on_error_ = AddCheck(panel, grid, "Stop on first error", true);
-        panel->SetSizer(grid);
+        SetPageSizer(panel, grid);
         return panel;
+    }
+
+    void SetPageSizer(wxPanel* panel, wxSizer* contents)
+    {
+        wxBoxSizer* root = new wxBoxSizer(wxVERTICAL);
+        root->Add(contents, 1, wxEXPAND | wxALL, FromDIP(12));
+        panel->SetSizer(root);
     }
 
     wxFlexGridSizer* MakeGrid()
@@ -1035,17 +1130,22 @@ class MainFrame final : public wxFrame
 {
 public:
     MainFrame()
-        : wxFrame(nullptr, wxID_ANY, "BurstMerge GUI", wxDefaultPosition, wxSize(1280, 820)),
+        : wxFrame(nullptr, wxID_ANY, "BurstMerge GUI", wxDefaultPosition, wxDefaultSize,
+            wxDEFAULT_FRAME_STYLE | wxCLIP_CHILDREN),
           aui_(this)
     {
-        SetMinSize(wxSize(960, 640));
-        SetBackgroundColour(wxColour(25, 29, 35));
+        SetSize(FromDIP(wxSize(1280, 820)));
+        SetMinSize(FromDIP(wxSize(960, 640)));
+#ifdef _WIN32
+        SetDoubleBuffered(true);
+#endif
         BuildMenu();
         BuildToolbar();
         BuildWorkspace();
         BuildStatusArea();
         BindEvents();
         AddQueue();
+        ApplySystemTheme();
         Centre();
     }
 
@@ -1105,7 +1205,7 @@ private:
     void BuildWorkspace()
     {
         wxPanel* center = new wxPanel(this);
-        center->SetBackgroundColour(wxColour(25, 29, 35));
+        center->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
         wxBoxSizer* center_sizer = new wxBoxSizer(wxHORIZONTAL);
 
         bin_ = new BinPanel(center);
@@ -1118,7 +1218,7 @@ private:
         queue_scroll_ = new wxScrolledWindow(center, wxID_ANY, wxDefaultPosition, wxDefaultSize,
             wxVSCROLL | wxBORDER_NONE);
         queue_scroll_->SetScrollRate(0, 12);
-        queue_scroll_->SetBackgroundColour(wxColour(25, 29, 35));
+        queue_scroll_->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
         queue_sizer_ = new wxBoxSizer(wxVERTICAL);
         new_queue_button_ = new wxButton(queue_scroll_, ID_NEW_QUEUE, "+ New Queue",
             wxDefaultPosition, wxSize(-1, 38));
@@ -1130,7 +1230,7 @@ private:
         options_ = new OptionsPanel(this);
         aui_.AddPane(center, wxAuiPaneInfo().Name("workspace").CenterPane().PaneBorder(false));
         aui_.AddPane(options_, wxAuiPaneInfo().Name("options").Caption("Options")
-            .Right().BestSize(365, 640).MinSize(330, 400).Floatable(true)
+            .Right().BestSize(FromDIP(365), FromDIP(640)).MinSize(FromDIP(330), FromDIP(400)).Floatable(true)
             .Dockable(true).CloseButton(true).Show(true));
         aui_.Update();
     }
@@ -1139,10 +1239,8 @@ private:
     {
         log_ = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(-1, 130),
             wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2);
-        log_->SetBackgroundColour(wxColour(20, 23, 28));
-        log_->SetForegroundColour(wxColour(198, 207, 217));
         aui_.AddPane(log_, wxAuiPaneInfo().Name("log").Caption("Processing Log")
-            .Bottom().BestSize(-1, 150).MinSize(-1, 80).Floatable(true)
+            .Bottom().BestSize(-1, FromDIP(150)).MinSize(-1, FromDIP(80)).Floatable(true)
             .Dockable(true).CloseButton(true).Show(true));
         aui_.Update();
 
@@ -1174,6 +1272,11 @@ private:
         Bind(wxEVT_SIZE, [this](wxSizeEvent& event)
         {
             PositionGauge();
+            event.Skip();
+        });
+        Bind(wxEVT_SYS_COLOUR_CHANGED, [this](wxSysColourChangedEvent& event)
+        {
+            ApplySystemTheme();
             event.Skip();
         });
         Bind(wxEVT_CLOSE_WINDOW, &MainFrame::OnClose, this);
@@ -1520,14 +1623,16 @@ private:
         std::ostringstream line;
         line << "Queue " << result.queue_number << (result.success ? " completed" : " failed")
              << " in " << std::fixed << std::setprecision(2) << result.elapsed_seconds << "s";
-        AppendLog(line.str(), result.success ? wxColour(121, 204, 139) : wxColour(235, 105, 105));
+        AppendLog(line.str(), result.success
+            ? wxSystemSettings::GetColour(wxSYS_COLOUR_HOTLIGHT)
+            : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
         if (!result.output_path.empty())
         {
             AppendLog("Output: " + result.output_path);
         }
         if (!result.error.empty())
         {
-            AppendLog("Error: " + result.error, wxColour(235, 105, 105));
+            AppendLog("Error: " + result.error, wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
         }
     }
 
@@ -1546,7 +1651,9 @@ private:
         status_bar_->SetStatusText(wxString::Format("%d done", summary.completed), 1);
         AppendLog(summary.failed == 0 ? "All queues completed successfully."
                                       : "Processing finished with " + std::to_string(summary.failed) + " error(s).",
-            summary.failed == 0 ? wxColour(121, 204, 139) : wxColour(235, 105, 105));
+            summary.failed == 0
+                ? wxSystemSettings::GetColour(wxSYS_COLOUR_HOTLIGHT)
+                : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
     }
 
     void OnAbout(wxCommandEvent&)
@@ -1614,9 +1721,48 @@ private:
         gauge_->SetSize(rect.Deflate(3));
     }
 
-    void AppendLog(const std::string& text, const wxColour& colour = wxColour(198, 207, 217))
+    void ApplySystemTheme()
     {
-        log_->SetDefaultStyle(wxTextAttr(colour));
+        const wxColour face = wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE);
+        const wxColour window = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+        const wxColour text = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+        const wxColour shadow = wxSystemSettings::GetColour(wxSYS_COLOUR_BTNSHADOW);
+        const wxColour highlight = wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHT);
+        const wxColour highlight_text = wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT);
+
+        SetBackgroundColour(face);
+        bin_->ApplySystemTheme();
+        options_->ApplySystemTheme();
+        queue_scroll_->SetBackgroundColour(face);
+        for (QueuePanel* queue : queues_)
+        {
+            queue->ApplySystemTheme();
+        }
+        log_->SetBackgroundColour(window);
+        log_->SetForegroundColour(text);
+
+        wxAuiDockArt* art = aui_.GetArtProvider();
+        art->SetColour(wxAUI_DOCKART_BACKGROUND_COLOUR, face);
+        art->SetColour(wxAUI_DOCKART_SASH_COLOUR, face);
+        art->SetColour(wxAUI_DOCKART_BORDER_COLOUR, shadow);
+        art->SetColour(wxAUI_DOCKART_ACTIVE_CAPTION_COLOUR, highlight);
+        art->SetColour(wxAUI_DOCKART_ACTIVE_CAPTION_GRADIENT_COLOUR, highlight);
+        art->SetColour(wxAUI_DOCKART_ACTIVE_CAPTION_TEXT_COLOUR, highlight_text);
+        art->SetColour(wxAUI_DOCKART_INACTIVE_CAPTION_COLOUR, face);
+        art->SetColour(wxAUI_DOCKART_INACTIVE_CAPTION_GRADIENT_COLOUR, face);
+        art->SetColour(wxAUI_DOCKART_INACTIVE_CAPTION_TEXT_COLOUR, text);
+        art->SetMetric(wxAUI_DOCKART_GRADIENT_TYPE, wxAUI_GRADIENT_NONE);
+
+        aui_.Update();
+        Refresh();
+    }
+
+    void AppendLog(const std::string& text, const wxColour& colour = wxNullColour)
+    {
+        const wxColour actual = colour.IsOk()
+            ? colour
+            : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+        log_->SetDefaultStyle(wxTextAttr(actual));
         log_->AppendText(DisplayPath(text) + "\n");
         log_->ShowPosition(log_->GetLastPosition());
     }

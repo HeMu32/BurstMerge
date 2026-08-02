@@ -52,6 +52,18 @@ On Windows, the build also copies the project's `libtiff.dll` next to the
 executable. wxWidgets itself is linked statically, so the GUI can be launched
 from Explorer without preparing a wxWidgets or libtiff `PATH`.
 
+The Windows target embeds the wxWidgets Common Controls v6 and Per-Monitor V2
+DPI manifest. Controls and AUI panes use Windows system colours instead of a
+fixed application palette, respond to system-colour changes, and keep icons and
+key dimensions scaled in device-independent pixels. The Bin and Queue lists use
+the native Explorer control theme.
+
+Windows-specific C++ behavior is isolated behind `_WIN32`; the resource file,
+GUI subsystem flag, Win32 libraries, and runtime DLL copy are guarded by CMake's
+`WIN32`/`MINGW` platform checks. Other platforms retain the portable wxWidgets
+system-colour, DPI, layout, queue, and processing paths without including Win32
+headers or calling Win32 APIs.
+
 The source tree is detected through `WX_ROOT` in the gitignored
 `local_config.cmake`. Its default project-local value is:
 

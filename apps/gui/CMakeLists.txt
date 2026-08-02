@@ -35,9 +35,16 @@ add_subdirectory(
 # 中关于 wxBUILD_PRECOMP 等的 set CACHE FORCE 段).
 # 这里 add_subdirectory 完成后, wxcore/wxbase/... 等 target 已可被引用.
 
-add_executable(burstmerge_gui WIN32
-    main.cpp
-)
+if(WIN32)
+    add_executable(burstmerge_gui WIN32
+        main.cpp
+        burstmerge_gui.rc
+    )
+else()
+    add_executable(burstmerge_gui
+        main.cpp
+    )
+endif()
 
 # WIN32 关键字让 CMake 默认把 subsystem 设为 WINDOWS (无控制台黑窗).
 # MinGW/GCC 上需要额外 -mwindows 让链接器收集正确的运行时入口与库依赖.
