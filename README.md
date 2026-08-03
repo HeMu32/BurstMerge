@@ -15,7 +15,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Process Non-RAW pictures
 - STF synthesis like Minolta α7 camera (but with inter-frame alignment)
 - Bayer color filter array support
-- CLI application
+- GUI application and CLI application
 
 ### File Input&Output formats
 
@@ -55,7 +55,6 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 
 ## TODOs
 
-- GUI application
 - OpenEXR support
 - DPX support
 - Hot pixel suppression (current implementation not working well)
@@ -355,3 +354,7 @@ Some algorithms saw huge performance degradation under Debug build, especially f
 # Known issue
 
 Noise may appera around high-contrast edges for spatial merge vulkan path in exposure bracketing, while same artifacts was less significant in the CPU path. 
+GUI thumbnail generation supports bounded JPEG/PNG/BMP decoding, embedded DNG and
+classic TIFF-based RAW previews, Sony NEX-5 and newer Sony ARW preview layouts, reduced TIFF IFDs, and
+row-sampled large linear RGB TIFFs. Unsupported or malformed inputs fall back to
+the file icon. See `apps/gui/README.md` for format limits and validation samples.

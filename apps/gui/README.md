@@ -7,12 +7,12 @@ The frontend is split into cohesive modules: `gui_utils` handles paths, output
 naming, platform theming, and generated badges; `panels` owns the Bin, Queue,
 Options, and drag-and-drop controls; `process_thread` owns worker events and
 queue execution; and `main_frame` coordinates the application workspace.
-`thumbnail_loader` uses one background worker for deduplicated thumbnail requests.
-It decodes common RGB files, bounded embedded JPEG previews from classic
-TIFF-based RAW files (including ARW and common NEF/CR2 layouts), RAF headers,
-and Canon CR3 preview UUID boxes. TIFF thumbnails prefer reduced rendered IFDs;
-small TIFF images may decode directly. Unsupported or malformed files retain the
-file icon. `main.cpp` contains only the wx application entry point.
+`thumbnail_loader` uses one background worker for bounded thumbnail requests.
+It decodes common RGB files, embedded JPEG previews from classic TIFF-based RAW
+files, RAF headers, and Canon CR3 preview UUID boxes. TIFF thumbnails prefer
+reduced rendered IFDs and can also sample large linear RGB TIFFs row-by-row.
+Unsupported or malformed files retain the file icon. `main.cpp` contains only
+the wx application entry point.
 
 ## wxWidgets Setup
 
@@ -67,6 +67,16 @@ when the input uses that preview path:
 build/apps/gui/thumbnail_preview_diagnostic.exe libburstmerge/test/samples/X1M5_Wide.dng
 ```
 
+The diagnostic accepts multiple image paths, which is useful for checking that
+one rejected file does not prevent later files from being processed:
+
+```powershell
+build/apps/gui/thumbnail_preview_diagnostic.exe `
+    libburstmerge/test/samples/rgb_small/rgb8.png `
+    libburstmerge/test/samples/tif1/DSC05857.tif `
+    libburstmerge/test/samples/X1M5_Wide.dng
+```
+
 On Windows, the build also copies the project's `libtiff.dll` next to the
 executable. wxWidgets itself is linked statically, so the GUI can be launched
 from Explorer without preparing a wxWidgets or libtiff `PATH`.
@@ -89,6 +99,55 @@ The source tree is detected through `WX_ROOT` in the gitignored
 ```cmake
 set(WX_ROOT "${PROJECT_ROOT}/3rdparty/wxWidgets")
 ```
+
+## Thumbnail Support
+
+The loader never decodes RAW sensor pixels for a thumbnail. It uses the
+following paths:
+
+- JPEG: bounded JPEG header validation followed by wx/libjpeg decode.
+- PNG/BMP: bounded header validation followed by wx decode.
+- DNG and classic TIFF-based RAW: bounded embedded JPEG IFD ranges.
+- Sony NEX-5 ARW: old-style IFD0 `PreviewImage` tags 513/514 are supported.
+- Newer Sony ARW: rendered RGB/YCbCr preview IFDs and `JpgFromRaw` layouts are
+  supported. ARW files are kept away from the ordinary TIFF raster decoder.
+- RAF: validated Fujifilm header preview offset and length.
+- CR3: Canon `crx ` BMFF files with the Canon preview UUID/`PRVW` box.
+- TIFF: reduced rendered IFDs, SubIFDs, BigTIFF, and large linear RGB TIFFs with
+  bounded scanline sampling.
+
+The implementation is intentionally conservative. A format that does not have
+a recognized safe preview layout falls back to the file icon. Current safety
+limits include:
+
+- 64 MiB for ordinary JPEG/PNG/BMP input files.
+- 256 MiB for TIFF, DNG, ARW, RAF, and CR3 container files.
+- 16 MiB for an extracted embedded JPEG byte range.
+- 16 MP for reduced TIFF raster decoding and 64 MP for embedded JPEG metadata.
+- 16384 pixels for either preview dimension.
+- 1 MiB maximum scanline buffer for the large linear TIFF path.
+- 4096 staged Bin entries and 4096 pending thumbnail requests.
+- 1 MiB maximum internal drag-and-drop path payload.
+
+When a file exceeds a limit, is truncated, has unsupported compression, or
+fails decoding, the worker catches the failure and leaves the file icon in
+place. Removing a file or clearing the Bin invalidates both queued and active
+thumbnail requests, so stale results are not added back to the UI.
+
+The following samples have been exercised with the current implementation:
+
+- `libburstmerge/test/samples/tif1/*.tif`, including 16-bit RGB TIFF files.
+- `T:\BurstMerge_Samples\SLg2-1-48-lin.tif`, a 3840x2160 16-bit LZW RGB TIFF
+  without a reduced IFD.
+- Sony NEX-5 files under `T:\BurstMerge_Samples\LongUnder1`.
+- Sony ILCE-7RM5 files under `T:\BurstMerge_Samples\Night4`.
+- Sony ARW samples under `libburstmerge/test/samples/`.
+- DNG and PNG samples under `libburstmerge/test/samples/`.
+
+NEF, CR2, RAF, CR3, ORF, and RW2 behavior should still be checked against real
+files from the relevant camera generations. The parser rejects unknown or
+unverified layouts rather than attempting full RAW decoding or launching the
+Adobe DNG Converter for thumbnail generation.
 
 ## Build Without The GUI
 

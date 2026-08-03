@@ -1,4 +1,9 @@
 实施方案（进入计划模式 — 只读）
+
+> 历史实施记录。当前 GUI 的实际构建、依赖、工作流和缩略图行为以
+> `apps/gui/README.md` 为准；本文保留早期设计过程和已完成事项，部分路径
+> 与 wxWidgets 构建方式已经过时。
+
 一、获取 wxWidgets
 下载 https://github.com/wxWidgets/wxWidgets/releases/download/v3.2.5/wxWidgets-3.2.5.tar.bz2 → 解压到 3rdparty/wxWidgets/
 压缩包约 25MB，解压后约 200MB 源码
