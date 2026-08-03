@@ -4,6 +4,7 @@
 
 #include <wx/arrstr.h>
 #include <wx/bitmap.h>
+#include <wx/image.h>
 #include <wx/string.h>
 #include <wx/window.h>
 
@@ -50,5 +51,6 @@ std::string SanitizeFileStem(std::string stem);
 std::vector<std::string> DecodePathList(const void* data, std::size_t size);
 std::string EncodePathList(const std::vector<std::string>& paths);
 wxBitmap MakeFileBadgeBitmap(int references, int size);
+wxBitmap ComposeThumbnailBitmap(const wxImage* image, int references, int size);
 
 } // namespace burstmerge::gui

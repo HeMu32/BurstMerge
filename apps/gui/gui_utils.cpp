@@ -220,6 +220,11 @@ std::string EncodePathList(const std::vector<std::string>& paths)
 
 wxBitmap MakeFileBadgeBitmap(int references, int size)
 {
+    return ComposeThumbnailBitmap(nullptr, references, size);
+}
+
+wxBitmap ComposeThumbnailBitmap(const wxImage* image, int references, int size)
+{
     wxBitmap bitmap(size, size, 32);
     wxMemoryDC dc(bitmap);
     const wxColour window = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
@@ -228,22 +233,37 @@ wxBitmap MakeFileBadgeBitmap(int references, int size)
     dc.SetBackground(wxBrush(window));
     dc.Clear();
 
-    const int inset = std::max(2, size / 8);
-    const int file_size = size - inset * 2;
-    const wxBitmap file = wxArtProvider::GetBitmap(wxART_NORMAL_FILE, wxART_OTHER,
-        wxSize(file_size, file_size));
-    if (file.IsOk())
+    if (image != nullptr && image->IsOk())
     {
-        dc.DrawBitmap(file, inset, inset, true);
+        const double scale = std::min(
+            static_cast<double>(size) / image->GetWidth(),
+            static_cast<double>(size) / image->GetHeight());
+        const int width = std::max(1, static_cast<int>(image->GetWidth() * scale));
+        const int height = std::max(1, static_cast<int>(image->GetHeight() * scale));
+        const wxImage fitted = width == image->GetWidth() && height == image->GetHeight()
+            ? *image
+            : image->Scale(width, height, wxIMAGE_QUALITY_HIGH);
+        dc.DrawBitmap(wxBitmap(fitted), (size - width) / 2, (size - height) / 2, true);
     }
     else
     {
-        dc.SetPen(wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNSHADOW), 1));
-        dc.SetBrush(wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE)));
-        dc.DrawRectangle(inset * 2, inset, size - inset * 3, size - inset * 2);
-        dc.SetPen(wxPen(text, 2));
-        dc.DrawLine(size / 3, size / 2, size * 3 / 4, size / 2);
-        dc.DrawLine(size / 3, size * 5 / 8, size * 3 / 4, size * 5 / 8);
+        const int inset = std::max(2, size / 8);
+        const int file_size = size - inset * 2;
+        const wxBitmap file = wxArtProvider::GetBitmap(wxART_NORMAL_FILE, wxART_OTHER,
+            wxSize(file_size, file_size));
+        if (file.IsOk())
+        {
+            dc.DrawBitmap(file, inset, inset, true);
+        }
+        else
+        {
+            dc.SetPen(wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNSHADOW), 1));
+            dc.SetBrush(wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE)));
+            dc.DrawRectangle(inset * 2, inset, size - inset * 3, size - inset * 2);
+            dc.SetPen(wxPen(text, 2));
+            dc.DrawLine(size / 3, size / 2, size * 3 / 4, size / 2);
+            dc.DrawLine(size / 3, size * 5 / 8, size * 3 / 4, size * 5 / 8);
+        }
     }
 
     if (references > 0)

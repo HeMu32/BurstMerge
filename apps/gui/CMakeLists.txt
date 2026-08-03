@@ -25,10 +25,19 @@
 
 # 把 wx 当成隔离的子项目 build; 二进制产物落在主项目 build 树下的 wx_build/,
 # 不会污染主项目 build 根目录, 便于清理.
+# Use the same project libjpeg-turbo ABI as libburstmerge. Linking wx's bundled
+# IJG JPEG beside libburstmerge would expose duplicate jpeg_* symbols.
+set(wxUSE_LIBJPEG sys CACHE STRING "wx JPEG implementation" FORCE)
+set(JPEG_INCLUDE_DIR "${JPEG_INCLUDE_DIR}" CACHE PATH "Shared JPEG include directory" FORCE)
+set(JPEG_LIBRARY "${JPEG_LIBRARY}" CACHE FILEPATH "Shared JPEG library" FORCE)
 add_subdirectory(
     ${BURSTMERGE_WX_SOURCE_DIR}
     ${CMAKE_BINARY_DIR}/wx_build
 )
+if(MINGW)
+    # wx's external-JPEG handler provides this hook for rpcndr.h's boolean.
+    target_compile_definitions(wxcore PRIVATE wxHACK_BOOLEAN=int)
+endif()
 
 # 在 add_subdirectory 之前设置 wx options 没有效, CMake 调用还是按 wx 自己
 # CACHE 变量. 改为在父项目 configure 阶段 cache forced (见顶层 CMakeLists.txt
@@ -43,9 +52,23 @@ set(BURSTMERGE_GUI_SOURCES
     panels.cpp
     process_thread.h
     process_thread.cpp
+    thumbnail_loader.h
+    thumbnail_loader.cpp
     main_frame.h
     main_frame.cpp
 )
+
+option(BURSTMERGE_BUILD_GUI_DIAGNOSTICS "Build GUI thumbnail diagnostics" OFF)
+if(BURSTMERGE_BUILD_GUI_DIAGNOSTICS)
+    add_executable(thumbnail_preview_diagnostic
+        thumbnail_preview_diagnostic.cpp
+        thumbnail_loader.h
+        thumbnail_loader.cpp
+    )
+    target_link_libraries(thumbnail_preview_diagnostic PRIVATE
+        ${BURSTMERGE_WX_TARGETS}
+    )
+endif()
 
 if(WIN32)
     add_executable(burstmerge_gui WIN32
@@ -92,6 +115,13 @@ if(WIN32)
         winmm
         ws2_32
     )
+
+    if(BURSTMERGE_BUILD_GUI_DIAGNOSTICS)
+        target_link_libraries(thumbnail_preview_diagnostic PRIVATE
+            gdi32 user32 comctl32 comdlg32 shell32 ole32 oleaut32 uuid advapi32
+            rpcrt4 uxtheme imm32 winmm ws2_32
+        )
+    endif()
 
     # The core library links the project's shared libtiff build. Unlike CLI/test
     # invocations, a desktop app launched from Explorer cannot rely on a prepared

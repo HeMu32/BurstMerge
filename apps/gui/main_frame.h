@@ -3,7 +3,9 @@
 #include <wx/aui/aui.h>
 #include <wx/colour.h>
 #include <wx/frame.h>
+#include <wx/image.h>
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -28,6 +30,7 @@ class BinPanel;
 class OptionsPanel;
 class ProcessThread;
 class QueuePanel;
+class ThumbnailLoader;
 
 enum class ActiveList
 {
@@ -64,6 +67,7 @@ private:
     void OnProgress(wxThreadEvent& event);
     void OnQueueDone(wxThreadEvent& event);
     void OnProcessDone(wxThreadEvent& event);
+    void OnThumbnailReady(wxThreadEvent& event);
     void OnAbout(wxCommandEvent&);
     void OnClose(wxCloseEvent& event);
     void SetProcessingState(bool processing);
@@ -84,6 +88,8 @@ private:
     std::vector<QueuePanel*> queues_;
     std::unordered_map<std::string, int> bin_refs_;
     std::unordered_map<std::string, std::string> bin_paths_;
+    std::unordered_map<std::string, wxImage> thumbnails_;
+    std::unique_ptr<ThumbnailLoader> thumbnail_loader_;
     ActiveList active_list_ = ActiveList::Bin;
     QueuePanel* active_queue_ = nullptr;
     ProcessThread* worker_ = nullptr;

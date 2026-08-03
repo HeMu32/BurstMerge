@@ -7,7 +7,10 @@ The frontend is split into cohesive modules: `gui_utils` handles paths, output
 naming, platform theming, and generated badges; `panels` owns the Bin, Queue,
 Options, and drag-and-drop controls; `process_thread` owns worker events and
 queue execution; and `main_frame` coordinates the application workspace.
-`main.cpp` contains only the wx application entry point.
+`thumbnail_loader` uses one background worker for deduplicated thumbnail requests;
+it decodes common RGB files and only bounded embedded JPEG previews from DNG/TIFF.
+Other RAW files and TIFFs without a safe reduced RGB/YCbCr JPEG retain the file
+icon. `main.cpp` contains only the wx application entry point.
 
 ## wxWidgets Setup
 
@@ -44,14 +47,21 @@ headers. Disabling PCH avoids a wxWidgets 3.2/MinGW GCC compatibility issue.
 Configure and build with MinGW/GCC:
 
 ```powershell
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DBURSTMERGE_BUILD_GUI=ON
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DBURSTMERGE_BUILD_GUI=ON -DBURSTMERGE_BUILD_GUI_DIAGNOSTICS=ON
 cmake --build build --target burstmerge_gui -j 8
+cmake --build build --target thumbnail_preview_diagnostic -j 8
 ```
 
 The executable is written to:
 
 ```text
 build/apps/gui/burstmerge_gui.exe
+```
+
+The diagnostic validates the metadata-only DNG/TIFF preview path and JPEG decode:
+
+```powershell
+build/apps/gui/thumbnail_preview_diagnostic.exe libburstmerge/test/samples/X1M5_Wide.dng
 ```
 
 On Windows, the build also copies the project's `libtiff.dll` next to the

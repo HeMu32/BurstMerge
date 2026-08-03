@@ -3,6 +3,7 @@
 #include "gui_utils.h"
 #include "panels.h"
 #include "process_thread.h"
+#include "thumbnail_loader.h"
 
 #include <wx/artprov.h>
 #include <wx/filedlg.h>
@@ -36,6 +37,7 @@ MainFrame::MainFrame()
     BuildWorkspace();
     BuildStatusArea();
     BindEvents();
+    thumbnail_loader_ = std::make_unique<ThumbnailLoader>(this);
     AddQueue();
     ApplySystemTheme();
     Centre();
@@ -43,6 +45,8 @@ MainFrame::MainFrame()
 
 MainFrame::~MainFrame()
 {
+    // The loader must stop posting events before wx destroys this frame's children.
+    thumbnail_loader_.reset();
     if (worker_ != nullptr)
     {
         worker_->Wait();
@@ -188,6 +192,7 @@ void MainFrame::BindEvents()
     Bind(wxEVT_BM_PROGRESS, &MainFrame::OnProgress, this);
     Bind(wxEVT_BM_QUEUE_DONE, &MainFrame::OnQueueDone, this);
     Bind(wxEVT_BM_PROCESS_DONE, &MainFrame::OnProcessDone, this);
+    Bind(wxEVT_BM_THUMBNAIL_READY, &MainFrame::OnThumbnailReady, this);
 }
 
 void MainFrame::AddQueue()
@@ -276,6 +281,15 @@ void MainFrame::AddToBin(const std::vector<std::string>& paths)
             bin_refs_[key] = 0;
             bin_paths_[key] = path;
             bin_->AddPath(path);
+            const auto thumbnail = thumbnails_.find(key);
+            if (thumbnail != thumbnails_.end())
+            {
+                bin_->SetThumbnail(path, thumbnail->second);
+            }
+            else
+            {
+                thumbnail_loader_->Request(path, FromDIP(64), FromDIP(64));
+            }
         }
     }
 }
@@ -295,6 +309,11 @@ void MainFrame::AddPathsToQueue(QueuePanel& queue, const std::vector<std::string
         }
         if (queue.AddPath(bin_paths_[key]))
         {
+            const auto thumbnail = thumbnails_.find(key);
+            if (thumbnail != thumbnails_.end())
+            {
+                queue.SetThumbnail(bin_paths_[key], thumbnail->second);
+            }
             const int references = ++bin_refs_[key];
             bin_->SetReferences(bin_paths_[key], references);
         }
@@ -358,7 +377,9 @@ void MainFrame::RemoveActiveSelection()
         {
             queue->RemovePath(path);
         }
+        thumbnail_loader_->Cancel(path);
         const std::string key = PathKey(std::filesystem::u8path(path));
+        thumbnails_.erase(key);
         bin_refs_.erase(key);
         bin_paths_.erase(key);
     }
@@ -436,9 +457,11 @@ void MainFrame::OnClearBin(wxCommandEvent&)
     {
         queue->Clear();
     }
+    thumbnail_loader_->ClearPending();
     bin_->Clear();
     bin_refs_.clear();
     bin_paths_.clear();
+    thumbnails_.clear();
 }
 
 void MainFrame::OnToggleOptions(wxCommandEvent&)
@@ -626,6 +649,30 @@ void MainFrame::OnProcessDone(wxThreadEvent& event)
         summary.failed == 0
             ? wxSystemSettings::GetColour(wxSYS_COLOUR_HOTLIGHT)
             : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+}
+
+void MainFrame::OnThumbnailReady(wxThreadEvent& event)
+{
+    const ThumbnailResult result = event.GetPayload<ThumbnailResult>();
+    if (result.width <= 0 || result.height <= 0 ||
+        result.rgb.size() != static_cast<std::size_t>(result.width) * result.height * 3)
+    {
+        return;
+    }
+    const std::string key = PathKey(std::filesystem::u8path(result.path));
+    const auto path = bin_paths_.find(key);
+    if (path == bin_paths_.end())
+    {
+        return;
+    }
+    wxImage image(result.width, result.height, false);
+    std::copy(result.rgb.begin(), result.rgb.end(), image.GetData());
+    thumbnails_[key] = image;
+    bin_->SetThumbnail(path->second, image);
+    for (QueuePanel* queue : queues_)
+    {
+        queue->SetThumbnail(path->second, image);
+    }
 }
 
 void MainFrame::OnAbout(wxCommandEvent&)

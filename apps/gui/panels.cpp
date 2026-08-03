@@ -160,20 +160,37 @@ void BinPanel::AddPath(const std::string& path)
         return;
     }
 
+    references_[key] = 0;
     const long row = list_->InsertItem(list_->GetItemCount(),
-        DisplayPath(std::filesystem::u8path(path).filename().u8string()), 0);
+        DisplayPath(std::filesystem::u8path(path).filename().u8string()), -1);
     list_->SetItemData(row, static_cast<wxUIntPtr>(paths_.size()));
     rows_[key] = row;
     paths_.push_back(path);
+    const int image_index = image_list_->Add(
+        ComposeThumbnailBitmap(nullptr, 0, FromDIP(48)));
+    list_->SetItemImage(row, image_index);
 }
 
 void BinPanel::SetReferences(const std::string& path, int references)
 {
-    auto it = rows_.find(PathKey(std::filesystem::u8path(path)));
+    const std::string key = PathKey(std::filesystem::u8path(path));
+    auto it = rows_.find(key);
     if (it != rows_.end())
     {
-        list_->SetItemImage(it->second, std::min(5, std::max(0, references)));
+        references_[key] = references;
+        UpdateImage(path);
     }
+}
+
+void BinPanel::SetThumbnail(const std::string& path, const wxImage& image)
+{
+    const std::string key = PathKey(std::filesystem::u8path(path));
+    if (rows_.find(key) == rows_.end() || !image.IsOk())
+    {
+        return;
+    }
+    thumbnails_[key] = image;
+    UpdateImage(path);
 }
 
 std::vector<std::string> BinPanel::SelectedPaths() const
@@ -196,6 +213,9 @@ void BinPanel::Clear()
     list_->DeleteAllItems();
     paths_.clear();
     rows_.clear();
+    references_.clear();
+    thumbnails_.clear();
+    RebuildImageList();
 }
 
 void BinPanel::RemovePaths(const std::vector<std::string>& paths)
@@ -213,6 +233,12 @@ void BinPanel::RemovePaths(const std::vector<std::string>& paths)
     {
         return removed.find(PathKey(std::filesystem::u8path(path))) != removed.end();
     }), paths_.end());
+    for (const auto& [key, unused] : removed)
+    {
+        references_.erase(key);
+        thumbnails_.erase(key);
+    }
+    RebuildImageList();
     RebuildList();
 }
 
@@ -249,7 +275,8 @@ void BinPanel::RebuildList()
     for (size_t i = 0; i < paths_.size(); ++i)
     {
         const long row = list_->InsertItem(list_->GetItemCount(),
-            DisplayPath(std::filesystem::u8path(paths_[i]).filename().u8string()), 0);
+            DisplayPath(std::filesystem::u8path(paths_[i]).filename().u8string()),
+            static_cast<int>(i));
         list_->SetItemData(row, static_cast<wxUIntPtr>(i));
         rows_[PathKey(std::filesystem::u8path(paths_[i]))] = row;
     }
@@ -257,14 +284,37 @@ void BinPanel::RebuildList()
 
 void BinPanel::RebuildImageList()
 {
-    const int icon_size = FromDIP(32);
-    wxImageList* images = new wxImageList(icon_size, icon_size, true, 6);
-    for (int refs = 0; refs <= 5; ++refs)
+    const int icon_size = FromDIP(48);
+    wxImageList* images = new wxImageList(icon_size, icon_size, true,
+        std::max<std::size_t>(1, paths_.size()));
+    for (const std::string& path : paths_)
     {
-        images->Add(MakeFileBadgeBitmap(refs, icon_size));
+        const std::string key = PathKey(std::filesystem::u8path(path));
+        const auto thumbnail = thumbnails_.find(key);
+        const auto references = references_.find(key);
+        images->Add(ComposeThumbnailBitmap(
+            thumbnail == thumbnails_.end() ? nullptr : &thumbnail->second,
+            references == references_.end() ? 0 : references->second, icon_size));
     }
     list_->AssignImageList(images, wxIMAGE_LIST_SMALL);
     image_list_ = images;
+}
+
+void BinPanel::UpdateImage(const std::string& path)
+{
+    const std::string key = PathKey(std::filesystem::u8path(path));
+    const auto row = rows_.find(key);
+    if (row == rows_.end() || image_list_ == nullptr)
+    {
+        return;
+    }
+    const int image_index = static_cast<int>(list_->GetItemData(row->second));
+    const auto thumbnail = thumbnails_.find(key);
+    const auto references = references_.find(key);
+    image_list_->Replace(image_index, ComposeThumbnailBitmap(
+        thumbnail == thumbnails_.end() ? nullptr : &thumbnail->second,
+        references == references_.end() ? 0 : references->second, FromDIP(48)));
+    list_->SetItemImage(row->second, image_index);
 }
 
 void BinPanel::OnBeginDrag(wxListEvent&)
@@ -289,7 +339,7 @@ QueuePanel::QueuePanel(wxWindow* parent, int number)
       number_(number)
 {
     ApplySystemTheme();
-    SetMinSize(wxSize(-1, FromDIP(124)));
+    SetMinSize(wxSize(-1, FromDIP(140)));
 
     wxBoxSizer* root = new wxBoxSizer(wxVERTICAL);
     wxBoxSizer* heading = new wxBoxSizer(wxHORIZONTAL);
@@ -312,10 +362,7 @@ QueuePanel::QueuePanel(wxWindow* parent, int number)
 #ifdef _WIN32
     ApplyWindowsExplorerTheme(list_);
 #endif
-    const int icon_size = FromDIP(32);
-    wxImageList* images = new wxImageList(icon_size, icon_size, true, 1);
-    images->Add(MakeFileBadgeBitmap(0, icon_size));
-    list_->AssignImageList(images, wxIMAGE_LIST_SMALL);
+    RebuildImageList();
     root->Add(list_, 1, wxEXPAND | wxALL, 8);
     SetSizer(root);
 
@@ -388,11 +435,25 @@ bool QueuePanel::AddPath(const std::string& path)
     }
 
     const long row = list_->InsertItem(list_->GetItemCount(),
-        DisplayPath(std::filesystem::u8path(path).filename().u8string()), 0);
+        DisplayPath(std::filesystem::u8path(path).filename().u8string()), -1);
     list_->SetItemData(row, static_cast<wxUIntPtr>(paths_.size()));
     paths_.push_back(path);
     keys_[key] = path;
+    const int image_index = image_list_->Add(
+        ComposeThumbnailBitmap(nullptr, 0, FromDIP(48)));
+    list_->SetItemImage(row, image_index);
     return true;
+}
+
+void QueuePanel::SetThumbnail(const std::string& path, const wxImage& image)
+{
+    const std::string key = PathKey(std::filesystem::u8path(path));
+    if (keys_.find(key) == keys_.end() || !image.IsOk())
+    {
+        return;
+    }
+    thumbnails_[key] = image;
+    UpdateImage(path);
 }
 
 bool QueuePanel::RemovePath(const std::string& path)
@@ -409,6 +470,8 @@ bool QueuePanel::RemovePath(const std::string& path)
         return PathKey(std::filesystem::u8path(item)) == key;
     }), paths_.end());
     keys_.erase(key_it);
+    thumbnails_.erase(key);
+    RebuildImageList();
     RebuildList();
     return true;
 }
@@ -448,7 +511,9 @@ void QueuePanel::Clear()
 {
     paths_.clear();
     keys_.clear();
+    thumbnails_.clear();
     list_->DeleteAllItems();
+    RebuildImageList();
 }
 
 void QueuePanel::SetLocked(bool locked)
@@ -473,6 +538,7 @@ void QueuePanel::ApplySystemTheme()
 #endif
         list_->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
         list_->SetTextColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+        RebuildImageList();
         list_->Refresh();
     }
     Refresh();
@@ -484,8 +550,50 @@ void QueuePanel::RebuildList()
     for (size_t i = 0; i < paths_.size(); ++i)
     {
         const long row = list_->InsertItem(list_->GetItemCount(),
-            DisplayPath(std::filesystem::u8path(paths_[i]).filename().u8string()), 0);
+            DisplayPath(std::filesystem::u8path(paths_[i]).filename().u8string()),
+            static_cast<int>(i));
         list_->SetItemData(row, static_cast<wxUIntPtr>(i));
+    }
+}
+
+void QueuePanel::RebuildImageList()
+{
+    const int icon_size = FromDIP(48);
+    wxImageList* images = new wxImageList(icon_size, icon_size, true,
+        std::max<std::size_t>(1, paths_.size()));
+    for (const std::string& path : paths_)
+    {
+        const auto thumbnail = thumbnails_.find(PathKey(std::filesystem::u8path(path)));
+        images->Add(ComposeThumbnailBitmap(
+            thumbnail == thumbnails_.end() ? nullptr : &thumbnail->second, 0, icon_size));
+    }
+    list_->AssignImageList(images, wxIMAGE_LIST_SMALL);
+    image_list_ = images;
+}
+
+void QueuePanel::UpdateImage(const std::string& path)
+{
+    const std::string key = PathKey(std::filesystem::u8path(path));
+    const auto position = std::find_if(paths_.begin(), paths_.end(), [&](const std::string& value)
+    {
+        return PathKey(std::filesystem::u8path(value)) == key;
+    });
+    if (position == paths_.end() || image_list_ == nullptr)
+    {
+        return;
+    }
+    const int image_index = static_cast<int>(std::distance(paths_.begin(), position));
+    const auto thumbnail = thumbnails_.find(key);
+    image_list_->Replace(image_index, ComposeThumbnailBitmap(
+        thumbnail == thumbnails_.end() ? nullptr : &thumbnail->second, 0, FromDIP(48)));
+    long row = -1;
+    while ((row = list_->GetNextItem(row, wxLIST_NEXT_ALL)) != -1)
+    {
+        if (static_cast<int>(list_->GetItemData(row)) == image_index)
+        {
+            list_->SetItemImage(row, image_index);
+            break;
+        }
     }
 }
 

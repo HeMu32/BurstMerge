@@ -3,6 +3,7 @@
 #include "burstmerge/api.h"
 
 #include <wx/panel.h>
+#include <wx/image.h>
 #include <wx/spinctrl.h>
 
 #include <functional>
@@ -37,6 +38,7 @@ public:
     void SetActiveHandler(std::function<void()> handler);
     void AddPath(const std::string& path);
     void SetReferences(const std::string& path, int references);
+    void SetThumbnail(const std::string& path, const wxImage& image);
     std::vector<std::string> SelectedPaths() const;
     void Clear();
     void RemovePaths(const std::vector<std::string>& paths);
@@ -47,11 +49,14 @@ public:
 private:
     void RebuildList();
     void RebuildImageList();
+    void UpdateImage(const std::string& path);
     void OnBeginDrag(wxListEvent&);
     wxListCtrl* list_ = nullptr;
     wxImageList* image_list_ = nullptr;
     std::vector<std::string> paths_;
     std::unordered_map<std::string, long> rows_;
+    std::unordered_map<std::string, int> references_;
+    std::unordered_map<std::string, wxImage> thumbnails_;
     std::function<void(const std::vector<std::string>&)> file_handler_;
     std::function<void()> active_handler_;
 };
@@ -69,6 +74,7 @@ public:
     void SetActiveHandler(std::function<void()> handler);
     bool AddPath(const std::string& path);
     bool RemovePath(const std::string& path);
+    void SetThumbnail(const std::string& path, const wxImage& image);
     const std::vector<std::string>& Paths() const;
     std::vector<std::string> SelectedPaths() const;
     int Number() const;
@@ -80,14 +86,18 @@ public:
 
 private:
     void RebuildList();
+    void RebuildImageList();
+    void UpdateImage(const std::string& path);
     void OnContextMenu(wxContextMenuEvent& event);
     int number_ = 0;
     wxStaticText* title_ = nullptr;
     wxListCtrl* list_ = nullptr;
+    wxImageList* image_list_ = nullptr;
     wxButton* add_button_ = nullptr;
     wxButton* close_button_ = nullptr;
     std::vector<std::string> paths_;
     std::unordered_map<std::string, std::string> keys_;
+    std::unordered_map<std::string, wxImage> thumbnails_;
     std::function<void(QueuePanel&)> on_add_selected_;
     std::function<void(QueuePanel&)> on_close_;
     std::function<void(QueuePanel&, const std::vector<std::string>&, bool)> on_drop_;
