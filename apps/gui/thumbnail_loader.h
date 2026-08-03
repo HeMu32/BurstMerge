@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -53,6 +54,8 @@ private:
         std::string path;
         int width = 0;
         int height = 0;
+        std::uint64_t epoch = 0;
+        std::uint64_t generation = 0;
     };
 
     void WorkerMain();
@@ -61,7 +64,10 @@ private:
     std::condition_variable condition_;
     std::deque<RequestItem> requests_;
     std::unordered_set<std::string> requested_;
+    std::unordered_map<std::string, std::uint64_t> generations_;
     std::thread worker_;
+    std::uint64_t epoch_ = 0;
+    std::uint64_t next_generation_ = 0;
     bool stopping_ = false;
 };
 

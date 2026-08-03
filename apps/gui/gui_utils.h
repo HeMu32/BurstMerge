@@ -17,6 +17,9 @@
 namespace burstmerge::gui
 {
 
+constexpr std::size_t kMaximumGuiPaths = 4096;
+constexpr std::size_t kMaximumPathPayloadBytes = 1024 * 1024;
+
 enum
 {
     ID_START = wxID_HIGHEST + 1,

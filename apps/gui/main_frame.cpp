@@ -270,6 +270,10 @@ void MainFrame::AddToBin(const std::vector<std::string>& paths)
 {
     for (const std::string& path : paths)
     {
+        if (bin_paths_.size() >= kMaximumGuiPaths)
+        {
+            break;
+        }
         std::error_code error;
         if (!std::filesystem::is_regular_file(std::filesystem::u8path(path), error))
         {

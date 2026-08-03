@@ -59,6 +59,10 @@ void AppendFolderFiles(const std::filesystem::path& folder, std::vector<std::str
     const std::filesystem::directory_iterator end;
     while (!error && it != end)
     {
+        if (paths.size() + folder_files.size() >= kMaximumGuiPaths)
+        {
+            break;
+        }
         std::error_code type_error;
         if (it->is_regular_file(type_error) && !type_error)
         {
@@ -75,6 +79,10 @@ std::vector<std::string> ExpandDroppedPaths(const wxArrayString& dropped)
     std::vector<std::string> paths;
     for (const wxString& item : dropped)
     {
+        if (paths.size() >= kMaximumGuiPaths)
+        {
+            break;
+        }
         const std::optional<std::string> normalized = NormalizePath(item);
         if (!normalized)
         {
@@ -193,6 +201,10 @@ std::vector<std::string> DecodePathList(const void* data, std::size_t size)
 
     const char* bytes = static_cast<const char*>(data);
     size_t begin = 0;
+    if (size > kMaximumPathPayloadBytes)
+    {
+        return paths;
+    }
     for (size_t i = 0; i <= size; ++i)
     {
         if (i == size || bytes[i] == '\0')
@@ -212,6 +224,10 @@ std::string EncodePathList(const std::vector<std::string>& paths)
     std::string data;
     for (const std::string& path : paths)
     {
+        if (data.size() + path.size() + 1 > kMaximumPathPayloadBytes)
+        {
+            break;
+        }
         data += path;
         data.push_back('\0');
     }

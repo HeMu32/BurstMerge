@@ -30,11 +30,29 @@ constexpr std::uint64_t kMaximumPreviewBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaximumPreviewPixels = 16ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaximumEmbeddedJpegPixels = 64ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaximumFullTiffPixels = 4ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaximumInputImageBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaximumContainerBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaximumScanlineBytes = 1024 * 1024;
 constexpr std::uint32_t kMaximumPreviewDimension = 16384;
 constexpr std::uint32_t kMaximumIfdEntries = 512;
 constexpr std::uint32_t kMaximumEntryValues = 256;
 constexpr std::size_t kMaximumIfds = 64;
 constexpr std::size_t kMaximumTotalEntries = 4096;
+constexpr std::size_t kMaximumPendingRequests = 4096;
+
+bool HasSafeInputSize(const std::string& path)
+{
+    std::error_code error;
+    const std::uintmax_t bytes = std::filesystem::file_size(std::filesystem::u8path(path), error);
+    return !error && bytes > 0 && bytes <= kMaximumInputImageBytes;
+}
+
+bool HasSafeContainerSize(const std::string& path)
+{
+    std::error_code error;
+    const std::uintmax_t bytes = std::filesystem::file_size(std::filesystem::u8path(path), error);
+    return !error && bytes > 0 && bytes <= kMaximumContainerBytes;
+}
 
 class TiffReader
 {
@@ -265,6 +283,25 @@ bool ReadJpegDimensions(const std::vector<unsigned char>& jpeg,
     return false;
 }
 
+bool ReadJpegFileDimensions(const std::string& path, std::uint32_t& width, std::uint32_t& height)
+{
+    width = 0;
+    height = 0;
+    if (!HasSafeInputSize(path))
+    {
+        return false;
+    }
+    std::ifstream stream(std::filesystem::u8path(path), std::ios::binary);
+    if (!stream)
+    {
+        return false;
+    }
+    std::vector<unsigned char> header(1024 * 1024);
+    stream.read(reinterpret_cast<char*>(header.data()), static_cast<std::streamsize>(header.size()));
+    header.resize(static_cast<std::size_t>(stream.gcount()));
+    return ReadJpegDimensions(header, width, height);
+}
+
 bool ExtractRafJpegPreview(const std::string& path, std::vector<unsigned char>& jpeg,
     EmbeddedJpegPreviewInfo& info)
 {
@@ -442,6 +479,10 @@ FileSignature DetectSignature(const std::string& path)
 
 bool HasSafeRasterDimensions(const std::string& path, FileSignature signature)
 {
+    if (!HasSafeInputSize(path))
+    {
+        return false;
+    }
     std::ifstream stream(std::filesystem::u8path(path), std::ios::binary);
     std::array<unsigned char, 26> bytes{};
     stream.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
@@ -611,9 +652,9 @@ ThumbnailResult DecodeTiffThumbnail(const std::string& path, int target_width, i
         TIFFGetFieldDefaulted(handle.value, TIFFTAG_SAMPLEFORMAT, &sample_format);
         TIFFGetFieldDefaulted(handle.value, TIFFTAG_ORIENTATION, &orientation);
         TIFFGetFieldDefaulted(handle.value, TIFFTAG_ROWSPERSTRIP, &rows_per_strip);
-        const bool rgb = photometric == PHOTOMETRIC_RGB && samples >= 3;
+        const bool rgb = photometric == PHOTOMETRIC_RGB && (samples == 3 || samples == 4);
         const bool grayscale = (photometric == PHOTOMETRIC_MINISBLACK ||
-            photometric == PHOTOMETRIC_MINISWHITE) && samples >= 1;
+            photometric == PHOTOMETRIC_MINISWHITE) && samples == 1;
         const tmsize_t scanline_bytes = TIFFScanlineSize(handle.value);
         const std::uint64_t required_scanline_bytes = static_cast<std::uint64_t>(width) *
             samples * (bits / 8);
@@ -621,6 +662,7 @@ ThumbnailResult DecodeTiffThumbnail(const std::string& path, int target_width, i
             planar != PLANARCONFIG_CONTIG || sample_format != SAMPLEFORMAT_UINT ||
             orientation != ORIENTATION_TOPLEFT ||
             rows_per_strip == 0 || rows_per_strip > 16 || scanline_bytes <= 0 ||
+            static_cast<std::size_t>(scanline_bytes) > kMaximumScanlineBytes ||
             required_scanline_bytes > static_cast<std::uint64_t>(scanline_bytes))
         {
             return result;
@@ -903,11 +945,13 @@ ThumbnailLoader::~ThumbnailLoader()
 void ThumbnailLoader::Request(const std::string& path, int width, int height)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (stopping_ || !requested_.insert(path).second)
+    if (stopping_ || requests_.size() >= kMaximumPendingRequests || !requested_.insert(path).second)
     {
         return;
     }
-    requests_.push_back({path, std::max(1, width), std::max(1, height)});
+    const std::uint64_t generation = ++next_generation_;
+    generations_[path] = generation;
+    requests_.push_back({path, std::max(1, width), std::max(1, height), epoch_, generation});
     condition_.notify_one();
 }
 
@@ -918,21 +962,18 @@ void ThumbnailLoader::Cancel(const std::string& path)
     {
         return item.path == path;
     });
-    if (first != requests_.end())
-    {
-        requests_.erase(first, requests_.end());
-        requested_.erase(path);
-    }
+    requests_.erase(first, requests_.end());
+    requested_.erase(path);
+    generations_.erase(path);
 }
 
 void ThumbnailLoader::ClearPending()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const RequestItem& request : requests_)
-    {
-        requested_.erase(request.path);
-    }
+    ++epoch_;
+    requested_.clear();
     requests_.clear();
+    generations_.clear();
 }
 
 void ThumbnailLoader::Stop()
@@ -971,6 +1012,7 @@ void ThumbnailLoader::WorkerMain()
         }
 
         ThumbnailResult result;
+        bool deliver = false;
         try
         {
             result = DecodeThumbnail(request.path, request.width, request.height);
@@ -980,8 +1022,16 @@ void ThumbnailLoader::WorkerMain()
             result.path = request.path;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        requested_.erase(request.path);
-        if (!stopping_ && target_ != nullptr)
+        const auto generation = generations_.find(request.path);
+        const bool is_current = generation != generations_.end() &&
+            generation->second == request.generation;
+        if (is_current)
+        {
+            requested_.erase(request.path);
+            generations_.erase(generation);
+        }
+        deliver = !stopping_ && target_ != nullptr && request.epoch == epoch_ && is_current;
+        if (deliver)
         {
             wxThreadEvent* event = new wxThreadEvent(wxEVT_BM_THUMBNAIL_READY);
             event->SetPayload(result);
@@ -1006,6 +1056,10 @@ ThumbnailResult DecodeThumbnail(const std::string& path, int width, int height)
     wxImage image;
     if (signature == FileSignature::Tiff && (extension == ".tif" || extension == ".tiff"))
     {
+        if (!HasSafeContainerSize(path))
+        {
+            return result;
+        }
 #ifdef BURSTMERGE_GUI_HAVE_TIFF
         return DecodeTiffThumbnail(path, width, height);
 #else
@@ -1014,6 +1068,10 @@ ThumbnailResult DecodeThumbnail(const std::string& path, int width, int height)
     }
     else if (signature == FileSignature::Tiff)
     {
+        if (!HasSafeContainerSize(path))
+        {
+            return result;
+        }
         std::vector<unsigned char> jpeg;
         EmbeddedJpegPreviewInfo info;
         std::string error;
@@ -1031,6 +1089,10 @@ ThumbnailResult DecodeThumbnail(const std::string& path, int width, int height)
     }
     else if (extension == ".raf")
     {
+        if (!HasSafeContainerSize(path))
+        {
+            return result;
+        }
         std::vector<unsigned char> jpeg;
         EmbeddedJpegPreviewInfo info;
         if (!ExtractRafJpegPreview(path, jpeg, info))
@@ -1044,6 +1106,10 @@ ThumbnailResult DecodeThumbnail(const std::string& path, int width, int height)
     }
     else if (extension == ".cr3")
     {
+        if (!HasSafeContainerSize(path))
+        {
+            return result;
+        }
         std::vector<unsigned char> jpeg;
         EmbeddedJpegPreviewInfo info;
         if (!ExtractCr3JpegPreview(path, jpeg, info))
@@ -1057,6 +1123,14 @@ ThumbnailResult DecodeThumbnail(const std::string& path, int width, int height)
     }
     else if ((extension == ".jpg" || extension == ".jpeg") && signature == FileSignature::Jpeg)
     {
+        std::uint32_t source_width = 0;
+        std::uint32_t source_height = 0;
+        if (!ReadJpegFileDimensions(path, source_width, source_height) ||
+            source_width > kMaximumPreviewDimension || source_height > kMaximumPreviewDimension ||
+            static_cast<std::uint64_t>(source_width) * source_height > kMaximumPreviewPixels)
+        {
+            return result;
+        }
         wxFileInputStream stream(wxString::FromUTF8(path));
         if (stream.IsOk())
         {
