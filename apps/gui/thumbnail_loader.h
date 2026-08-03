@@ -35,6 +35,7 @@ struct ThumbnailResult
 // Reads only TIFF metadata and one validated, reduced-resolution JPEG range.
 bool ExtractEmbeddedJpegPreview(const std::string& path, std::vector<unsigned char>& jpeg,
     EmbeddedJpegPreviewInfo& info, std::string& error);
+ThumbnailResult DecodeThumbnail(const std::string& path, int width, int height);
 
 class ThumbnailLoader final
 {
@@ -55,8 +56,6 @@ private:
     };
 
     void WorkerMain();
-    ThumbnailResult Load(const RequestItem& request) const;
-
     wxEvtHandler* target_ = nullptr;
     std::mutex mutex_;
     std::condition_variable condition_;

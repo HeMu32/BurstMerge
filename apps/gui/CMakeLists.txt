@@ -25,11 +25,37 @@
 
 # 把 wx 当成隔离的子项目 build; 二进制产物落在主项目 build 树下的 wx_build/,
 # 不会污染主项目 build 根目录, 便于清理.
-# Use the same project libjpeg-turbo ABI as libburstmerge. Linking wx's bundled
-# IJG JPEG beside libburstmerge would expose duplicate jpeg_* symbols.
-set(wxUSE_LIBJPEG sys CACHE STRING "wx JPEG implementation" FORCE)
+# Use the same image codec ABIs as libburstmerge. Linking wx's bundled codec
+# copies beside the core library exposes duplicate jpeg_*, png_*, and zlib
+# symbols; whichever static definition wins can make the other codec crash.
+if(EXISTS "${JPEG_INCLUDE_DIR}/jpeglib.h" AND EXISTS "${JPEG_LIBRARY}")
+    set(wxUSE_LIBJPEG sys CACHE STRING "wx JPEG implementation" FORCE)
+else()
+    set(wxUSE_LIBJPEG builtin CACHE STRING "wx JPEG implementation" FORCE)
+endif()
+if(EXISTS "${PNG_INCLUDE_DIR}/png.h" AND EXISTS "${PNG_LIBRARY}")
+    set(wxUSE_LIBPNG sys CACHE STRING "wx PNG implementation" FORCE)
+else()
+    set(wxUSE_LIBPNG builtin CACHE STRING "wx PNG implementation" FORCE)
+endif()
+if(EXISTS "${ZLIB_INCLUDE_DIR}/zlib.h" AND EXISTS "${ZLIB_LIBRARY}")
+    set(wxUSE_ZLIB sys CACHE STRING "wx zlib implementation" FORCE)
+else()
+    set(wxUSE_ZLIB builtin CACHE STRING "wx zlib implementation" FORCE)
+endif()
+if(EXISTS "${TIFF_INCLUDE_DIR}/tiffio.h" AND EXISTS "${TIFF_LIBRARY}")
+    set(wxUSE_LIBTIFF sys CACHE STRING "wx TIFF implementation" FORCE)
+else()
+    set(wxUSE_LIBTIFF builtin CACHE STRING "wx TIFF implementation" FORCE)
+endif()
 set(JPEG_INCLUDE_DIR "${JPEG_INCLUDE_DIR}" CACHE PATH "Shared JPEG include directory" FORCE)
 set(JPEG_LIBRARY "${JPEG_LIBRARY}" CACHE FILEPATH "Shared JPEG library" FORCE)
+set(PNG_PNG_INCLUDE_DIR "${PNG_INCLUDE_DIR}" CACHE PATH "Shared PNG include directory" FORCE)
+set(PNG_LIBRARY "${PNG_LIBRARY}" CACHE FILEPATH "Shared PNG library" FORCE)
+set(ZLIB_INCLUDE_DIR "${ZLIB_INCLUDE_DIR}" CACHE PATH "Shared zlib include directory" FORCE)
+set(ZLIB_LIBRARY "${ZLIB_LIBRARY}" CACHE FILEPATH "Shared zlib library" FORCE)
+set(TIFF_INCLUDE_DIR "${TIFF_INCLUDE_DIR}" CACHE PATH "Shared TIFF include directory" FORCE)
+set(TIFF_LIBRARY "${TIFF_LIBRARY}" CACHE FILEPATH "Shared TIFF library" FORCE)
 add_subdirectory(
     ${BURSTMERGE_WX_SOURCE_DIR}
     ${CMAKE_BINARY_DIR}/wx_build
@@ -94,6 +120,17 @@ target_link_libraries(burstmerge_gui PRIVATE
     ${BURSTMERGE_WX_TARGETS}
 )
 
+if(EXISTS "${TIFF_INCLUDE_DIR}/tiffio.h" AND EXISTS "${TIFF_LIBRARY}")
+    target_compile_definitions(burstmerge_gui PRIVATE BURSTMERGE_GUI_HAVE_TIFF=1)
+    target_include_directories(burstmerge_gui PRIVATE "${TIFF_INCLUDE_DIR}")
+    target_link_libraries(burstmerge_gui PRIVATE "${TIFF_LIBRARY}")
+    if(BURSTMERGE_BUILD_GUI_DIAGNOSTICS)
+        target_compile_definitions(thumbnail_preview_diagnostic PRIVATE BURSTMERGE_GUI_HAVE_TIFF=1)
+        target_include_directories(thumbnail_preview_diagnostic PRIVATE "${TIFF_INCLUDE_DIR}")
+        target_link_libraries(thumbnail_preview_diagnostic PRIVATE "${TIFF_LIBRARY}")
+    endif()
+endif()
+
 # wxWidgets 3.2 静态库 (MinGW MSW) 需要外部显式链一批 Win32 系统库. 注意:
 #   * wxCMake 模式在自己 target 的 INTERFACE_LINK_LIBRARIES 中只声明了一部分
 #     依赖, 与 .a 文件实际需要的符号集可能不完整, 因此在主项目里显式补齐.
@@ -132,7 +169,15 @@ if(WIN32)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${BURSTMERGE_TIFF_RUNTIME}"
                 "$<TARGET_FILE_DIR:burstmerge_gui>"
-            COMMENT "Copying libtiff runtime for burstmerge_gui"
+                COMMENT "Copying libtiff runtime for burstmerge_gui"
         )
+        if(BURSTMERGE_BUILD_GUI_DIAGNOSTICS)
+            add_custom_command(TARGET thumbnail_preview_diagnostic POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${BURSTMERGE_TIFF_RUNTIME}"
+                    "$<TARGET_FILE_DIR:thumbnail_preview_diagnostic>"
+                COMMENT "Copying libtiff runtime for thumbnail diagnostics"
+            )
+        endif()
     endif()
 endif()

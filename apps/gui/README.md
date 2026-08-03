@@ -7,10 +7,12 @@ The frontend is split into cohesive modules: `gui_utils` handles paths, output
 naming, platform theming, and generated badges; `panels` owns the Bin, Queue,
 Options, and drag-and-drop controls; `process_thread` owns worker events and
 queue execution; and `main_frame` coordinates the application workspace.
-`thumbnail_loader` uses one background worker for deduplicated thumbnail requests;
-it decodes common RGB files and only bounded embedded JPEG previews from DNG/TIFF.
-Other RAW files and TIFFs without a safe reduced RGB/YCbCr JPEG retain the file
-icon. `main.cpp` contains only the wx application entry point.
+`thumbnail_loader` uses one background worker for deduplicated thumbnail requests.
+It decodes common RGB files, bounded embedded JPEG previews from classic
+TIFF-based RAW files (including ARW and common NEF/CR2 layouts), RAF headers,
+and Canon CR3 preview UUID boxes. TIFF thumbnails prefer reduced rendered IFDs;
+small TIFF images may decode directly. Unsupported or malformed files retain the
+file icon. `main.cpp` contains only the wx application entry point.
 
 ## wxWidgets Setup
 
@@ -58,7 +60,8 @@ The executable is written to:
 build/apps/gui/burstmerge_gui.exe
 ```
 
-The diagnostic validates the metadata-only DNG/TIFF preview path and JPEG decode:
+The diagnostic validates thumbnail decoding and reports embedded JPEG metadata
+when the input uses that preview path:
 
 ```powershell
 build/apps/gui/thumbnail_preview_diagnostic.exe libburstmerge/test/samples/X1M5_Wide.dng
