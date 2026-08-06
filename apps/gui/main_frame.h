@@ -44,6 +44,11 @@ public:
     MainFrame();
     ~MainFrame() override;
 
+    // 将外部 (命令行 / 资源管理器"打开方式" / shell) 传入的图像路径直接添加到 Bin.
+    // 仅接受常规文件, 目录会被忽略, 与"打开方式"一次拖入多个图像的语义一致.
+    // 必须在 MainFrame 完整构造 (事件绑定 / 缩略图加载器就绪) 之后调用.
+    void AddInitialFiles(const std::vector<std::string>& paths);
+
 private:
     void BuildMenu();
     void BuildToolbar();

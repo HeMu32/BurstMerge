@@ -266,6 +266,13 @@ void MainFrame::RemoveQueue(QueuePanel& queue)
     queue_scroll_->Layout();
 }
 
+void MainFrame::AddInitialFiles(const std::vector<std::string>& paths)
+{
+    // AddToBin 内部已做 is_regular_file 过滤 + 上限保护 + 去重 (PathKey) + 缩略图请求,
+    // 与现有的拖放 / 文件对话框通道完全一致, 不需要在此处再行处理.
+    AddToBin(paths);
+}
+
 void MainFrame::AddToBin(const std::vector<std::string>& paths)
 {
     for (const std::string& path : paths)
