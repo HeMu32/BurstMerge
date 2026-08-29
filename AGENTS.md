@@ -126,7 +126,7 @@ Vulkan GPU 后端 (已实现)
 
 ## 编译开关 (重要)
 	- `find_package(OpenMP REQUIRED)`: OpenMP 必须存在. 
-	- `BUILD_TESTS` (默认 ON): 构建单元测试. 
+	- `BURSTMERGE_BUILD_TESTS` (默认 ON): 构建单元测试.
 	- 条件宏 (在 `libburstmerge/CMakeLists.txt` 中按依赖是否存在定义): 
 		- `BURSTMERGE_HAVE_JPEG` / `BURSTMERGE_HAVE_PNG` / `BURSTMERGE_HAVE_TIFF` 
 		- 缺少对应库时, 该格式编解码器源文件不参与编译, 运行时解码/编码会抛 "... not available (... not linked)". 

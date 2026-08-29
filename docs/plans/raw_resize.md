@@ -53,7 +53,7 @@ dst_plane_h = dst_mosaic_h / period
 |------|------|
 | `libburstmerge/include/burstmerge/internal/core/float_image.h` | 加 `InterpolationMethod` 枚举 + `ResizeImage()` 声明 |
 | `libburstmerge/src/core/float_image.cpp` | 加 `ResizeImage()` 实现 (双线性 + 双立方 Catmull-Rom) |
-| `CMakeLists.txt` | 加 `add_subdirectory(apps/raw_resize)` |
+| `CMakeLists.txt` | 通过 `BURSTMERGE_BUILD_RAW_RESIZE_CLI` 控制 `apps/raw_resize` 是否加入构建 |
 
 ## ResizeImage 实现
 

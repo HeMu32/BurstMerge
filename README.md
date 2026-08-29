@@ -281,12 +281,16 @@ From the repository root:
 ```powershell
 cmake -S . -B build -G "MinGW Makefiles" `
   -DCMAKE_BUILD_TYPE=Release `
-  -DBUILD_TESTS=ON
+  -DBURSTMERGE_BUILD_TESTS=ON
 ```
 
 Notes:
 
-- `BUILD_TESTS` defaults to `ON` in the top-level `CMakeLists.txt`.
+- `BURSTMERGE_BUILD_TESTS` defaults to `ON` in the top-level `CMakeLists.txt`.
+- `BURSTMERGE_BUILD_RAW_RESIZE_CLI` controls the standalone `raw_resize` command-line tool and defaults to `ON`.
+- `BURSTMERGE_BUILD_MAIN_GUI` controls the main wxWidgets GUI and defaults to `ON` when wxWidgets is available.
+- `BURSTMERGE_BUILD_RAW_RESIZE_GUI` controls the standalone raw resize wxWidgets GUI and defaults to `ON` when wxWidgets is available.
+- `BURSTMERGE_BUILD_GUI_THUMBNAIL_DIAGNOSTICS` controls the optional thumbnail diagnostic tool and defaults to `OFF`.
 - The build enables OpenMP with `find_package(OpenMP REQUIRED)`.
 - The codebase is written for C++17 and sets `CMAKE_CXX_STANDARD 17`.
 - `gcc` / `g++` / `mingw32-make` are discovered from `PATH`; override only if you need a specific toolchain instance.
@@ -306,6 +310,9 @@ Important targets defined by the current project:
 - `burstmerge_cli`: command-line application in `apps/cli`
 - `burstmerge_console`: interactive console placeholder in `apps/console`
 - `burstmerge_compare`: DNG pixel comparison tool in `apps/console`
+- `burstmerge_raw_resize` (optional): standalone RAW resize command-line tool
+- `burstmerge_gui` (optional): main wxWidgets GUI
+- `burstmerge_raw_resize_gui` (optional): standalone RAW resize wxWidgets GUI
 - `test_deps`
 - `test_dng_io`
 - `test_highlight`
@@ -347,4 +354,4 @@ Some algorithms saw huge performance degradation under Debug build, especially f
 
 # Known issue
 
-Noise may appera around high-contrast edges for spatial merge vulkan path in exposure bracketing, while same artifacts was less significant in the CPU path. 
+Noise may appera around high-contrast edges for spatial merge vulkan path in exposure bracketing, while same artifacts was less significant in the CPU path.

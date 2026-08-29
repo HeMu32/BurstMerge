@@ -25,7 +25,7 @@ endif()
 
 target_link_libraries(burstmerge_raw_resize_gui PRIVATE
     burstmerge
-    ${BURSTMERGE_WX_TARGETS}
+    ${BURSTMERGE_WXWIDGETS_TARGETS}
 )
 
 if(WIN32)

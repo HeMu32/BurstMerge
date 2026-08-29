@@ -49,7 +49,7 @@ headers. Disabling PCH avoids a wxWidgets 3.2/MinGW GCC compatibility issue.
 Configure and build with MinGW/GCC:
 
 ```powershell
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DBURSTMERGE_BUILD_GUI=ON -DBURSTMERGE_BUILD_GUI_DIAGNOSTICS=ON
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DBURSTMERGE_BUILD_MAIN_GUI=ON -DBURSTMERGE_BUILD_GUI_THUMBNAIL_DIAGNOSTICS=ON
 cmake --build build --target burstmerge_gui -j 8
 cmake --build build --target thumbnail_preview_diagnostic -j 8
 ```
@@ -93,11 +93,11 @@ GUI subsystem flag, Win32 libraries, and runtime DLL copy are guarded by CMake's
 system-colour, DPI, layout, queue, and processing paths without including Win32
 headers or calling Win32 APIs.
 
-The source tree is detected through `WX_ROOT` in the gitignored
+The source tree is detected through `BURSTMERGE_WXWIDGETS_ROOT` in the gitignored
 `local_config.cmake`. Its default project-local value is:
 
 ```cmake
-set(WX_ROOT "${PROJECT_ROOT}/3rdparty/wxWidgets")
+set(BURSTMERGE_WXWIDGETS_ROOT "${PROJECT_ROOT}/3rdparty/wxWidgets")
 ```
 
 ## Thumbnail Support
@@ -154,13 +154,13 @@ Adobe DNG Converter for thumbnail generation.
 The GUI is completely optional:
 
 ```powershell
-cmake -S . -B build_no_gui -G "MinGW Makefiles" -DBURSTMERGE_BUILD_GUI=OFF
+cmake -S . -B build_no_gui -G "MinGW Makefiles" -DBURSTMERGE_BUILD_MAIN_GUI=OFF -DBURSTMERGE_BUILD_RAW_RESIZE_GUI=OFF
 cmake --build build_no_gui --target burstmerge_cli
 ```
 
 With the option disabled, CMake does not inspect or add the wxWidgets source
 tree and the CLI, console, core library, and tests retain their normal build.
-If the option is enabled but `WX_ROOT` does not contain a valid wxWidgets tree,
+If an optional wxWidgets frontend is enabled but `BURSTMERGE_WXWIDGETS_ROOT` does not contain a valid wxWidgets tree,
 CMake prints a status message and skips the GUI without failing configuration.
 
 ## Workflow

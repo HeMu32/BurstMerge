@@ -203,8 +203,8 @@ add_subdirectory(apps/console)
 # ---- 测试: 使用 CTest + 独立 test 可执行文件 ----
 # 不需要 GoogleTest, 每个 test_*.cpp 是独立可执行文件
 # 通过 CTest add_test() 注册, 退出码 0=通过, 非0=失败
-option(BUILD_TESTS "Build tests" ON)
-if(BUILD_TESTS)
+option(BURSTMERGE_BUILD_TESTS "Build tests" ON)
+if(BURSTMERGE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(libburstmerge/test)
 endif()
