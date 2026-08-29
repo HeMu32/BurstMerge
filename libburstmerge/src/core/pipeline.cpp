@@ -424,7 +424,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         convert_dir_.clear();
         std::vector<std::string> dng_paths;
         { ProfileScope _ps("time.pipeline.prepare_dng_inputs");
-        dng_paths = PrepareDngInputs(input_paths, convert_ctx, progress, convert_dir_);
+        dng_paths = PrepareDngInputs(input_paths, convert_ctx, settings_.dng_convert_dir,
+                                     progress, convert_dir_);
         }
         if (dng_paths.empty()) throw std::runtime_error("No readable DNG inputs");
 

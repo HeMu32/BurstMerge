@@ -88,11 +88,20 @@ void OrphanSweep(const std::filesystem::path& parent)
     }
 }
 
-std::string MakeTempConvertDir(const std::string& output_path)
+std::string MakeTempConvertDir(const std::string& output_path,
+                               const std::string& dng_convert_dir)
 {
-    std::filesystem::path base(output_path);
-    std::filesystem::path parent = base.has_parent_path()
-        ? base.parent_path() : std::filesystem::current_path();
+    std::filesystem::path parent;
+    if (dng_convert_dir.empty())
+    {
+        std::filesystem::path base(output_path);
+        parent = base.has_parent_path()
+            ? base.parent_path() : std::filesystem::current_path();
+    }
+    else
+    {
+        parent = std::filesystem::path(dng_convert_dir);
+    }
     std::filesystem::path dir = parent / "burstmerge_converted";
     std::filesystem::create_directories(dir);
     OrphanSweep(dir);
@@ -104,9 +113,10 @@ std::string MakeTempConvertDir(const std::string& output_path)
 } // namespace
 
 std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_paths,
-                                          const std::string& output_path,
-                                          const PipelineOrchestrator::ProgressFn& progress,
-                                          std::string& out_convert_dir)
+                                           const std::string& output_path,
+                                           const std::string& dng_convert_dir,
+                                           const PipelineOrchestrator::ProgressFn& progress,
+                                           std::string& out_convert_dir)
 {
     std::vector<std::string> dng_paths;
     std::vector<std::string> raw_paths;
@@ -137,7 +147,7 @@ std::vector<std::string> PrepareDngInputs(const std::vector<std::string>& input_
 
 #ifdef _WIN32
     Report(progress, PipelineConstants::kProgressConvertStart, "Preparing RAW to DNG conversion");
-    out_convert_dir = MakeTempConvertDir(output_path);
+    out_convert_dir = MakeTempConvertDir(output_path, dng_convert_dir);
     std::vector<std::string> converted;
     Report(progress,
            PipelineConstants::kProgressConvertStart + 0.02f,

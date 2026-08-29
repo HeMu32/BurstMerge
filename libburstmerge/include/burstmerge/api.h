@@ -61,6 +61,9 @@ struct Settings
     int            gpu_device_index = -1;  // GPU device index for Vulkan backend (-1 = auto)
     // output_format: Auto = auto-infer (DNG for RAW, PNG for non-RAW)
     OutputFormat   output_format    = OutputFormat::Auto;
+    // Parent directory for temporary RAW-to-DNG conversion work. The
+    // per-run directory is cleaned up after processing; this parent is kept.
+    std::string    dng_convert_dir;
 };
 
 struct Result

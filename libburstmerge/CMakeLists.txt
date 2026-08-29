@@ -122,6 +122,8 @@ target_include_directories(burstmerge
             ${CXXOPTS_INCLUDE}
             ${VULKAN_INCLUDE}
             ${BURSTMERGE_GENERATED_DIR}
+            "${DNG_SDK_ROOT}/libjxl/libjxl/lib/include"
+            "${CMAKE_BINARY_DIR}/libjxl_build/lib/include"
 )
 
 target_compile_definitions(burstmerge PRIVATE

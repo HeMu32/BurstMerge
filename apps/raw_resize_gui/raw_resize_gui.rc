@@ -1,0 +1,5 @@
+// Enable modern themed Win32 controls and Per-Monitor V2 DPI awareness using
+// the manifest supplied by the exact wxWidgets version being compiled.
+#define wxUSE_NO_MANIFEST 0
+#define wxUSE_DPI_AWARE_MANIFEST 2
+#include "wx/msw/wx.rc"

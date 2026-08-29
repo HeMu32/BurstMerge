@@ -105,27 +105,17 @@ enum LoCAColor
     LoCAColor_Yellow    // R + G
 };
 
-// ----------------------------------------------------------------------------
-// EFFECT CONFIGURATION — single point of truth.
-// ----------------------------------------------------------------------------
-// All chromatic-effect knobs live HERE in the header. The previous CMake-driven
-// `BURSTMERGE_CHROMA_*` cache/option machinery has been removed; this header
-// is now the only place to enable or tune the effect. To turn the effect on,
-// edit the `#define` lines below so that:
-//   * EFFECT_CA_Enabled      becomes 1 (master switch)
-//   * EFFECT_LaCA_Color      becomes one of LaCAColor_Red/Green/Blue/Cyan/Magenta/Yellow
-//   * EFFECT_LaCA_Width      becomes a non-zero percent of the image diagonal
-//                            (the corner displacement of the selected channel)
-//   * EFFECT_LoCA_Color      becomes one of LoCAColor_Red/Green/Blue/Cyan/Magenta/Yellow
-//   * EFFECT_LoCA_Strength   becomes > 0 (1.0 ≈ saturate channel on a maximal-axis edge)
-//   * EFFECT_LoCA_Width      becomes > 0 (percent of image diagonal; fringing band width)
-//   * EFFECT_LoCA_MinSensi   stays or grows (raw-detection floor, applied BEFORE Strength)
-//
-// Each macro still respects `#ifndef` so a compiler command-line `-D` (or a
-// pre-include `#define`) takes precedence over the values edited here — that
-// keeps one-off overrides (e.g. A/B comparisons, CI probes) possible without
-// editing source.
-// ----------------------------------------------------------------------------
+struct ChromaEffectsParams
+{
+    bool enabled = false;
+    LaCAColor laca_color = LaCAColor_Red;
+    float laca_width = 0.0f; // [% of image diagonal; corner displacement]
+
+    LoCAColor loca_color = LoCAColor_Magenta;
+    float loca_strength = 0.2f;  // Sensitivity (1.0 ≈ saturate on maximal-axis edge)
+    float loca_width = 0.05f;    // [% of image diagonal; fringing band width]
+    float loca_min_sensi = 0.08f; // Raw-detection floor (applied BEFORE Strength)
+};
 
 #ifndef EFFECT_CA_Enabled
 #define EFFECT_CA_Enabled 1          // Master switch (0 = bit-identical no-op)
@@ -157,7 +147,7 @@ enum LoCAColor
 #endif
 
 // ----------------------------------------------------------------------------
-// Public entry point.
+// Public entry points.
 //
 // img          — the raw FloatImage to modify in place. Must be either a
 //                1-channel Bayer mosaic (with mosaic_pattern + period supplied)
@@ -173,9 +163,17 @@ enum LoCAColor
 //                (for LoCA) so an edge that maxes out saturates the channel.
 //                  * For Bayer: sensor_white_level (raw LSB).
 //                  * For LinearRaw: same value; channels share one ceiling.
+// params       — Runtime parameters for chromatic effects (enabled, colors, widths).
 //
-// When EFFECT_CA_Enabled is 0 this function is a no-op (early return).
+// When disabled this function is a no-op (early return).
 // ----------------------------------------------------------------------------
+void ApplyChromaticEffects(FloatImage& img,
+                           uint32_t period,
+                           const std::array<uint16_t, 36>& mosaic_pattern,
+                           float white_level,
+                           const ChromaEffectsParams& params);
+
+// Legacy overload reading compile-time macros / defaults for backward compatibility
 void ApplyChromaticEffects(FloatImage& img,
                            uint32_t period,
                            const std::array<uint16_t, 36>& mosaic_pattern,

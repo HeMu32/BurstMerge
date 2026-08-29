@@ -1,6 +1,13 @@
 # DNG SDK 内部静态库
 # 完全隐藏于 libburstmerge 内部, 不暴露任何头文件给上层
 
+if(NOT DEFINED DNG_SDK_ROOT)
+    set(DNG_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+if(NOT DEFINED DNG_SDK_INCLUDE)
+    set(DNG_SDK_INCLUDE "${DNG_SDK_ROOT}/dng_sdk/source")
+endif()
+
 set(DNG_SDK_SRCS
     dng_1d_function.cpp
     dng_1d_table.cpp
@@ -109,27 +116,35 @@ set(JPEGXL_ENABLE_SKCMS ON CACHE BOOL "" FORCE)
 set(JPEGXL_FORCE_SYSTEM_BROTLI OFF CACHE BOOL "" FORCE)
 set(JPEGXL_FORCE_SYSTEM_HWY OFF CACHE BOOL "" FORCE)
 set(JPEGXL_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+if(MINGW)
+    set(HWY_DISABLED_TARGETS "HWY_AVX2" CACHE STRING "" FORCE)
+endif()
 
 # libjxl / Highway require precise IEEE-754 floating point (the arithmetic
 # coder and color transforms break under -ffast-math) and Highway drives its
 # own per-target ISA dispatch, so -march=native must not leak in. Temporarily
 # strip both from the Release flag set for this subdirectory only.
-set(_bm_saved_cxx_release "${CMAKE_CXX_FLAGS_RELEASE}")
-string(REPLACE "-ffast-math" "" _bm_clean_cxx_release "${CMAKE_CXX_FLAGS_RELEASE}")
-string(REPLACE "-march=native" "" _bm_clean_cxx_release "${_bm_clean_cxx_release}")
-set(CMAKE_CXX_FLAGS_RELEASE "${_bm_clean_cxx_release}")
-add_subdirectory(
-    "${DNG_SDK_ROOT}/libjxl/libjxl"
-    "${CMAKE_BINARY_DIR}/libjxl_build"
-    EXCLUDE_FROM_ALL)
-set(CMAKE_CXX_FLAGS_RELEASE "${_bm_saved_cxx_release}")
-
-list(APPEND DNG_SDK_SRCS "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl.cpp")
+if(EXISTS "${DNG_SDK_ROOT}/libjxl/libjxl/CMakeLists.txt")
+    set(_bm_saved_cxx_release "${CMAKE_CXX_FLAGS_RELEASE}")
+    string(REPLACE "-ffast-math" "" _bm_clean_cxx_release "${CMAKE_CXX_FLAGS_RELEASE}")
+    string(REPLACE "-march=native" "" _bm_clean_cxx_release "${_bm_clean_cxx_release}")
+    set(CMAKE_CXX_FLAGS_RELEASE "${_bm_clean_cxx_release}")
+    add_subdirectory(
+        "${DNG_SDK_ROOT}/libjxl/libjxl"
+        "${CMAKE_BINARY_DIR}/libjxl_build"
+        EXCLUDE_FROM_ALL)
+    set(CMAKE_CXX_FLAGS_RELEASE "${_bm_saved_cxx_release}")
+    list(APPEND DNG_SDK_SRCS "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl.cpp")
+elseif(EXISTS "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl_stubs.cpp")
+    list(APPEND DNG_SDK_SRCS "${DNG_SDK_ROOT}/dng_sdk/source/dng_jxl_stubs.cpp")
+endif()
 
 add_library(dng_sdk STATIC ${DNG_SDK_SRCS})
 
 target_include_directories(dng_sdk SYSTEM PRIVATE
     ${DNG_SDK_INCLUDE}
+    ${ZLIB_INCLUDE_DIR}
+    ${JPEG_INCLUDE_DIR}
 )
 
 target_compile_definitions(dng_sdk PUBLIC

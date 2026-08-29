@@ -1,14 +1,77 @@
 #include "burstmerge/internal/core/image_resize.h"
+#include "burstmerge/internal/core/chroma_effects.h"
+#include "burstmerge/internal/core/dither.h"
 #include "burstmerge/internal/core/task_executor.h"
+#include "burstmerge/internal/io/dng_io.h"
+#include "burstmerge/internal/io/dng_sdk_bridge_resize.h"
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <random>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace burstmerge
 {
 namespace
 {
+
+#ifdef _WIN32
+std::string MakeTempDir(const std::string& base)
+{
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<uint64_t> dist;
+    for (int attempt = 0; attempt < 100; ++attempt)
+    {
+        std::string dir = base + "\\raw_resize_tmp_" + std::to_string(dist(gen));
+        if (std::filesystem::create_directories(dir))
+            return dir;
+    }
+    throw std::runtime_error("Failed to create temp directory");
+}
+#endif
+
+uint32_t RoundDownToMultiple(uint32_t val, uint32_t multiple)
+{
+    if (multiple <= 1) return val;
+    return (val / multiple) * multiple;
+}
+
+std::string LowerExt(const std::string& path)
+{
+    std::filesystem::path p(path);
+    std::string ext = p.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c)
+    {
+        return static_cast<char>(std::tolower(c));
+    });
+    return ext;
+}
+
+bool IsDngExt(const std::string& ext)
+{
+    return ext == ".dng";
+}
+
+bool IsRawExt(const std::string& ext)
+{
+    static const char* raw_exts[] =
+    {
+        ".arw", ".cr2", ".cr3", ".nef", ".nrw",
+        ".orf", ".raf", ".rw2", ".pef", ".srw", ".x3f",
+        ".sr2", ".srf", ".kdc", ".dcr", ".k25", ".mdc",
+        ".mef", ".mrw", ".iiq", ".eip", ".bay", ".3fr",
+        ".fff", ".mos"
+    };
+    for (const char* re : raw_exts)
+    {
+        if (ext == re) return true;
+    }
+    return false;
+}
 
 float SampleBilinear(const FloatImage& src, float x, float y, uint32_t c)
 {
@@ -466,6 +529,292 @@ FloatImage ResizeImage(const FloatImage& src,
     }
 
     return out;
+}
+
+RawResizeResult ProcessRawResize(const std::string& input_path,
+                                const std::string& output_path,
+                                const RawResizeOptions& options,
+                                RawResizeProgressCallback progress_cb)
+{
+    RawResizeResult result;
+
+    auto report = [&](float p, const std::string& msg)
+    {
+        if (progress_cb) progress_cb(p, msg);
+    };
+
+    if (!std::filesystem::exists(input_path))
+    {
+        result.error_msg = "Input file does not exist: " + input_path;
+        return result;
+    }
+
+    std::string ext = LowerExt(input_path);
+    if (!IsDngExt(ext) && !IsRawExt(ext))
+    {
+        result.error_msg = "Unsupported file format: " + ext;
+        return result;
+    }
+
+    bool has_wh = (options.width > 0 && options.height > 0);
+    bool has_scale = (options.scale > 0.0);
+    if (!has_wh && !has_scale)
+    {
+        result.error_msg = "Specify either output width/height or scale > 0";
+        return result;
+    }
+
+    int bit_depth = options.bit_depth;
+    if (bit_depth != 8 && bit_depth != 10 && bit_depth != 12 && bit_depth != 14 && bit_depth != 16)
+    {
+        bit_depth = 16;
+    }
+
+    std::string convert_dir;
+    std::string dng_path = input_path;
+
+    try
+    {
+        if (!IsDngExt(ext))
+        {
+#ifdef _WIN32
+            report(0.05f, "Converting RAW to DNG via Adobe DNG Converter...");
+            convert_dir = MakeTempDir(std::filesystem::path(output_path).parent_path().string());
+            std::vector<std::string> single_input = { input_path };
+            std::vector<std::string> converted;
+            if (!RunAdobeDngConverter(single_input, convert_dir, converted) || converted.empty())
+            {
+                throw std::runtime_error("Adobe DNG Converter failed or timed out");
+            }
+            dng_path = converted[0];
+#else
+            throw std::runtime_error("Non-DNG RAW input requires pre-conversion on this platform");
+#endif
+        }
+
+        report(0.15f, "Reading DNG...");
+        DngReader reader(dng_path.c_str());
+        RawImage raw = reader.Read();
+        RawMetadata& meta = raw.metadata;
+
+        uint32_t src_mosaic_w = meta.width;
+        uint32_t src_mosaic_h = meta.height;
+        uint32_t period = meta.mosaic_pattern_width;
+        bool is_linear_rgb = (period <= 1);
+
+        result.src_width = src_mosaic_w;
+        result.src_height = src_mosaic_h;
+
+        // Target dimensions
+        uint32_t dst_mosaic_w, dst_mosaic_h;
+        if (has_scale)
+        {
+            dst_mosaic_w = static_cast<uint32_t>(std::lround(static_cast<double>(src_mosaic_w) * options.scale));
+            dst_mosaic_h = static_cast<uint32_t>(std::lround(static_cast<double>(src_mosaic_h) * options.scale));
+        }
+        else
+        {
+            dst_mosaic_w = options.width;
+            dst_mosaic_h = options.height;
+        }
+
+        if (dst_mosaic_w == 0 || dst_mosaic_h == 0)
+        {
+            throw std::runtime_error("Output dimensions must be non-zero");
+        }
+
+        if (!is_linear_rgb)
+        {
+            uint32_t rw = RoundDownToMultiple(dst_mosaic_w, period);
+            uint32_t rh = RoundDownToMultiple(dst_mosaic_h, period);
+            dst_mosaic_w = rw;
+            dst_mosaic_h = rh;
+            if (dst_mosaic_w == 0 || dst_mosaic_h == 0)
+            {
+                throw std::runtime_error("Output dimensions too small after rounding for CFA period");
+            }
+        }
+
+        result.dst_width = dst_mosaic_w;
+        result.dst_height = dst_mosaic_h;
+
+        uint32_t target_white = (1u << bit_depth) - 1u;
+        if (target_white > 65535) target_white = 65535;
+        if (target_white < 1) target_white = 1;
+        result.target_white = target_white;
+
+        const uint32_t sensor_white = meta.white_level;
+        const float bit_scale = (sensor_white > 0 && target_white != sensor_white)
+            ? static_cast<float>(target_white) / static_cast<float>(sensor_white)
+            : 1.0f;
+
+        uint32_t src_plane_w = src_mosaic_w;
+        uint32_t src_plane_h = src_mosaic_h;
+        uint32_t dst_plane_w = dst_mosaic_w;
+        uint32_t dst_plane_h = dst_mosaic_h;
+        if (!is_linear_rgb)
+        {
+            src_plane_w = (src_mosaic_w + period - 1) / period;
+            src_plane_h = (src_mosaic_h + period - 1) / period;
+            dst_plane_w = dst_mosaic_w / period;
+            dst_plane_h = dst_mosaic_h / period;
+        }
+
+        InterpolationMethod effective_interp = options.interp;
+        const float src_w_eff = is_linear_rgb ? static_cast<float>(src_mosaic_w) : static_cast<float>(src_plane_w);
+        const float dst_w_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_w) : static_cast<float>(dst_plane_w);
+        const float src_h_eff = is_linear_rgb ? static_cast<float>(src_mosaic_h) : static_cast<float>(src_plane_h);
+        const float dst_h_eff = is_linear_rgb ? static_cast<float>(dst_mosaic_h) : static_cast<float>(dst_plane_h);
+        const float downscale_x = (dst_w_eff > 0) ? src_w_eff / dst_w_eff : 1.0f;
+        const float downscale_y = (dst_h_eff > 0) ? src_h_eff / dst_h_eff : 1.0f;
+        const float min_downscale = std::min(downscale_x, downscale_y);
+
+        if (effective_interp == InterpolationMethod::GaussianArea && min_downscale < 3.0f)
+        {
+            effective_interp = InterpolationMethod::AreaAverage;
+        }
+        if (effective_interp == InterpolationMethod::HalfSample && min_downscale < 2.0f)
+        {
+            effective_interp = InterpolationMethod::AreaAverage;
+        }
+        result.effective_interp = effective_interp;
+
+        report(0.30f, "Decoding pixel data...");
+        FloatImage fin = HostBufferToFloatImage(raw.pixels);
+
+        const bool ca_plane_path = (!is_linear_rgb) && (period > 1);
+        FloatImage plane_for_ca;
+        if (ca_plane_path)
+        {
+            plane_for_ca = ConvertMosaicToPlaneImage(fin, period);
+        }
+
+        if (options.chroma.enabled)
+        {
+            report(0.40f, "Applying chromatic aberration effects...");
+            if (ca_plane_path)
+            {
+                ApplyChromaticEffects(plane_for_ca,
+                                      meta.mosaic_pattern_width,
+                                      meta.mosaic_pattern,
+                                      static_cast<float>(meta.white_level),
+                                      options.chroma);
+            }
+            else
+            {
+                ApplyChromaticEffects(fin,
+                                      meta.mosaic_pattern_width,
+                                      meta.mosaic_pattern,
+                                      static_cast<float>(meta.white_level),
+                                      options.chroma);
+            }
+        }
+
+        const float olpf_strength = options.pseudo_olpf;
+        float olpf_sigma = 0.0f;
+        if (olpf_strength > 0.0f)
+        {
+            const float down_avg = 0.5f * (downscale_x + downscale_y);
+            if (down_avg > 1.5f)
+            {
+                olpf_sigma = olpf_strength * std::log2(down_avg);
+            }
+        }
+
+        FloatImage resized_img;
+        if (is_linear_rgb)
+        {
+            FloatImage src_for_resize = fin;
+            if (olpf_sigma > 0.0f)
+            {
+                report(0.50f, "Applying pseudo-OLPF...");
+                src_for_resize = GaussianBlur(fin, olpf_sigma);
+            }
+            report(0.60f, "Resizing LinearRaw...");
+            resized_img = ResizeImage(src_for_resize, dst_mosaic_w, dst_mosaic_h, effective_interp);
+        }
+        else
+        {
+            FloatImage plane = std::move(plane_for_ca);
+            if (olpf_sigma > 0.0f)
+            {
+                report(0.50f, "Applying pseudo-OLPF...");
+                plane = GaussianBlur(plane, olpf_sigma);
+            }
+            report(0.60f, "Resizing Bayer planes...");
+            FloatImage resized_plane = ResizeImage(plane, dst_plane_w, dst_plane_h, effective_interp);
+            resized_img = ConvertPlaneImageToMosaic(resized_plane, dst_mosaic_w, dst_mosaic_h, period);
+        }
+
+        if (bit_scale != 1.0f)
+        {
+            report(0.75f, "Scaling bit depth...");
+            for (float& v : resized_img.data) v *= bit_scale;
+        }
+
+        if (options.dither > 0.0f)
+        {
+            report(0.80f, "Applying dither...");
+            ApplyQuantizationDither(resized_img, options.dither);
+        }
+
+        report(0.85f, "Quantizing to uint16...");
+        HostBuffer averaged = FloatImageToUint16HostBuffer(resized_img, target_white);
+
+        RawImage output;
+        output.metadata = std::move(raw.metadata);
+        output.metadata.width = dst_mosaic_w;
+        output.metadata.height = dst_mosaic_h;
+        output.metadata.white_level = target_white;
+        if (bit_scale != 1.0f)
+        {
+            for (int i = 0; i < 4; ++i)
+                output.metadata.black_level[i] = meta.black_level[i] * bit_scale;
+        }
+        output.pixels = std::move(averaged);
+
+        if (is_linear_rgb || resized_img.channels == 3)
+        {
+            io::ClearDngMosaicInfo(output.metadata.dng_negative);
+        }
+
+        io::SetDngDimensions(output.metadata.dng_negative, dst_mosaic_w, dst_mosaic_h);
+        io::ClearDngOriginalSizes(output.metadata.dng_negative);
+
+        if (options.clear_camera_hints)
+        {
+            io::ClearDngCameraHints(output.metadata.dng_negative);
+        }
+
+        report(0.92f, "Writing DNG...");
+        io::SetDngWhiteLevel(output.metadata.dng_negative, output.metadata.white_level);
+        if (bit_scale != 1.0f)
+        {
+            io::SetDngBlackLevel(output.metadata.dng_negative, output.metadata.black_level);
+        }
+
+        DngWriter writer(output.metadata.dng_negative);
+        writer.Write(output_path.c_str(), output);
+
+        report(1.0f, "Done!");
+        result.success = true;
+    }
+    catch (const std::exception& e)
+    {
+        result.error_msg = e.what();
+    }
+    catch (...)
+    {
+        result.error_msg = "Unknown error occurred during RAW resize";
+    }
+
+    if (!convert_dir.empty())
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(convert_dir, ec);
+    }
+
+    return result;
 }
 
 } // namespace burstmerge

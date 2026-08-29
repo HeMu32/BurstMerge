@@ -876,6 +876,12 @@ int main()
 {
     CHECK(fs::exists(SamplesDir()), "samples directory exists");
 
+    if (!fs::exists(SamplesDir() / "rgb_small"))
+    {
+        std::cout << "  SKIP: samples/rgb_small not found" << std::endl;
+        return 0;
+    }
+
     TestGroupAutoAndExplicitOutput();
     TestGroupFormatsBitDepthAndRegression();
     TestGroupMixedRawAndExport();

@@ -327,9 +327,9 @@ struct PrimaryMask
     bool b = false;
 };
 
-PrimaryMask ResolveLaCAMask()
+PrimaryMask ResolveLaCAMask(LaCAColor color)
 {
-    switch (EFFECT_LaCA_Color)
+    switch (color)
     {
         case LaCAColor_Red:      return { true,  false, false };
         case LaCAColor_Green:    return { false, true,  false };
@@ -341,9 +341,9 @@ PrimaryMask ResolveLaCAMask()
     }
 }
 
-PrimaryMask ResolveLoCAMask()
+PrimaryMask ResolveLoCAMask(LoCAColor color)
 {
-    switch (EFFECT_LoCA_Color)
+    switch (color)
     {
         case LoCAColor_Red:      return { true,  false, false };
         case LoCAColor_Green:    return { false, true,  false };
@@ -807,12 +807,13 @@ FloatImage ComputeLoCABoostMap(const FloatImage& gray_mosaic,
 // final assembler: grayscale → Sobel boost → box diffusion → phase-matched
 // channel addition.
 void ApplyLoCA(FloatImage& img,
-               uint32_t period,
-               const std::array<uint16_t, 36>& mosaic_pattern,
-               float strength,
-               float width_percent,
-               float min_sensi,
-               float white_level)
+                uint32_t period,
+                const std::array<uint16_t, 36>& mosaic_pattern,
+                const PrimaryMask& mask,
+                float strength,
+                float width_percent,
+                float min_sensi,
+                float white_level)
 {
     if (strength <= 0.0f) return;
 
@@ -905,7 +906,6 @@ void ApplyLoCA(FloatImage& img,
     //      to mosaic_pattern[c] (0=R, 1=G, 2=B). No per-pixel phase dispatch
     //      is needed because in the plane domain all pixels of a given channel
     //      share the same CFA colour.
-    const PrimaryMask mask = ResolveLoCAMask();
     if (period > 1 && img.channels > 1)
     {
         // Bayer plane input: per-channel phase lookup, then per-(pixel,channel)
@@ -1025,25 +1025,24 @@ void ApplyLoCA(FloatImage& img,
 void ApplyChromaticEffects(FloatImage& img,
                            uint32_t period,
                            const std::array<uint16_t, 36>& mosaic_pattern,
-                           float white_level)
+                           float white_level,
+                           const ChromaEffectsParams& params)
 {
-#if EFFECT_CA_Enabled
+    if (!params.enabled) return;
 
     BURSTMERGE_CHROMA_SCOPE_TIMER("ApplyChromaticEffects total");
 
     // ---- LaCA (Lateral Chromatic Aberration) ----------------------------
     {
-        const double width_pct = (EFFECT_LaCA_Width);
+        const double width_pct = static_cast<double>(params.laca_width);
         if (width_pct != 0.0)
         {
-            const PrimaryMask mask = ResolveLaCAMask();
+            const PrimaryMask mask = ResolveLaCAMask(params.laca_color);
             if (mask.r || mask.g || mask.b)
             {
                 BURSTMERGE_CHROMA_SCOPE_TIMER("LaCA total");
                 if (period > 1 && img.channels == 1)
                 {
-                    // Bayer mosaic: jump to plane, rescale, jump back.
-                    // (Legacy path: caller passed in a 1-channel mosaic.)
                     FloatImage plane;
                     {
                         BURSTMERGE_CHROMA_SCOPE_TIMER("  ConvertMosaicToPlaneImage");
@@ -1061,14 +1060,6 @@ void ApplyChromaticEffects(FloatImage& img,
                 }
                 else if (period > 1 && img.channels > 1)
                 {
-                    // Bayer plane: caller has already deinterleaved the mosaic
-                    // to a plane image (channels == period²). Apply LaCA
-                    // in the plane domain directly — no mosaic↔plane round-
-                    // trip. The downstream resize/assembly happens once at the
-                    // caller side.  ApplyLaCAOnPlane internally projects the
-                    // plane dimensions back to mosaic pixel units (× period)
-                    // for all radial geometry, so the Width% knob references
-                    // the SAME mosaic diagonal as in the legacy path.
                     BURSTMERGE_CHROMA_SCOPE_TIMER("  ApplyLaCAOnPlane (in-place)");
                     ApplyLaCAOnPlane(img, period, mosaic_pattern, mask,
                                      static_cast<float>(width_pct));
@@ -1078,33 +1069,49 @@ void ApplyChromaticEffects(FloatImage& img,
                     BURSTMERGE_CHROMA_SCOPE_TIMER("  ApplyLaCAOnLinearRGB");
                     ApplyLaCAOnLinearRGB(img, mask, static_cast<float>(width_pct));
                 }
-                // Other formats: no-op (LinearRaw non-RGB etc., not supported).
             }
         }
     }
 
     // ---- LoCA (Longitudinal/Axial CA) -----------------------------------
     {
-        const double strength = (EFFECT_LoCA_Strength);
-        const double width_pct = (EFFECT_LoCA_Width);
+        const double strength = static_cast<double>(params.loca_strength);
+        const double width_pct = static_cast<double>(params.loca_width);
         if (strength > 0.0 && width_pct > 0.0)
         {
-            const PrimaryMask mask = ResolveLoCAMask();
+            const PrimaryMask mask = ResolveLoCAMask(params.loca_color);
             if (mask.r || mask.g || mask.b)
             {
                 BURSTMERGE_CHROMA_SCOPE_TIMER("LoCA dispatch (delegates)");
                 ApplyLoCA(img, period, mosaic_pattern,
+                          mask,
                           static_cast<float>(strength),
                           static_cast<float>(width_pct),
-                          static_cast<float>(EFFECT_LoCA_MinSensi),
+                          params.loca_min_sensi,
                           white_level);
             }
         }
     }
+}
 
+void ApplyChromaticEffects(FloatImage& img,
+                           uint32_t period,
+                           const std::array<uint16_t, 36>& mosaic_pattern,
+                           float white_level)
+{
+#if EFFECT_CA_Enabled
+    ChromaEffectsParams default_params;
+    default_params.enabled = (EFFECT_CA_Enabled != 0);
+    default_params.laca_color = EFFECT_LaCA_Color;
+    default_params.laca_width = static_cast<float>(EFFECT_LaCA_Width);
+    default_params.loca_color = EFFECT_LoCA_Color;
+    default_params.loca_strength = static_cast<float>(EFFECT_LoCA_Strength);
+    default_params.loca_width = static_cast<float>(EFFECT_LoCA_Width);
+    default_params.loca_min_sensi = static_cast<float>(EFFECT_LoCA_MinSensi);
+    ApplyChromaticEffects(img, period, mosaic_pattern, white_level, default_params);
 #else
     (void)img; (void)period; (void)mosaic_pattern; (void)white_level;
-#endif // EFFECT_CA_Enabled
+#endif
 }
 
 } // namespace burstmerge
