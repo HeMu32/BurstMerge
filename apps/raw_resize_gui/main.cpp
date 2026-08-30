@@ -170,8 +170,9 @@ private:
 
         auto* sizer_dim_row = new wxBoxSizer(wxHORIZONTAL);
         rb_dim_ = new wxRadioButton(panel, wxID_ANY, "Exact Dimensions (px):");
-        spin_width_ = new wxSpinCtrl(panel, wxID_ANY, "1920", wxDefaultPosition, FromDIP(wxSize(90, -1)), wxSP_ARROW_KEYS, 2, 65534, 1920);
-        spin_height_ = new wxSpinCtrl(panel, wxID_ANY, "1080", wxDefaultPosition, FromDIP(wxSize(90, -1)), wxSP_ARROW_KEYS, 2, 65534, 1080);
+        rb_dim_->SetValue(true);
+        spin_width_ = new wxSpinCtrl(panel, wxID_ANY, "720", wxDefaultPosition, FromDIP(wxSize(90, -1)), wxSP_ARROW_KEYS, 2, 65534, 720);
+        spin_height_ = new wxSpinCtrl(panel, wxID_ANY, "480", wxDefaultPosition, FromDIP(wxSize(90, -1)), wxSP_ARROW_KEYS, 2, 65534, 480);
         sizer_dim_row->Add(rb_dim_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
         sizer_dim_row->Add(new wxStaticText(panel, wxID_ANY, "W:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
         sizer_dim_row->Add(spin_width_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(15));
@@ -188,13 +189,13 @@ private:
 
         algo_grid->Add(new wxStaticText(panel, wxID_ANY, "Interpolation:"), 0, wxALIGN_CENTER_VERTICAL);
         wxArrayString interp_choices;
-        interp_choices.Add("Bicubic (Default)");
+        interp_choices.Add("Bicubic");
         interp_choices.Add("Bilinear");
         interp_choices.Add("Area Average (Recommended for heavy downscale)");
         interp_choices.Add("Gaussian Area (>=3x downscale)");
-        interp_choices.Add("50% Half Sample (>=2x downscale)");
+        interp_choices.Add("50% Half Sample (Default, >=2x downscale)");
         choice_interp_ = new wxChoice(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, interp_choices);
-        choice_interp_->SetSelection(0);
+        choice_interp_->SetSelection(4);
         algo_grid->Add(choice_interp_, 1, wxEXPAND);
 
         algo_grid->Add(new wxStaticText(panel, wxID_ANY, "Bit Depth:"), 0, wxALIGN_CENTER_VERTICAL);
@@ -219,6 +220,7 @@ private:
         algo_box->Add(algo_grid, 1, wxEXPAND | wxALL, FromDIP(5));
 
         chk_clear_hints_ = new wxCheckBox(panel, wxID_ANY, "Clear Camera Metadata Hints (Anti-alias, noise profile, sharpness hints)");
+        chk_clear_hints_->SetValue(true);
         algo_box->Add(chk_clear_hints_, 0, wxALL, FromDIP(5));
         main_sizer->Add(algo_box, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
 
