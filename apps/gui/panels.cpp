@@ -641,6 +641,7 @@ OptionsPanel::OptionsPanel(wxWindow* parent)
     notebook->AddPage(CreateMergePage(notebook), "Merge");
     notebook->AddPage(CreateAlignPage(notebook), "Align");
     notebook->AddPage(CreateExposurePage(notebook), "Exposure");
+    notebook->AddPage(CreateSuperResPage(notebook), "Super Res");
     notebook->AddPage(CreateCleanupPage(notebook), "Cleanup");
     root->Add(notebook, 1, wxEXPAND | wxALL, 6);
     SetSizer(root);
@@ -654,6 +655,18 @@ OptionsPanel::OptionsPanel(wxWindow* parent)
         UpdateEnabledState();
     });
     exposure_mode_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&)
+    {
+        UpdateEnabledState();
+    });
+super_resolution_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&)
+    {
+        UpdateEnabledState();
+    });
+    super_resolution_subpixel_align_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&)
+    {
+        UpdateEnabledState();
+    });
+    super_resolution_align_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&)
     {
         UpdateEnabledState();
     });
@@ -673,6 +686,23 @@ burstmerge::Settings OptionsPanel::Settings() const
     settings.gpu_device_index = gpu_device_->GetValue();
     settings.tile_size = tile_size_->GetValue();
     settings.bit_depth = std::stoi(bit_depth_->GetStringSelection().ToStdString());
+    switch (preprocess_interpolation_->GetSelection())
+    {
+        case 1: settings.preprocess_interpolation = burstmerge::PreprocessInterpolation::Nearest; break;
+        case 2: settings.preprocess_interpolation = burstmerge::PreprocessInterpolation::Bilinear; break;
+        case 3: settings.preprocess_interpolation = burstmerge::PreprocessInterpolation::MalvarHeCutler; break;
+        default: settings.preprocess_interpolation = burstmerge::PreprocessInterpolation::Off; break;
+    }
+    settings.super_resolution = super_resolution_->GetValue()
+        ? burstmerge::SuperResolutionMode::TwoX
+        : burstmerge::SuperResolutionMode::Off;
+settings.super_resolution_interpolation = super_resolution_interpolation_->GetSelection() == 1
+        ? burstmerge::SuperResolutionInterpolation::Bicubic
+        : burstmerge::SuperResolutionInterpolation::Bilinear;
+    settings.super_resolution_subpixel_align = super_resolution_subpixel_align_->GetValue();
+    settings.super_resolution_align_frequency = super_resolution_align_->GetSelection() == 0;
+    settings.super_resolution_tile_size = super_resolution_tile_size_->GetValue();
+    settings.super_resolution_fourier_grid = super_resolution_fourier_grid_->GetValue();
     switch (output_format_->GetSelection())
     {
         case 1: settings.output_format = burstmerge::OutputFormat::PNG; break;
@@ -812,6 +842,20 @@ std::string OptionsPanel::OutputStem(const std::string& first_path, const burstm
         parameters += "_smooth";
     }
     parameters += settings.highlight_recovery ? "_hl" : "_nohl";
+    switch (settings.preprocess_interpolation)
+    {
+        case burstmerge::PreprocessInterpolation::Nearest: parameters += "_rgb-nearest"; break;
+        case burstmerge::PreprocessInterpolation::Bilinear: parameters += "_rgb-bilinear"; break;
+        case burstmerge::PreprocessInterpolation::MalvarHeCutler: parameters += "_rgb-mhc"; break;
+        default: break;
+    }
+    if (settings.super_resolution == burstmerge::SuperResolutionMode::TwoX)
+    {
+        parameters += settings.super_resolution_interpolation ==
+            burstmerge::SuperResolutionInterpolation::Bicubic
+            ? "_sr2x-bicubic"
+            : "_sr2x-bilinear";
+    }
     if (settings.hot_pixel_repair)
     {
         parameters += "_hotpix";
@@ -853,6 +897,11 @@ bool OptionsPanel::Validate(std::string& error) const
         error = "Hot-pixel repair is not implemented by the Vulkan backend. Disable it or use CPU.";
         return false;
     }
+    if (super_resolution_->GetValue() && preprocess_interpolation_->GetSelection() == 0)
+    {
+        error = "2x super-resolution requires enabling 'Interpolate Bayer first' (refusing to upscale a Bayer mosaic).";
+        return false;
+    }
     if (!dng_convert_dir_->GetValue().empty() && !NormalizePath(dng_convert_dir_->GetValue()))
     {
         error = "The DNG conversion cache path is invalid.";
@@ -882,6 +931,8 @@ wxPanel* OptionsPanel::CreatePipelinePage(wxWindow* parent)
     bit_depth_ = AddChoice(panel, grid, "Bit depth", {"8", "10", "12", "14", "16"}, 3);
     output_format_ = AddChoice(panel, grid, "Output format",
         {"Auto", "PNG", "JPEG", "BMP", "TIFF", "DNG"}, 0);
+preprocess_interpolation_ = AddChoice(panel, grid, "Interpolate Bayer first",
+        {"Off", "Nearest", "Bilinear", "Malvar-He-Cutler"}, 0);
     file_naming_ = AddChoice(panel, grid, "File naming",
         {"Processing parameters", "First frame + parameters"}, 1);
     file_naming_->SetToolTip(
@@ -961,6 +1012,25 @@ wxPanel* OptionsPanel::CreateExposurePage(wxWindow* parent)
     exposure_mode_ = AddChoice(panel, grid, "Mode", {"Off", "Linear", "Curve"}, 0);
     curve_mode_ = AddChoice(panel, grid, "Curve mode", {"Global", "Local Reinhard"}, 0);
     exposure_stops_ = AddSlider(panel, grid, "Stops", -30, 30, 0, "-3.0", "+3.0");
+    SetPageSizer(panel, grid);
+    return panel;
+}
+
+wxPanel* OptionsPanel::CreateSuperResPage(wxWindow* parent)
+{
+    wxPanel* panel = new wxPanel(parent);
+    wxFlexGridSizer* grid = MakeGrid();
+    super_resolution_ = AddCheck(panel, grid, "2x super-resolution", false);
+    super_resolution_interpolation_ = AddChoice(panel, grid, "Fallback interpolation",
+        {"Bilinear", "Bicubic"}, 0);
+    super_resolution_subpixel_align_ = AddCheck(panel, grid,
+        "Dedicated sub-pixel alignment", true);
+    super_resolution_align_ = AddChoice(panel, grid, "Sub-pixel method",
+        {"Frequency", "SAD parabola"}, 1);
+    super_resolution_tile_size_ = AddSpin(panel, grid, "Alignment tile size",
+        16, 256, 32);
+    super_resolution_fourier_grid_ = AddSpin(panel, grid, "Fourier grid",
+        3, 9, 5);
     SetPageSizer(panel, grid);
     return panel;
 }
@@ -1097,6 +1167,14 @@ void OptionsPanel::UpdateEnabledState()
     noise_reduction_value_->Enable(merge_algorithm_->GetSelection() <= 1);
     curve_mode_->Enable(exposure_mode_->GetSelection() == 2);
     exposure_stops_->Enable(exposure_mode_->GetSelection() != 0);
+super_resolution_interpolation_->Enable(super_resolution_->GetValue());
+    const bool sr_on = super_resolution_->GetValue();
+    super_resolution_subpixel_align_->Enable(sr_on);
+    super_resolution_align_->Enable(sr_on && super_resolution_subpixel_align_->GetValue());
+    super_resolution_tile_size_->Enable(sr_on);
+    super_resolution_fourier_grid_->Enable(
+        sr_on && super_resolution_subpixel_align_->GetValue() &&
+        super_resolution_align_->GetSelection() == 0);
 }
 
 } // namespace burstmerge::gui

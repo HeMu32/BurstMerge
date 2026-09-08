@@ -1,0 +1,47 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "opencode-codex-memory@0.6.5"
+  ],
+  "watcher": {
+    "ignore": [
+      "build/**",
+      "build*/**",
+      "CMakeFiles/**",
+      "CMakeCache.txt",
+      "CMakeScripts/**",
+      "Testing/**",
+      ".cache/**",
+      "compile_commands.json",
+      "*.cmake",
+      "*.make",
+      "*.ninja",
+      "*.log",
+      "*.tmp",
+      "*.exe",
+      "*.dll",
+      "*.lib",
+      "*.obj",
+      "*.o",
+      "*.pdb",
+      "*.ARW",
+      "*.DNG",
+      "*.TIF",
+      "*.TIFF",
+      "*.PNG",
+      "*.JPG",
+      "*.JPEG",
+      "*.XYZ",
+      "Reference/**",
+      "3rdparty/libtiff/**",
+      "3rdparty/dng_sdk/**",
+      "3rdparty/onnxruntime/**",
+      "3rdparty/ultralytics-models/**",
+      "3rdparty/vulkan/**",
+      "3rdparty/openmp/**",
+      "3rdparty/cxxopts/**",
+      "3rdparty/pocketfft/**",
+      "3rdparty/wxWidgets/**"
+    ]
+  }
+}

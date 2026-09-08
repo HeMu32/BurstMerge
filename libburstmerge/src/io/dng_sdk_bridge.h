@@ -89,6 +89,9 @@ void ExtractExposureMetadata(DngNegativeHolder* holder,
 // Override the output DNG's white/black level to match the desired bit depth.
 void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level);
 void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4]);
+// Per-plane (BlackLevelRepeatDim 1x1) black levels, correct for 3-plane
+// LinearRaw output where the 4-value quad map would be misinterpreted.
+void SetDngPlaneBlackLevel(DngNegativeHolder* holder, const float black_level[4]);
 
 } // namespace io
 } // namespace burstmerge

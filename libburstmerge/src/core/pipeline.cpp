@@ -4,6 +4,8 @@
 #include "burstmerge/internal/core/gpu_pipeline.h"
 #include "burstmerge/internal/core/pipeline_align.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
+#include "burstmerge/internal/core/demosaic.h"
+#include "burstmerge/internal/core/super_resolution.h"
 #include "burstmerge/internal/core/pipeline_io.h"
 #include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"
@@ -11,6 +13,7 @@
 #include "burstmerge/internal/exposure/exposure.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/io/dng_io.h"
+#include "burstmerge/internal/io/dng_sdk_bridge_resize.h"
 #include "burstmerge/internal/io/image_decoder.h"
 #include "burstmerge/internal/io/image_writer.h"
 #include "burstmerge/internal/merge/frequency.h"
@@ -247,6 +250,16 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
         if (input_class == InputClass::Rgb)
         {
+            if (settings_.preprocess_interpolation != PreprocessInterpolation::Off)
+            {
+                throw std::runtime_error(
+                    "Pre-processing interpolation requires Bayer RAW input; RGB input is already interpolated");
+            }
+            if (settings_.super_resolution != SuperResolutionMode::Off)
+            {
+                throw std::runtime_error(
+                    "2x super-resolution currently requires Bayer RAW input");
+            }
             Report(progress, 0.02f, "RGB input pipeline");
             std::vector<io::DecodedImage> decoded;
             decoded.reserve(input_paths.size());
@@ -507,6 +520,29 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         Report(progress, PipelineConstants::kProgressRefSelected, "Reference frame selected: " + std::to_string(ref_idx + 1) + "/" + std::to_string(images.size()));
         const bool input_is_linear =
             (images[ref_idx].metadata.mosaic_pattern_width == 0);
+        const bool interpolate_before_processing =
+            settings_.preprocess_interpolation != PreprocessInterpolation::Off;
+        if (interpolate_before_processing && input_is_linear)
+        {
+            throw std::runtime_error("Pre-processing interpolation requires Bayer input; this burst is already LinearRaw");
+        }
+if (settings_.super_resolution != SuperResolutionMode::Off && input_is_linear)
+        {
+            throw std::runtime_error("2x super-resolution currently requires Bayer RAW input; this burst is already LinearRaw");
+        }
+        if (settings_.super_resolution != SuperResolutionMode::Off &&
+            !interpolate_before_processing)
+        {
+            throw std::runtime_error(
+                "2x super-resolution requires pre-processing interpolation to be "
+                "enabled (interpolate-before-processing); refusing to upscale a "
+                "Bayer mosaic that would resolve below the input frame's detail");
+        }
+        if (interpolate_before_processing &&
+            images[ref_idx].metadata.mosaic_pattern_width != 2)
+        {
+            throw std::runtime_error("Pre-processing interpolation currently supports only 2x2 Bayer input");
+        }
         FloatImage merged;
         bool ran_gpu_pipeline = false;
         if (backend_ == BackendType::Vulkan && !input_is_linear)
@@ -560,10 +596,50 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
 
             Report(progress, PipelineConstants::kProgressNormalize, "Normalizing frames (black level & exposure)");
             NormalizeFrames(float_images, images, ref_idx);
-            if (settings_.highlight_recovery)
+if (settings_.highlight_recovery)
             {
                 Report(progress, PipelineConstants::kProgressNormalize, "Recovering clipped highlights");
                 RecoverHighlights(float_images, images, ref_idx);
+            }
+            // Keep the normalized Bayer planes for the mosaic-based (route A) 2x
+            // super-resolution path, which reconstructs a 2x HR Bayer mosaic from
+            // per-channel sub-pixel samples and demosaics once. This avoids the
+            // even/odd phase conflict that causes green fringing at edges and the
+            // period-2px artifact in the demosaic-then-upscale path.
+            std::vector<FloatImage> mosaic_sources;
+            const bool use_mosaic_sr =
+                (settings_.super_resolution == SuperResolutionMode::TwoX) &&
+                !input_is_linear &&
+                images[ref_idx].metadata.mosaic_pattern_width == 2;
+            if (use_mosaic_sr)
+            {
+                mosaic_sources = float_images;
+            }
+            if (interpolate_before_processing)
+            {
+                Report(progress, PipelineConstants::kProgressNormalize,
+                       "Interpolating Bayer frames to full-resolution RGB");
+                ParallelFor(float_images.size(), 1, [&](size_t begin, size_t end)
+                {
+                    for (size_t i = begin; i < end; ++i)
+                    {
+                        float demosaic_scale = 1.0f;
+                        if (i != ref_idx &&
+                            images[ref_idx].metadata.ev_value > 0.0f &&
+                            images[i].metadata.ev_value > 0.0f)
+                        {
+                            demosaic_scale =
+                                (images[ref_idx].metadata.ev_value /
+                                 images[i].metadata.ev_value) *
+                                std::pow(2.0f,
+                                    images[ref_idx].metadata.exposure_bias -
+                                    images[i].metadata.exposure_bias);
+                        }
+                        float_images[i] = DemosaicBayer(float_images[i], images[i].metadata,
+                                                        settings_.preprocess_interpolation,
+                                                        demosaic_scale);
+                    }
+                }, "demosaic_frames");
             }
             for (size_t i = 1; i < images.size(); ++i)
             {
@@ -573,12 +649,29 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
                 }
             }
 
-            uint32_t cfa_period = images[ref_idx].metadata.mosaic_pattern_width;
-            std::vector<FloatImage> aligned = BuildAlignedComparisons(float_images, images, ref_idx, settings_, cfa_period, exposure, progress);
+            uint32_t cfa_period = interpolate_before_processing
+                ? 1u : images[ref_idx].metadata.mosaic_pattern_width;
+            std::vector<AlignmentResult> sr_alignments;
+            const bool use_sr_original_sources =
+                settings_.super_resolution == SuperResolutionMode::TwoX;
+            std::vector<FloatImage> aligned = BuildAlignedComparisons(
+                float_images, images, ref_idx, settings_, cfa_period, exposure, progress,
+                use_sr_original_sources ? &sr_alignments : nullptr,
+                nullptr);
 
             // float_images[i] for i != ref_idx are now dead: BuildAlignedComparisons
             // has already warped them into `aligned`. Free them before the merge
             // stage, which allocates its own blur/guide/FFT buffers.
+            std::vector<FloatImage> original_comparisons;
+            if (use_sr_original_sources && sr_alignments.size() == aligned.size())
+            {
+                original_comparisons.reserve(aligned.size());
+                for (size_t i = 0; i < float_images.size(); ++i)
+                {
+                    if (i != ref_idx)
+                        original_comparisons.push_back(std::move(float_images[i]));
+                }
+            }
             FloatImage ref_image = std::move(float_images[ref_idx]);
             float_images.clear();
             float_images.shrink_to_fit();
@@ -606,7 +699,50 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             // Exposure scales (for clipped-pixel detection / temporal weighting)
             // are computed unconditionally above.
             //
-            if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
+if (settings_.super_resolution == SuperResolutionMode::TwoX)
+            {
+                Report(progress, PipelineConstants::kProgressMerge,
+                       "Reconstructing 2x super-resolution image");
+                if (use_mosaic_sr && sr_alignments.size() == aligned.size() &&
+                    mosaic_sources[ref_idx].channels == 4)
+                {
+                    std::vector<FloatImage> comp_planes;
+                    comp_planes.reserve(mosaic_sources.size() > 0 ? mosaic_sources.size() - 1 : 0);
+                    for (size_t i = 0; i < mosaic_sources.size(); ++i)
+                    {
+                        if (i != ref_idx) comp_planes.push_back(std::move(mosaic_sources[i]));
+                    }
+                    FloatImage ref_plane = std::move(mosaic_sources[ref_idx]);
+                    float avg_bl_sr = MeanBlackLevel(images[ref_idx].metadata);
+                    float clip_sr = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl_sr) *
+                                    PipelineConstants::kClipFactor;
+if (settings_.super_resolution_kernel)
+                    {
+                        merged = SuperResolve2xKernel(ref_plane, comp_planes, sr_alignments,
+                                                      images[ref_idx].metadata, clip_sr,
+                                                      &ref_image, &aligned);
+                    }
+                    else
+                    {
+                        merged = SuperResolve2xMosaic(ref_plane, comp_planes, sr_alignments,
+                                                      images[ref_idx].metadata,
+                                                      settings_.preprocess_interpolation, clip_sr);
+                    }
+                }
+                else
+                {
+                    float avg_bl_sr = MeanBlackLevel(images[ref_idx].metadata);
+                    float clip_sr = (static_cast<float>(images[ref_idx].metadata.white_level) - avg_bl_sr) *
+                                    PipelineConstants::kClipFactor;
+                    merged = SuperResolve2x(ref_image, aligned, exp_scales,
+                                             settings_.super_resolution_interpolation, clip_sr,
+                                             original_comparisons.empty() ? nullptr
+                                                                         : &original_comparisons,
+                                             original_comparisons.empty() ? nullptr
+                                                                         : &sr_alignments);
+                }
+            }
+            else if (settings_.merge_algo == MergeAlgorithm::TemporalAverage)
             {
                 // TemporalAverage: simple exposure-weighted frame average.
                 // noise_reduction is ignored - averaging is averaging.
@@ -784,7 +920,8 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             params.mode = settings_.exposure_mode;
             params.curve_mode = settings_.exposure_curve_mode;
             params.stops = settings_.exposure_stops;
-            params.mosaic_pattern_width = images[ref_idx].metadata.mosaic_pattern_width;
+            params.mosaic_pattern_width = interpolate_before_processing
+                ? 0u : images[ref_idx].metadata.mosaic_pattern_width;
             if (use_zero_black)
             {
                 // Black is already subtracted; tell ApplyExposure there is no
@@ -846,9 +983,16 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         if (images[ref_idx].metadata.mosaic_pattern_width > 1 &&
             merged.channels == images[ref_idx].metadata.mosaic_pattern_width * images[ref_idx].metadata.mosaic_pattern_width)
             {
+            uint32_t mosaic_width = images[ref_idx].metadata.width;
+            uint32_t mosaic_height = images[ref_idx].metadata.height;
+            if (settings_.super_resolution == SuperResolutionMode::TwoX)
+            {
+                mosaic_width *= 2;
+                mosaic_height *= 2;
+            }
             merged = ConvertPlaneImageToMosaic(merged,
-                                               images[ref_idx].metadata.width,
-                                               images[ref_idx].metadata.height,
+                                               mosaic_width,
+                                               mosaic_height,
                                                images[ref_idx].metadata.mosaic_pattern_width);
         }
 
@@ -890,7 +1034,18 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             Report(progress, PipelineConstants::kProgressContainer, "Preparing output DNG container");
             RawImage output;
             output.metadata = std::move(images[ref_idx].metadata);
+            output.metadata.width = merged.width;
+            output.metadata.height = merged.height;
             output.metadata.white_level = target_white;
+if (interpolate_before_processing && !use_zero_black)
+            {
+                // Demosaic normalized every channel to the mean black level, so
+                // the LinearRaw output carries one uniform black. Store the
+                // UNSCALED mean here: the high-bit-depth block below scales it
+                // by bit_scale exactly once. Scaling it here as well would
+                // double-scale (black > white) and break raw-converter render.
+                for (float& value : output.metadata.black_level) value = ref_bl;
+            }
 
             if (use_zero_black)
             {
@@ -945,14 +1100,42 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
             {
                 io::ClearDngMosaicInfo(output.metadata.dng_negative);
             }
-            if (use_zero_black)
+            if (settings_.super_resolution == SuperResolutionMode::TwoX)
+            {
+                io::SetDngDimensions(output.metadata.dng_negative, merged.width, merged.height);
+            }
+            if (interpolate_before_processing || settings_.super_resolution == SuperResolutionMode::TwoX)
+            {
+                io::ClearDngOpcodes(output.metadata.dng_negative);
+            }
+if (use_zero_black)
             {
                 // Force BlackLevel to 0 in the DNG SDK negative so the
                 // resulting DNG tag is exactly [0,0,0,0].
                 float zero_bl[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                io::SetDngBlackLevel(output.metadata.dng_negative, zero_bl);
+                if (merged.channels == 3)
+                {
+                    io::SetDngPlaneBlackLevel(output.metadata.dng_negative, zero_bl);
+                }
+                else
+                {
+                    io::SetDngBlackLevel(output.metadata.dng_negative, zero_bl);
+                }
             }
-            else if (bit_scale != 1.0f && ref_bl > 1.0f)
+            else if (merged.channels == 3)
+            {
+                // LinearRaw output: always write per-plane (BlackLevelRepeatDim
+                // 1x1) black levels so converters never see a CFA-shaped 2x2
+                // quad map on a demosaiced RGB image. Values were scaled by
+                // bit_scale exactly once above.
+                float scaled_bl[4];
+                for (int i = 0; i < 4; ++i)
+                {
+                    scaled_bl[i] = output.metadata.black_level[i];
+                }
+                io::SetDngPlaneBlackLevel(output.metadata.dng_negative, scaled_bl);
+            }
+            else if ((interpolate_before_processing || bit_scale != 1.0f) && ref_bl > 1.0f)
             {
                 float scaled_bl[4];
                 for (int i = 0; i < 4; ++i)
@@ -968,14 +1151,15 @@ Result PipelineOrchestrator::Process(const std::vector<std::string>& input_paths
         {
             // RAW → non-DNG. Bayer input yields mosaic grayscale; LinearRaw
             // (3-channel) input yields RGB. Both reuse the generic RGB writer.
+            const bool output_is_linear = input_is_linear || interpolate_before_processing;
             Report(progress, PipelineConstants::kProgressQuantize,
-                input_is_linear ? "Writing LinearRaw as non-DNG (RGB)"
-                                : "Writing RAW as non-DNG (Bayer mosaic)");
+                output_is_linear ? "Writing LinearRaw as non-DNG (RGB)"
+                                 : "Writing RAW as non-DNG (Bayer mosaic)");
 
             io::DecodedImage raw_decoded;
-            raw_decoded.info.width     = images[ref_idx].metadata.width;
-            raw_decoded.info.height    = images[ref_idx].metadata.height;
-            raw_decoded.info.pix_fmt   = input_is_linear ? io::kPixelRGB : io::kPixelGray;
+            raw_decoded.info.width     = merged.width;
+            raw_decoded.info.height    = merged.height;
+            raw_decoded.info.pix_fmt   = output_is_linear ? io::kPixelRGB : io::kPixelGray;
             raw_decoded.info.bit_depth = settings_.bit_depth;
             raw_decoded.info.is_raw    = true;
             raw_decoded.info.white_level = static_cast<float>(target_white);

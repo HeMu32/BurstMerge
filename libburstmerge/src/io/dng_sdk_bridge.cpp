@@ -287,6 +287,16 @@ void SetDngWhiteLevel(DngNegativeHolder* holder, uint32_t white_level)
     holder->negative->SetWhiteLevel(static_cast<uint32>(white_level));
 }
 
+void SetDngPlaneBlackLevel(DngNegativeHolder* holder, const float black_level[4])
+{
+    if (!holder || !holder->negative) return;
+    for (int plane = 0; plane < 3; ++plane)
+    {
+        holder->negative->SetBlackLevel(
+            static_cast<real64>(black_level[plane]), plane);
+    }
+}
+
 void SetDngBlackLevel(DngNegativeHolder* holder, const float black_level[4])
 {
     if (!holder || !holder->negative) return;

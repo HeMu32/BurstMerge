@@ -13,6 +13,10 @@ endif()
 if (WIN32 AND EXISTS "${PROJECT_SOURCE_DIR}/3rdparty/libtiff/install/bin")
     set(TEST_RUNTIME_PATH "${PROJECT_SOURCE_DIR}/3rdparty/libtiff/install/bin")
 endif()
+if (WIN32)
+    string(REPLACE ";" "\\;" TEST_ENV_PATH
+        "${TEST_RUNTIME_PATH}${TEST_PATH_SEP}$ENV{PATH}")
+endif()
 
 function(add_burstmerge_test name)
     add_executable(${name} "${name}.cpp")
@@ -31,7 +35,7 @@ function(add_burstmerge_test name)
     set_tests_properties(${name} PROPERTIES TIMEOUT 60)
     if(WIN32 AND TEST_RUNTIME_PATH)
         set_tests_properties(${name} PROPERTIES
-            ENVIRONMENT "PATH=${TEST_RUNTIME_PATH}${TEST_PATH_SEP}$ENV{PATH}")
+            ENVIRONMENT "PATH=${TEST_ENV_PATH}")
     endif()
 endfunction()
 
@@ -41,6 +45,7 @@ target_sources(test_deps PRIVATE "${POCKETFFT_INCLUDE}/pocketfft.c")
 add_burstmerge_test(test_dng_io)
 
 add_burstmerge_test(test_highlight)
+add_burstmerge_test(test_interpolate_superres)
 
 add_burstmerge_test(test_stage0)
 set_tests_properties(test_stage0 PROPERTIES TIMEOUT 300)

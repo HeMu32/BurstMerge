@@ -37,6 +37,23 @@ enum class FrequencyMode
 { Laplacian, WienerFft, WienerFftRobust };
 enum class ExposureCurveMode
 { Global, LocalReinhard };
+enum class PreprocessInterpolation
+{
+    Off,
+    Nearest,
+    Bilinear,
+    MalvarHeCutler
+};
+enum class SuperResolutionMode
+{
+    Off,
+    TwoX
+};
+enum class SuperResolutionInterpolation
+{
+    Bilinear,
+    Bicubic
+};
 
 struct Settings
 {
@@ -58,6 +75,17 @@ struct Settings
     bool           smooth_tile_field = false;
     bool           highlight_recovery = true;  // recover clipped green highlights (default on)
     bool           hot_pixel_repair   = false; // suppress hot pixels on RAW mosaic (default off; 2026-6-30 over-fires on real point light sources)
+PreprocessInterpolation preprocess_interpolation = PreprocessInterpolation::Off;
+    SuperResolutionMode super_resolution = SuperResolutionMode::Off;
+    SuperResolutionInterpolation super_resolution_interpolation = SuperResolutionInterpolation::Bilinear;
+    // Super-resolution alignment is handled by a dedicated sub-pixel stage that
+    // overrides the global alignment settings (does not modify the legacy
+    // alignment algorithms).
+    bool   super_resolution_subpixel_align = true;  // enable the dedicated sub-pixel stage
+    bool   super_resolution_align_frequency = false; // true=Frequency(Fourier), false=SAD parabola (default; the Fourier path is experimental)
+    int    super_resolution_fourier_grid = 5;        // odd grid for the Frequency method (5x5 default)
+    int    super_resolution_tile_size = 32;          // tile size used by the SR alignment stage
+    bool   super_resolution_kernel = true;           // direct Bayer kernel-regression reconstruction (no mosaic+demosaic)
     int            gpu_device_index = -1;  // GPU device index for Vulkan backend (-1 = auto)
     // output_format: Auto = auto-infer (DNG for RAW, PNG for non-RAW)
     OutputFormat   output_format    = OutputFormat::Auto;

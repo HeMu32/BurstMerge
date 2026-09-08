@@ -10,6 +10,21 @@ namespace
 struct PlanOwner
 {
     cfft_plan p = nullptr;
+    PlanOwner() = default;
+    explicit PlanOwner(cfft_plan plan) : p(plan) {}
+    PlanOwner(const PlanOwner&) = delete;
+    PlanOwner& operator=(const PlanOwner&) = delete;
+    PlanOwner(PlanOwner&& other) noexcept : p(other.p) { other.p = nullptr; }
+    PlanOwner& operator=(PlanOwner&& other) noexcept
+    {
+        if (this != &other)
+        {
+            if (p) destroy_cfft_plan(p);
+            p = other.p;
+            other.p = nullptr;
+        }
+        return *this;
+    }
     ~PlanOwner()
     {
         if (p) destroy_cfft_plan(p);

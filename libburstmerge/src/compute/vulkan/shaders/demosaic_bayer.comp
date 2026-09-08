@@ -1,0 +1,136 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Dst { float dst[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+int colorAt(int x, int y)
+{
+    int index = (y & 1) * 2 + (x & 1);
+    if (index == 0) return pc.i0;
+    if (index == 1) return pc.i1;
+    if (index == 2) return pc.i2;
+    return pc.i3;
+}
+
+float rawAt(int x, int y)
+{
+    x = clampi(x, 0, pc.w - 1);
+    y = clampi(y, 0, pc.h - 1);
+    int channel = (y & 1) * 2 + (x & 1);
+    int px = min(x / 2, pc.w2 - 1);
+    int py = min(y / 2, pc.h2 - 1);
+    float delta = channel == 0 ? pc.f0 : (channel == 1 ? pc.f1 : (channel == 2 ? pc.f2 : pc.f3));
+    return src[(py * pc.w2 + px) * 4 + channel] - delta;
+}
+
+float nearestColor(int x, int y, int color)
+{
+    float best = rawAt(x, y);
+    int bestDistance = 100;
+    for (int dy = -2; dy <= 2; ++dy)
+    {
+        for (int dx = -2; dx <= 2; ++dx)
+        {
+            int sx = clampi(x + dx, 0, pc.w - 1);
+            int sy = clampi(y + dy, 0, pc.h - 1);
+            int distance = abs(dx) + abs(dy);
+            if (colorAt(sx, sy) == color && distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = rawAt(sx, sy);
+            }
+        }
+    }
+    return best;
+}
+
+// Gradient-corrected green (Hamilton-Adams): interpolate along the axis with
+// the smaller gradient using the center-color second difference. Avoids the
+// green zipper / 2px checkerboard at high-contrast edges.
+float interpGreen(int x, int y)
+{
+    float c = rawAt(x, y);
+    float gn = rawAt(x, y - 1), gs = rawAt(x, y + 1);
+    float gw = rawAt(x - 1, y), ge = rawAt(x + 1, y);
+    float cn = rawAt(x, y - 2), cs = rawAt(x, y + 2);
+    float cw = rawAt(x - 2, y), ce = rawAt(x + 2, y);
+    float dh = abs(gw - ge) + abs(2.0 * c - cw - ce);
+    float dv = abs(gn - gs) + abs(2.0 * c - cn - cs);
+    if (dh < dv) return (gw + ge) * 0.5 + (2.0 * c - cw - ce) * 0.25;
+    if (dv < dh) return (gn + gs) * 0.5 + (2.0 * c - cn - cs) * 0.25;
+    return (gw + ge + gn + gs) * 0.25 + (4.0 * c - cw - ce - cn - cs) * 0.125;
+}
+
+bool isColor(int x, int y, int color)
+{
+    x = clampi(x, 0, pc.w - 1);
+    y = clampi(y, 0, pc.h - 1);
+    return colorAt(x, y) == color;
+}
+
+void addDiff(int sx, int sy, int color, inout float sum, inout int count)
+{
+    sx = clampi(sx, 0, pc.w - 1);
+    sy = clampi(sy, 0, pc.h - 1);
+    if (colorAt(sx, sy) == color)
+    {
+        sum += rawAt(sx, sy) - interpGreen(sx, sy);
+        ++count;
+    }
+}
+
+// Color-difference chroma: average R-G / B-G along the axis of same-color
+// neighbours (horizontal / vertical / diagonal) and add back the interpolated
+// green. Edge-safe because the colour difference is near-zero across a hard
+// edge, unlike interpolating the channel directly.
+float interpChroma(int x, int y, int color)
+{
+    float sum = 0.0;
+    int count = 0;
+    if (isColor(x - 1, y, color) || isColor(x + 1, y, color))
+    {
+        addDiff(x - 1, y, color, sum, count);
+        addDiff(x + 1, y, color, sum, count);
+    }
+    else if (isColor(x, y - 1, color) || isColor(x, y + 1, color))
+    {
+        addDiff(x, y - 1, color, sum, count);
+        addDiff(x, y + 1, color, sum, count);
+    }
+    else
+    {
+        addDiff(x - 1, y - 1, color, sum, count);
+        addDiff(x + 1, y - 1, color, sum, count);
+        addDiff(x - 1, y + 1, color, sum, count);
+        addDiff(x + 1, y + 1, color, sum, count);
+    }
+    // Center green: real photosite at green sites, interpolated elsewhere
+    // (matches the CPU two-pass green plane).
+    float gcenter = (colorAt(x, y) == 1) ? rawAt(x, y) : interpGreen(x, y);
+    return gcenter + (count > 0 ? sum / float(count) : 0.0);
+}
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+    int base = (y * pc.w + x) * 3;
+    for (int color = 0; color < 3; ++color)
+    {
+        float value;
+        if (colorAt(x, y) == color)
+            value = rawAt(x, y);
+        else if (pc.i4 == 1)
+            value = nearestColor(x, y, color);
+        else if (color == 1)
+            value = interpGreen(x, y);
+        else
+            value = interpChroma(x, y, color);
+        dst[base + color] = max(0.0, value);
+    }
+}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "burstmerge/api.h"
+#include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/core/float_image.h"
 #include "burstmerge/internal/core/image_buffer.h"
 #include "burstmerge/internal/core/pipeline.h"
@@ -28,6 +29,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                                                  const Settings& settings,
                                                  uint32_t cfa_period,
                                                  const ExposureClassification& exposure,
-                                                 const PipelineOrchestrator::ProgressFn& progress);
+                                                 const PipelineOrchestrator::ProgressFn& progress,
+                                                 std::vector<AlignmentResult>* fixed_reference_alignments = nullptr,
+                                                 const std::vector<FloatImage>* subpixel_guides = nullptr);
 
 } // namespace burstmerge

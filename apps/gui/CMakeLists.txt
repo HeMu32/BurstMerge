@@ -67,6 +67,7 @@ endif()
 # 不加 -mwindows 时会出现 "undefined reference to `WinMain@16`" 之类错误.
 if(BURSTMERGE_BUILD_MAIN_GUI AND MINGW)
     target_link_options(burstmerge_gui PRIVATE -mwindows)
+    target_compile_definitions(burstmerge_gui PRIVATE wxHACK_BOOLEAN=int)
 endif()
 
 # Link BurstMerge core static lib (PIMPL, hides DNG SDK headers from GUI).

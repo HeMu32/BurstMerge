@@ -97,6 +97,37 @@ bool ParseOutputFormat(const std::string& value, burstmerge::OutputFormat& out) 
     return false;
 }
 
+bool ParsePreprocessInterpolation(const std::string& value, burstmerge::PreprocessInterpolation& out) {
+    std::string v = Lower(value);
+    if (v == "off" || v == "none") { out = burstmerge::PreprocessInterpolation::Off; return true; }
+    if (v == "nearest") { out = burstmerge::PreprocessInterpolation::Nearest; return true; }
+    if (v == "bilinear") { out = burstmerge::PreprocessInterpolation::Bilinear; return true; }
+    if (v == "malvar" || v == "mhc" || v == "malvar-he-cutler") {
+        out = burstmerge::PreprocessInterpolation::MalvarHeCutler; return true; }
+    return false;
+}
+
+bool ParseSuperResolutionInterpolation(const std::string& value,
+                                       burstmerge::SuperResolutionInterpolation& out) {
+    std::string v = Lower(value);
+    if (v == "bilinear") { out = burstmerge::SuperResolutionInterpolation::Bilinear; return true; }
+    if (v == "bicubic") { out = burstmerge::SuperResolutionInterpolation::Bicubic; return true; }
+    return false;
+}
+
+const char* PreprocessInterpolationName(burstmerge::PreprocessInterpolation method) {
+    switch (method) {
+        case burstmerge::PreprocessInterpolation::Nearest: return "nearest";
+        case burstmerge::PreprocessInterpolation::Bilinear: return "bilinear";
+        case burstmerge::PreprocessInterpolation::MalvarHeCutler: return "malvar";
+        default: return "off";
+    }
+}
+
+const char* SuperResolutionInterpolationName(burstmerge::SuperResolutionInterpolation method) {
+    return method == burstmerge::SuperResolutionInterpolation::Bicubic ? "bicubic" : "bilinear";
+}
+
 void PrintInputSummary(const std::vector<std::string>& inputs) {
     std::cout << "Inputs (" << inputs.size() << "):" << std::endl;
     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -149,6 +180,14 @@ int main(int argc, char* argv[]) {
         ("smooth-tile-field", "Enable median smoothing of alignment tile fields", cxxopts::value<bool>()->default_value("false"))
         ("highlight-recovery", "Recover clipped green-channel highlights from R/B neighbours (default on)", cxxopts::value<bool>()->default_value("true"))
         ("hot-pixel-repair", "Suppress hot pixels on RAW mosaic (default off; may dim real point light sources in dark scenes)", cxxopts::value<bool>()->default_value("false"))
+        ("interpolate-before-processing", "Bayer interpolation before processing: off, nearest, bilinear, malvar", cxxopts::value<std::string>()->default_value("off"))
+("super-resolution", "Enable 2x multi-frame super-resolution (requires --interpolate-before-processing)", cxxopts::value<bool>()->default_value("false"))
+        ("super-resolution-interpolation", "Fallback interpolation for 2x reconstruction: bilinear, bicubic", cxxopts::value<std::string>()->default_value("bilinear"))
+        ("super-resolution-subpixel-align", "Use the dedicated sub-pixel alignment stage for super-resolution (overrides --alignment)", cxxopts::value<bool>()->default_value("true"))
+        ("super-resolution-align", "Super-resolution sub-pixel alignment method: freq (Fourier, experimental) or sad (parabola)", cxxopts::value<std::string>()->default_value("sad"))
+        ("super-resolution-tile-size", "Tile size used by the super-resolution alignment stage", cxxopts::value<int>()->default_value("32"))
+        ("super-resolution-fourier-grid", "Fourier sub-pixel grid size for --super-resolution-align freq (odd, e.g. 5 or 6)", cxxopts::value<int>()->default_value("5"))
+        ("super-resolution-kernel", "Use direct Bayer kernel-regression reconstruction (no mosaic+demosaic; reduces Bayer-cell artifacts)", cxxopts::value<bool>()->default_value("true"))
         ("output-format", "Output format: auto, png, jpg, bmp, tiff, dng", cxxopts::value<std::string>()->default_value("auto"))
         ("backend", "Compute backend: cpu, vulkan (vulkan requires a GPU)", cxxopts::value<std::string>()->default_value("cpu"))
         ("gpu-device,gpu", "Select GPU by index (use --list-gpus to see available, -1 = auto)", cxxopts::value<int>()->default_value("-1"))
@@ -275,6 +314,62 @@ int main(int argc, char* argv[]) {
     settings.smooth_tile_field = args["smooth-tile-field"].as<bool>();
     settings.highlight_recovery = args["highlight-recovery"].as<bool>();
     settings.hot_pixel_repair = args["hot-pixel-repair"].as<bool>();
+    if (!ParsePreprocessInterpolation(args["interpolate-before-processing"].as<std::string>(),
+                                      settings.preprocess_interpolation)) {
+        std::cerr << "Invalid pre-processing interpolation (use off, nearest, bilinear, or malvar)" << std::endl;
+        return 2;
+    }
+    settings.super_resolution = args["super-resolution"].as<bool>()
+        ? burstmerge::SuperResolutionMode::TwoX
+        : burstmerge::SuperResolutionMode::Off;
+if (!ParseSuperResolutionInterpolation(args["super-resolution-interpolation"].as<std::string>(),
+                                            settings.super_resolution_interpolation)) {
+        std::cerr << "Invalid super-resolution interpolation (use bilinear or bicubic)" << std::endl;
+        return 2;
+    }
+    if (settings.super_resolution == burstmerge::SuperResolutionMode::TwoX &&
+        settings.preprocess_interpolation == burstmerge::PreprocessInterpolation::Off) {
+        std::cerr << "2x super-resolution requires --interpolate-before-processing "
+                     "to be enabled (refusing to upscale a Bayer mosaic below the "
+                     "input frame's detail)." << std::endl;
+        return 2;
+    }
+    settings.super_resolution_subpixel_align = args["super-resolution-subpixel-align"].as<bool>();
+    {
+        const std::string sra = Lower(args["super-resolution-align"].as<std::string>());
+        if (sra == "sad" || sra == "parabola")
+        {
+            settings.super_resolution_align_frequency = false;
+        }
+        else if (sra == "freq" || sra == "frequency")
+        {
+            settings.super_resolution_align_frequency = true;
+        }
+        else
+        {
+            std::cerr << "Invalid super-resolution alignment method (use freq or sad)" << std::endl;
+            return 2;
+        }
+    }
+    settings.super_resolution_tile_size = args["super-resolution-tile-size"].as<int>();
+    settings.super_resolution_fourier_grid = args["super-resolution-fourier-grid"].as<int>();
+    settings.super_resolution_kernel = args["super-resolution-kernel"].as<bool>();
+    if (settings.super_resolution == burstmerge::SuperResolutionMode::TwoX)
+    {
+        if (settings.super_resolution_subpixel_align)
+        {
+            std::cerr << "Warning: super-resolution overrides --alignment with its "
+                         "dedicated "
+                      << (settings.super_resolution_align_frequency ? "frequency" : "SAD-parabola")
+                      << " sub-pixel alignment stage." << std::endl;
+        }
+        if (settings.alignment_mode == burstmerge::AlignmentMode::Skip)
+        {
+            std::cerr << "Warning: super-resolution is active but --alignment is "
+                         "skip; no motion will be recovered (output degenerates to "
+                         "an upscale)." << std::endl;
+        }
+    }
     settings.gpu_device_index = args["gpu-device"].as<int>();
     if (!ParseOutputFormat(args["output-format"].as<std::string>(), settings.output_format)) {
         std::cerr << "Invalid output format (use auto, png, jpg, bmp, tiff, or dng)" << std::endl;
@@ -292,6 +387,12 @@ int main(int argc, char* argv[]) {
     std::cout << "Smooth tile field: " << (settings.smooth_tile_field ? "on" : "off") << std::endl;
     std::cout << "Highlight recovery: " << (settings.highlight_recovery ? "on" : "off") << std::endl;
     std::cout << "Hot pixel repair: " << (settings.hot_pixel_repair ? "on" : "off") << std::endl;
+    std::cout << "Interpolate before processing: "
+              << PreprocessInterpolationName(settings.preprocess_interpolation) << std::endl;
+    std::cout << "2x super-resolution: "
+              << (settings.super_resolution == burstmerge::SuperResolutionMode::TwoX
+                  ? SuperResolutionInterpolationName(settings.super_resolution_interpolation)
+                  : "off") << std::endl;
     std::cout << "Bit depth: " << settings.bit_depth << std::endl;
     std::cout << "Output format: ";
     switch (settings.output_format) {

@@ -84,6 +84,30 @@ void BM_SetExposureStops(BM_Context ctx, float stops)
     }
 }
 
+void BM_SetPreprocessInterpolation(BM_Context ctx, int method)
+{
+    if (!ctx || method < BM_INTERPOLATE_OFF || method > BM_INTERPOLATE_MALVAR)
+        return;
+    static_cast<CContext*>(ctx)->settings.preprocess_interpolation =
+        static_cast<burstmerge::PreprocessInterpolation>(method);
+}
+
+void BM_SetSuperResolution(BM_Context ctx, int mode)
+{
+    if (!ctx || (mode != BM_SUPER_RESOLUTION_OFF && mode != BM_SUPER_RESOLUTION_2X))
+        return;
+    static_cast<CContext*>(ctx)->settings.super_resolution =
+        static_cast<burstmerge::SuperResolutionMode>(mode);
+}
+
+void BM_SetSuperResolutionInterpolation(BM_Context ctx, int method)
+{
+    if (!ctx || method < BM_SR_INTERPOLATION_BILINEAR || method > BM_SR_INTERPOLATION_BICUBIC)
+        return;
+    static_cast<CContext*>(ctx)->settings.super_resolution_interpolation =
+        static_cast<burstmerge::SuperResolutionInterpolation>(method);
+}
+
 void BM_SetProgressCallback(BM_Context ctx, BM_ProgressCb cb, void* user)
 {
     if (ctx)

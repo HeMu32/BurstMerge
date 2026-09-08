@@ -3,6 +3,8 @@ set(BURSTMERGE_CORE_SOURCES
     src/api.cpp
     src/api_c.cpp
     src/core/float_image.cpp
+    src/core/demosaic.cpp
+    src/core/super_resolution.cpp
     src/core/profiler.cpp
     src/core/fft_util.cpp
     src/core/pipeline.cpp
@@ -19,11 +21,13 @@ set(BURSTMERGE_CORE_SOURCES
     src/align/align_dense.cpp
     src/align/align_warp.cpp
     src/align/freq_align.cpp
+    src/align/align_subpixel.cpp
     src/merge/spatial.cpp
     src/merge/frequency.cpp
     src/denoise/temporal.cpp
     src/exposure/exposure.cpp
     src/io/dng_sdk_bridge.cpp
+    src/io/dng_sdk_bridge_resize.cpp
     src/io/dng_reader.cpp
     src/io/dng_writer.cpp
     src/io/image_decoder.cpp
@@ -40,7 +44,6 @@ if(BURSTMERGE_BUILD_RAW_RESIZE_CLI OR BURSTMERGE_BUILD_RAW_RESIZE_GUI)
         src/core/dither.cpp
         src/core/image_resize.cpp
         src/core/chroma_effects.cpp
-        src/io/dng_sdk_bridge_resize.cpp
     )
 endif()
 

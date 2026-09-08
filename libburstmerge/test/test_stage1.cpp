@@ -473,6 +473,113 @@ void TestLinearRawBayerRejection()
     CHECK(!FileExists(out), "linear+bayer produces no output file");
 }
 
+void TestLinearRawSuperResolutionRejection()
+{
+    std::cout << "[test] LinearRaw + super-resolution rejection..." << std::endl;
+    const std::string lin = LinearRawSamplePath();
+    if (!FileExists(lin))
+    {
+        std::cout << "  SKIP: LinearRaw sample not found: " << lin << std::endl;
+        return;
+    }
+
+    fs::path out_dir = fs::path(TEST_BINARY_DIR) / "stage1_outputs";
+    fs::create_directories(out_dir);
+    std::string out = (out_dir / "linear_superres_reject_should_not_exist.dng").string();
+    std::remove(out.c_str());
+
+    burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+    burstmerge::Settings settings;
+    settings.super_resolution = burstmerge::SuperResolutionMode::TwoX;
+    bm.Configure(settings);
+    bm.AddImage(lin);
+    auto result = bm.Process(out);
+    CHECK(!result.success, "LinearRaw super-resolution must be rejected");
+    CHECK(result.error_msg.find("requires Bayer RAW") != std::string::npos,
+          "LinearRaw super-resolution error explains Bayer requirement");
+    CHECK(!FileExists(out), "LinearRaw super-resolution produces no output file");
+}
+
+void TestBayerInterpolationAndSuperResolution(const std::string& input,
+                                              const fs::path& out_dir)
+{
+    if (!FileExists(input)) return;
+    burstmerge::DngReader source_reader(input.c_str());
+    auto source = source_reader.Read();
+    const uint32_t width = source.metadata.width;
+    const uint32_t height = source.metadata.height;
+
+    {
+        std::string out = (out_dir / "bayer_interpolated_linear_output.dng").string();
+        std::remove(out.c_str());
+        burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+        burstmerge::Settings settings;
+        settings.preprocess_interpolation = burstmerge::PreprocessInterpolation::MalvarHeCutler;
+        settings.alignment_mode = burstmerge::AlignmentMode::Skip;
+        bm.Configure(settings);
+        bm.AddImage(input);
+        auto result = bm.Process(out);
+        CHECK(result.success, "Bayer interpolation process succeeds (err=" + result.error_msg + ")");
+        if (FileExists(out))
+        {
+            burstmerge::DngReader reader(out.c_str());
+            auto image = reader.Read();
+            CHECK(image.metadata.width == width && image.metadata.height == height,
+                  "Bayer interpolation preserves full sensor dimensions");
+            CHECK(image.metadata.mosaic_pattern_width == 0,
+                  "Bayer interpolation output is LinearRaw");
+            CHECK(image.pixels.format == burstmerge::PixelFormat::R16_Uint_RGB,
+                  "Bayer interpolation output has three RGB planes");
+            CHECK(image.metadata.black_level[0] == source.metadata.black_level[0] &&
+                  image.metadata.black_level[1] == source.metadata.black_level[1] &&
+                  image.metadata.black_level[2] == source.metadata.black_level[2] &&
+                  image.metadata.black_level[3] == source.metadata.black_level[3],
+                  "Bayer interpolation preserves source black level");
+        }
+    }
+
+    {
+        std::string out = (out_dir / "bayer_super_resolution_reject_no_interp.dng").string();
+        std::remove(out.c_str());
+        burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+        burstmerge::Settings settings;
+        settings.super_resolution = burstmerge::SuperResolutionMode::TwoX;
+        settings.alignment_mode = burstmerge::AlignmentMode::Skip;
+        bm.Configure(settings);
+        bm.AddImage(input);
+        auto result = bm.Process(out);
+        CHECK(!result.success, "Bayer 2x super-resolution without interpolation must be rejected");
+        bool explains_interp = result.error_msg.find("interpolat") != std::string::npos;
+        CHECK(explains_interp, "Bayer 2x super-resolution rejection explains interpolation requirement");
+        CHECK(!FileExists(out), "Bayer 2x super-resolution rejection produces no output file");
+    }
+
+    {
+        std::string out = (out_dir / "bayer_super_resolution_output.dng").string();
+        std::remove(out.c_str());
+        burstmerge::BurstMerge bm(burstmerge::BackendType::CPU);
+        burstmerge::Settings settings;
+        settings.super_resolution = burstmerge::SuperResolutionMode::TwoX;
+        settings.preprocess_interpolation = burstmerge::PreprocessInterpolation::MalvarHeCutler;
+        settings.alignment_mode = burstmerge::AlignmentMode::Skip;
+        bm.Configure(settings);
+        bm.AddImage(input);
+        auto result = bm.Process(out);
+        CHECK(result.success, "Bayer interpolation + 2x super-resolution process succeeds (err=" + result.error_msg + ")");
+        if (FileExists(out))
+        {
+            burstmerge::DngReader reader(out.c_str());
+            auto image = reader.Read();
+            CHECK(image.metadata.width == width * 2 && image.metadata.height == height * 2,
+                  "Bayer interpolation + 2x super-resolution doubles DNG dimensions");
+            CHECK(image.metadata.mosaic_pattern_width == 0,
+                  "Bayer interpolation + 2x super-resolution output is LinearRaw");
+            CHECK(image.pixels.format == burstmerge::PixelFormat::R16_Uint_RGB,
+                  "Bayer interpolation + 2x super-resolution output has three RGB planes");
+        }
+    }
+}
+
 int main()
 {
     fs::path root(TEST_DATA_DIR);
@@ -502,6 +609,8 @@ int main()
     // needed (sample is already a DNG).
     TestLinearRawPipeline();
     TestLinearRawBayerRejection();
+    TestLinearRawSuperResolutionRejection();
+    TestBayerInterpolationAndSuperResolution(dng_path, out_dir);
 
     if (ConverterAvailable())
     {

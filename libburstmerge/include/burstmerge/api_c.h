@@ -28,6 +28,17 @@ extern "C"
 #define BM_EXPOSURE_LINEAR 1
 #define BM_EXPOSURE_CURVE 2
 
+#define BM_INTERPOLATE_OFF     0
+#define BM_INTERPOLATE_NEAREST 1
+#define BM_INTERPOLATE_BILINEAR 2
+#define BM_INTERPOLATE_MALVAR  3
+
+#define BM_SUPER_RESOLUTION_OFF 0
+#define BM_SUPER_RESOLUTION_2X  1
+
+#define BM_SR_INTERPOLATION_BILINEAR 0
+#define BM_SR_INTERPOLATION_BICUBIC  1
+
 typedef void* BM_Context;
 typedef void (*BM_ProgressCb)(float percent, const char* stage, void* user);
 
@@ -40,6 +51,9 @@ BM_API void        BM_SetNoiseReduction(BM_Context ctx, float strength);
 BM_API void        BM_SetExposureMode(BM_Context ctx, int mode);
 BM_API void        BM_SetMergeAlgorithm(BM_Context ctx, int algo);
 BM_API void        BM_SetExposureStops(BM_Context ctx, float stops);
+BM_API void        BM_SetPreprocessInterpolation(BM_Context ctx, int method);
+BM_API void        BM_SetSuperResolution(BM_Context ctx, int mode);
+BM_API void        BM_SetSuperResolutionInterpolation(BM_Context ctx, int method);
 BM_API void        BM_SetProgressCallback(BM_Context ctx, BM_ProgressCb cb, void* user);
 BM_API int         BM_Process(BM_Context ctx, const char* out_dir);
 BM_API const char* BM_GetLastError(BM_Context ctx);

@@ -1,0 +1,98 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+layout(binding = 0) readonly buffer Ref { float refp[]; };
+layout(binding = 1) readonly buffer Cmp { float cmpp[]; };
+layout(binding = 2) buffer Scores { float scores[]; };
+
+layout(local_size_x = 256) in;
+
+shared float partial[256];
+shared uint counts[256];
+
+float sampleChannel(float x, float y, int channel)
+{
+    x = clamp(x, 0.0, float(pc.w - 1));
+    y = clamp(y, 0.0, float(pc.h - 1));
+    int x0 = int(floor(x));
+    int y0 = int(floor(y));
+    int x1 = min(x0 + 1, pc.w - 1);
+    int y1 = min(y0 + 1, pc.h - 1);
+    float tx = x - float(x0);
+    float ty = y - float(y0);
+    float a = cmpp[(y0 * pc.w + x0) * pc.channels + channel];
+    float b = cmpp[(y0 * pc.w + x1) * pc.channels + channel];
+    float c = cmpp[(y1 * pc.w + x0) * pc.channels + channel];
+    float d = cmpp[(y1 * pc.w + x1) * pc.channels + channel];
+    return mix(mix(a, b, tx), mix(c, d, tx), ty);
+}
+
+float referenceGray(int x, int y)
+{
+    int base = (y * pc.w + x) * pc.channels;
+    float sum = 0.0;
+    for (int channel = 0; channel < pc.channels; ++channel) sum += refp[base + channel];
+    return sum / float(pc.channels);
+}
+
+float sampleGray(float x, float y)
+{
+    float sum = 0.0;
+    for (int channel = 0; channel < pc.channels; ++channel)
+        sum += sampleChannel(x, y, channel);
+    return sum / float(pc.channels);
+}
+
+void main()
+{
+    int candidateCount = pc.i3 * pc.i3;
+    int candidate = int(gl_WorkGroupID.x);
+    int tileIndex = int(gl_WorkGroupID.y);
+    int tx = tileIndex % pc.i2;
+    int ty = tileIndex / pc.i2;
+
+    int center = candidateCount / 2;
+    int linear = candidate == 0 ? center : (candidate <= center ? candidate - 1 : candidate);
+    int xi = linear % pc.i3;
+    int yi = linear / pc.i3;
+    float dx = -pc.f0 + float(xi) * pc.f1;
+    float dy = -pc.f0 + float(yi) * pc.f1;
+
+    int x0 = tx * pc.i0;
+    int y0 = ty * pc.i0;
+    int x1 = min(pc.w, x0 + pc.i0);
+    int y1 = min(pc.h, y0 + pc.i0);
+    int gridWidth = (x1 - x0 + pc.i1 - 1) / pc.i1;
+    int gridHeight = (y1 - y0 + pc.i1 - 1) / pc.i1;
+    int gridCount = gridWidth * gridHeight;
+
+    float error = 0.0;
+    uint count = 0;
+    for (int work = int(gl_LocalInvocationID.x); work < gridCount; work += 256)
+    {
+        int x = x0 + (work % gridWidth) * pc.i1;
+        int y = y0 + (work / gridWidth) * pc.i1;
+        error += abs(referenceGray(x, y) - sampleGray(float(x) + dx, float(y) + dy));
+        ++count;
+    }
+
+    uint local = gl_LocalInvocationID.x;
+    partial[local] = error;
+    counts[local] = count;
+    barrier();
+    for (uint span = 128; span > 0; span >>= 1)
+    {
+        if (local < span)
+        {
+            partial[local] += partial[local + span];
+            counts[local] += counts[local + span];
+        }
+        barrier();
+    }
+    if (local == 0)
+    {
+        scores[tileIndex * candidateCount + candidate] = counts[0] > 0
+            ? partial[0] / float(counts[0]) : 3.402823466e38;
+    }
+}

@@ -91,10 +91,13 @@ if(BURSTMERGE_BUILD_MAIN_GUI OR
             "${BURSTMERGE_WXWIDGETS_SOURCE_DIR}"
             "${CMAKE_BINARY_DIR}/wx_build"
         )
-        if(MINGW AND TARGET wxcore)
-            target_compile_definitions(wxcore PRIVATE wxHACK_BOOLEAN=int)
+        if(MINGW)
+            foreach(_wx_target IN LISTS BURSTMERGE_WXWIDGETS_TARGETS)
+                if(TARGET ${_wx_target})
+                    target_compile_definitions(${_wx_target} PRIVATE wxHACK_BOOLEAN=int)
+                endif()
+            endforeach()
         endif()
-
         if((BURSTMERGE_BUILD_MAIN_GUI OR BURSTMERGE_BUILD_GUI_THUMBNAIL_DIAGNOSTICS) AND
            EXISTS "${CMAKE_SOURCE_DIR}/apps/gui/CMakeLists.txt")
             add_subdirectory(apps/gui)

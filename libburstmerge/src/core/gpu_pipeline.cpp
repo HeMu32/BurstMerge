@@ -2,6 +2,7 @@
 
 #include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/compute/vulkan_backend.h"
+#include "burstmerge/internal/core/super_resolution.h"
 #include "burstmerge/internal/core/pipeline.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/profiler.h"
@@ -485,6 +486,103 @@ uint64_t FrequencyMergeGPU(VulkanBackend& vk, uint64_t ref_plane,
     return merged_out;
 }
 
+uint64_t SuperResolve2xGPU(VulkanBackend& vk,
+                           uint64_t ref_plane,
+                           const std::vector<uint64_t>& aligned,
+                           const std::vector<float>& comp_scale,
+                           SuperResolutionInterpolation interpolation,
+                           int pw,
+                           int ph,
+                           int ch,
+                           float clip_threshold)
+{
+    const int out_w = pw * 2;
+    const int out_h = ph * 2;
+    uint64_t acc = vk.CreateBuffer(size_t(out_w) * out_h * ch);
+    uint64_t wsum = vk.CreateBuffer(size_t(out_w) * out_h);
+    const int residual_tile = int(SuperResolutionConstants::kResidualTileSize);
+    const int residual_tiles_x = (pw + residual_tile - 1) / residual_tile;
+    const int residual_tiles_y = (ph + residual_tile - 1) / residual_tile;
+    const int residual_tile_count = residual_tiles_x * residual_tiles_y;
+    const int residual_side = static_cast<int>(
+        2.0f * SuperResolutionConstants::kResidualSearchRadius /
+        SuperResolutionConstants::kResidualSearchStep + 0.5f) + 1;
+    const int residual_candidates = residual_side * residual_side;
+    uint64_t residual_scores = vk.CreateBuffer(size_t(residual_tile_count) * residual_candidates);
+    uint64_t residual = vk.CreateBuffer(size_t(residual_tile_count) * 2);
+    const int method = interpolation == SuperResolutionInterpolation::Bicubic ? 1 : 0;
+
+    vk.BeginFrame();
+    auto dispatch = [&](uint64_t source, uint64_t residual_handle,
+                        bool initialize, float scale)
+    {
+        ShaderPC pc{};
+        pc.w = pw;
+        pc.h = ph;
+        pc.channels = ch;
+        pc.w2 = out_w;
+        pc.h2 = out_h;
+        pc.i0 = method;
+        pc.i1 = initialize ? 0 : 1;
+        pc.i2 = residual_tiles_x;
+        pc.i3 = residual_tiles_y;
+        pc.i4 = initialize ? 0 : 1;
+        pc.i5 = residual_tile;
+pc.f0 = SuperResolutionConstants::kDirectSampleWeight;
+        pc.f1 = SuperResolutionConstants::kInterpolatedSampleWeight;
+        pc.f2 = scale;
+        pc.f3 = initialize ? 0.0f : clip_threshold;
+        pc.f4 = SuperResolutionConstants::kExactSampleEpsilon;
+        pc.f5 = SuperResolutionConstants::kSampleWeightFalloff;
+        Binding b[4] = {{0, source, 0}, {1, acc, 0}, {2, wsum, 0},
+                        {3, residual_handle, 0}};
+        vk.Dispatch("superres_acc", pc, (out_w + 7) / 8, (out_h + 7) / 8, 1, b, 4);
+    };
+
+    dispatch(ref_plane, ref_plane, true, 1.0f);
+    for (size_t i = 0; i < aligned.size(); ++i)
+    {
+        ShaderPC score_pc{};
+        score_pc.w = pw;
+        score_pc.h = ph;
+        score_pc.channels = ch;
+        score_pc.i0 = residual_tile;
+        score_pc.i1 = int(SuperResolutionConstants::kResidualSampleStride);
+        score_pc.i2 = residual_tiles_x;
+        score_pc.i3 = residual_side;
+        score_pc.f0 = SuperResolutionConstants::kResidualSearchRadius;
+        score_pc.f1 = SuperResolutionConstants::kResidualSearchStep;
+        Binding score_bindings[3] = {{0, ref_plane, 0}, {1, aligned[i], 0},
+                                     {2, residual_scores, 0}};
+        vk.Dispatch("superres_residual_score", score_pc,
+                    residual_candidates, residual_tile_count, 1, score_bindings, 3);
+
+        ShaderPC select_pc{};
+        select_pc.i0 = residual_side;
+        select_pc.f0 = SuperResolutionConstants::kResidualSearchRadius;
+        select_pc.f1 = SuperResolutionConstants::kResidualSearchStep;
+        Binding select_bindings[2] = {{0, residual_scores, 0}, {1, residual, 0}};
+        vk.Dispatch("superres_residual_select", select_pc,
+                    residual_tile_count, 1, 1, select_bindings, 2);
+
+        const float scale = i < comp_scale.size() && comp_scale[i] > 0.0f
+            ? comp_scale[i] : 1.0f;
+        dispatch(aligned[i], residual, false, scale);
+    }
+    ShaderPC normalize_pc{};
+    normalize_pc.w = out_w;
+    normalize_pc.h = out_h;
+    normalize_pc.channels = ch;
+    Binding normalize_bindings[2] = {{0, acc, 0}, {1, wsum, 0}};
+    vk.Dispatch("normalize_div", normalize_pc, (out_w + 7) / 8, (out_h + 7) / 8, 1,
+                normalize_bindings, 2);
+    vk.FlushFrame();
+    vk.DestroyBuffer(wsum);
+    vk.DestroyBuffer(residual_scores);
+    vk.DestroyBuffer(residual);
+    return acc;
+}
+
 // DenseTile alignment on GPU: coarse-to-fine per-level (propagate/correct/search),
 // mirroring CPU EstimateDenseTileField. Writes the FINEST-level tile field into
 // out_tsx/out_tsy. Buffers must be sized for the finest dense tile count.
@@ -687,6 +785,51 @@ AlignmentResult GpuEstimateTranslation(const FloatImage& ref_gray,
     vk.DestroyBuffer(align_state); vk.DestroyBuffer(global_shift);
     vk.DestroyBuffer(cand_global); vk.DestroyBuffer(tsx); vk.DestroyBuffer(tsy);
     return out;
+}
+
+FloatImage GpuSuperResolve2x(const FloatImage& reference,
+                             const std::vector<FloatImage>& comparisons,
+                             const std::vector<float>& exposure_scales,
+                             SuperResolutionInterpolation interpolation,
+                             float clip_threshold,
+                             int gpu_device_index)
+{
+    if (reference.width == 0 || reference.height == 0 || reference.channels == 0 ||
+        reference.channels > 4)
+        throw std::runtime_error("GPU super-resolution received an unsupported reference image");
+    for (const FloatImage& comparison : comparisons)
+    {
+        if (comparison.width != reference.width || comparison.height != reference.height ||
+            comparison.channels != reference.channels)
+            throw std::runtime_error("GPU super-resolution frame dimensions or channels differ");
+    }
+
+    VulkanBackend vk;
+    if (!vk.Initialize(gpu_device_index))
+        throw std::runtime_error("Vulkan init failed: " + vk.LastError());
+    uint64_t ref = vk.CreateBufferFromFloats(reference.data.data(),
+                                              static_cast<uint32_t>(reference.data.size()));
+    std::vector<uint64_t> comparison_buffers;
+    comparison_buffers.reserve(comparisons.size());
+    for (const FloatImage& comparison : comparisons)
+    {
+        comparison_buffers.push_back(vk.CreateBufferFromFloats(
+            comparison.data.data(), static_cast<uint32_t>(comparison.data.size())));
+    }
+    uint64_t result = SuperResolve2xGPU(vk, ref, comparison_buffers, exposure_scales,
+                                        interpolation, static_cast<int>(reference.width),
+                                        static_cast<int>(reference.height),
+                                        static_cast<int>(reference.channels), clip_threshold);
+    FloatImage output;
+    output.width = reference.width * 2;
+    output.height = reference.height * 2;
+    output.channels = reference.channels;
+    output.data.resize(static_cast<size_t>(output.width) * output.height * output.channels);
+    vk.DownloadFloats(result, output.data.data(), static_cast<uint32_t>(output.data.size()));
+    vk.DestroyBuffer(result);
+    vk.DestroyBuffer(ref);
+    for (uint64_t handle : comparison_buffers) vk.DestroyBuffer(handle);
+    return output;
 }
 
 
@@ -985,8 +1128,19 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
     // ---- merge (shared) ----
     Report(progress, PipelineConstants::kProgressMerge, "GPU: merging");
     uint64_t merged = 0;
+    const bool super_resolution = settings.super_resolution == SuperResolutionMode::TwoX;
     { ProfileScope _ps("time.gpu.merge");
-    if (settings.merge_algo == MergeAlgorithm::TemporalAverage)
+    if (super_resolution)
+    {
+        const float white = static_cast<float>(raw_meta[ref_idx].metadata.white_level);
+        const float clip = (white > mean_bl[ref_idx] + 1.0f)
+            ? (white - mean_bl[ref_idx]) * PipelineConstants::kClipFactor : 0.0f;
+        merged = SuperResolve2xGPU(vk, plane[ref_idx], aligned, comp_scale,
+                                   settings.super_resolution_interpolation,
+                                   pw, ph, ch, clip);
+        for (uint64_t handle : aligned) vk.DestroyBuffer(handle);
+    }
+    else if (settings.merge_algo == MergeAlgorithm::TemporalAverage)
     {
         merged = vk.CreateBuffer(size_t(pw) * ph * ch);
         uint64_t wsum = vk.CreateBuffer(size_t(pw) * ph * ch);
@@ -1105,10 +1259,10 @@ static FloatImage GpuPipelineCore(VulkanBackend& vk,
     // ---- download (shared) ----
     FloatImage out;
     { ProfileScope _ps("time.gpu.download");
-    out.width = uint32_t(pw);
-    out.height = uint32_t(ph);
+    out.width = uint32_t(super_resolution ? pw * 2 : pw);
+    out.height = uint32_t(super_resolution ? ph * 2 : ph);
     out.channels = uint32_t(ch);
-    out.data.resize(size_t(pw) * ph * ch);
+    out.data.resize(static_cast<size_t>(out.width) * out.height * out.channels);
     vk.DownloadFloats(merged, out.data.data(), uint32_t(out.data.size()));
     vk.DestroyBuffer(merged);
     } // download
@@ -1131,8 +1285,9 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
     const uint32_t H = images[0].pixels.height;
     const uint32_t period = std::max<uint32_t>(1, images[ref_idx].metadata.mosaic_pattern_width);
     const uint32_t ch = period * period;
-    const int pw = int((W + period - 1) / period);
-    const int ph = int((H + period - 1) / period);
+    int pw = int((W + period - 1) / period);
+    int ph = int((H + period - 1) / period);
+    int processing_ch = int(ch);
     const size_t N = images.size();
 
     std::vector<size_t> comp_orig;
@@ -1264,7 +1419,42 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
             vk.Dispatch("highlight_recovery", pc, (pw + 7) / 8, (ph + 7) / 8, 1, b, 1);
         }
     }
+    std::vector<uint64_t> bayer_planes;
+    if (settings.preprocess_interpolation != PreprocessInterpolation::Off)
+    {
+        if (period != 2 || ch != 4)
+            throw std::runtime_error("GPU pre-processing interpolation requires 2x2 Bayer input");
+        Report(progress, PipelineConstants::kProgressNormalize,
+               "GPU: interpolating Bayer frames to full-resolution RGB");
+        bayer_planes = plane;
+        for (size_t i = 0; i < N; ++i)
+        {
+            plane[i] = vk.CreateBuffer(size_t(W) * H * 3);
+            ShaderPC pc{};
+            pc.w = int(W); pc.h = int(H); pc.channels = 3;
+            pc.w2 = pw; pc.h2 = ph; pc.channels2 = 4;
+            pc.i0 = int(images[i].metadata.mosaic_pattern[0]);
+            pc.i1 = int(images[i].metadata.mosaic_pattern[1]);
+            pc.i2 = int(images[i].metadata.mosaic_pattern[2]);
+            pc.i3 = int(images[i].metadata.mosaic_pattern[3]);
+            pc.i4 = int(settings.preprocess_interpolation);
+            pc.f0 = ((images[i].metadata.black_level[0] > 0.0f
+                ? images[i].metadata.black_level[0] : mean_bl[i]) - mean_bl[i]) * ev_scale[i];
+            pc.f1 = ((images[i].metadata.black_level[1] > 0.0f
+                ? images[i].metadata.black_level[1] : mean_bl[i]) - mean_bl[i]) * ev_scale[i];
+            pc.f2 = ((images[i].metadata.black_level[2] > 0.0f
+                ? images[i].metadata.black_level[2] : mean_bl[i]) - mean_bl[i]) * ev_scale[i];
+            pc.f3 = ((images[i].metadata.black_level[3] > 0.0f
+                ? images[i].metadata.black_level[3] : mean_bl[i]) - mean_bl[i]) * ev_scale[i];
+            Binding b[2] = {{0, bayer_planes[i], 0}, {1, plane[i], 0}};
+            vk.Dispatch("demosaic_bayer", pc, (W + 7) / 8, (H + 7) / 8, 1, b, 2);
+        }
+        pw = int(W);
+        ph = int(H);
+        processing_ch = 3;
+    }
     vk.FlushFrame();
+    for (auto p : bayer_planes) vk.DestroyBuffer(p);
     for (auto r : rawbufs) vk.DestroyBuffer(r);
     }
 
@@ -1283,7 +1473,7 @@ FloatImage GpuRunBurstPipeline(std::vector<RawImage>& images,
         images[i].metadata = RawMetadata{};
     }
 
-    return GpuPipelineCore(vk, plane, images, ref_idx, pw, ph, int(ch),
+    return GpuPipelineCore(vk, plane, images, ref_idx, pw, ph, processing_ch,
                            settings, progress, mean_bl, comp_orig, comp_scale, exposure);
 }
 

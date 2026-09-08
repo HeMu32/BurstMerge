@@ -124,6 +124,7 @@ private:
     wxPanel* CreateMergePage(wxWindow* parent);
     wxPanel* CreateAlignPage(wxWindow* parent);
     wxPanel* CreateExposurePage(wxWindow* parent);
+    wxPanel* CreateSuperResPage(wxWindow* parent);
     wxPanel* CreateCleanupPage(wxWindow* parent);
     void SetPageSizer(wxPanel* panel, wxSizer* contents);
     wxFlexGridSizer* MakeGrid();
@@ -144,6 +145,13 @@ private:
     wxSpinCtrl* tile_size_ = nullptr;
     wxChoice* bit_depth_ = nullptr;
     wxChoice* output_format_ = nullptr;
+    wxChoice* preprocess_interpolation_ = nullptr;
+wxCheckBox* super_resolution_ = nullptr;
+    wxChoice* super_resolution_interpolation_ = nullptr;
+    wxCheckBox* super_resolution_subpixel_align_ = nullptr;
+    wxChoice* super_resolution_align_ = nullptr;
+    wxSpinCtrl* super_resolution_tile_size_ = nullptr;
+    wxSpinCtrl* super_resolution_fourier_grid_ = nullptr;
     wxChoice* file_naming_ = nullptr;
     wxTextCtrl* output_dir_ = nullptr;
     wxTextCtrl* dng_convert_dir_ = nullptr;

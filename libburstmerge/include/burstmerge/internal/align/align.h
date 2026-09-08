@@ -81,6 +81,17 @@ struct AlignmentResult
     uint32_t tiles_y = 0;
     std::vector<int16_t> tile_shift_x;
     std::vector<int16_t> tile_shift_y;
+    // Optional fractional (sub-pixel) per-tile shifts, produced by the
+    // super-resolution-dedicated sub-pixel aligners (align_subpixel.cpp).
+    // Parallel to tile_shift_x/y. When non-empty, consumers (e.g. the SR
+    // reconstruction's SampleBaseShift) use these continuous values instead of
+    // the integer fields. Empty => integer-only behaviour (old path).
+    std::vector<float> tile_shift_x_sub;
+    std::vector<float> tile_shift_y_sub;
+    // Fractional global shift (absolute, i.e. includes the integer base).
+    // Meaningful only when tile_shift_x_sub is non-empty.
+    float shift_x_sub = 0.0f;
+    float shift_y_sub = 0.0f;
 };
 
 AlignmentResult EstimateTranslation(const FloatImage& reference,

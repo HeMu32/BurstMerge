@@ -1,0 +1,40 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+layout(binding = 0) readonly buffer Scores { float scores[]; };
+layout(binding = 1) buffer Residual { float residual[]; };
+
+layout(local_size_x = 32) in;
+
+shared float values[32];
+shared int indices[32];
+
+void main()
+{
+    int tile = int(gl_WorkGroupID.x);
+    int candidateCount = pc.i0 * pc.i0;
+    int local = int(gl_LocalInvocationID.x);
+    values[local] = local < candidateCount
+        ? scores[tile * candidateCount + local] : 3.402823466e38;
+    indices[local] = local;
+    barrier();
+    for (int span = 16; span > 0; span >>= 1)
+    {
+        if (local < span && (values[local + span] < values[local] ||
+            (values[local + span] == values[local] && indices[local + span] < indices[local])))
+        {
+            values[local] = values[local + span];
+            indices[local] = indices[local + span];
+        }
+        barrier();
+    }
+    if (local == 0)
+    {
+        int candidate = indices[0];
+        int center = candidateCount / 2;
+        int linear = candidate == 0 ? center : (candidate <= center ? candidate - 1 : candidate);
+        residual[tile * 2] = -pc.f0 + float(linear % pc.i0) * pc.f1;
+        residual[tile * 2 + 1] = -pc.f0 + float(linear / pc.i0) * pc.f1;
+    }
+}

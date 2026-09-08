@@ -44,3 +44,5 @@ ImageMetadata::tags: Д╩▌Ф°╙Х╒╚Е├≥Е┘╔
   - CPU/GPU Д╦─Х┤╢Ф─╖: Г╜┴Ф⌡²Е┘┴ MAD 0.016 (rel 0.001%); Е▄┘Е⌡╢Ф⌡²Е┘┴ MAD 0.044 (rel 0.004%),
     Д╫├Г║╛Хё│Е┬┤И≈╗Е°╗И╚≤Е┘┴Х╬╧Г∙▄Е╓└ CPU/GPU warp Е╬╝Е╥╝Е▐╞Е╞╪Х┤╢Д╨▄Е─╪Г©╩Х╫╛ (Bkt1 2% Е┐▐Г╢═Е╥╝Е╪┌, И⌡├Д╦╜Е°╗И╚≤Е┘┴Е▄╨Е÷÷).
   - Ф─╖Х┐╫: vs TemporalAverage Б─■ CPU Е©╚ 5-7% (Ф≈═ BoxBlur); GPU Е÷╨Ф°╛Ф▄│Е╧Ё.
+
+ряж╙ flaky: test_dng_io тз╤ах║ JPEG-XL я╧кУ DNG (03_jxl_bayer_raw_integer.dng) й╠т╪ 50% ╦ебй SIGSEGV (jxl::N_AVX2::DecodeGroupImpl). уБйг MinGW + Highway AVX2 ╣дряж╙у╩╤тфКЁЕм╩ (╪Ш AGENTS.md dng_sdk/libjxl MINGW ╥жж╖к╣цВ), сК╠╬╢н SR/╡Еж╣╦д╤╞нч╧ь. жьеэ╪╢©им╗╧Щ.

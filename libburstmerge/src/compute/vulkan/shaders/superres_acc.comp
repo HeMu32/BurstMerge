@@ -1,0 +1,125 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+
+layout(binding = 0) readonly buffer Src { float src[]; };
+layout(binding = 1) buffer Acc { float acc[]; };
+layout(binding = 2) buffer Wsum { float wsum[]; };
+layout(binding = 3) readonly buffer Residual { float residual[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+float cubicWeight(float value)
+{
+    const float a = -0.5;
+    value = abs(value);
+    if (value <= 1.0) return (a + 2.0) * value * value * value - (a + 3.0) * value * value + 1.0;
+    if (value < 2.0) return a * value * value * value - 5.0 * a * value * value + 8.0 * a * value - 4.0 * a;
+    return 0.0;
+}
+
+float sampleBilinear(float x, float y, int channel)
+{
+    x = clamp(x, 0.0, float(pc.w - 1));
+    y = clamp(y, 0.0, float(pc.h - 1));
+    int x0 = int(floor(x));
+    int y0 = int(floor(y));
+    int x1 = min(x0 + 1, pc.w - 1);
+    int y1 = min(y0 + 1, pc.h - 1);
+    float tx = x - float(x0);
+    float ty = y - float(y0);
+    float a = src[(y0 * pc.w + x0) * pc.channels + channel];
+    float b = src[(y0 * pc.w + x1) * pc.channels + channel];
+    float c = src[(y1 * pc.w + x0) * pc.channels + channel];
+    float d = src[(y1 * pc.w + x1) * pc.channels + channel];
+    return mix(mix(a, b, tx), mix(c, d, tx), ty);
+}
+
+float sampleBicubic(float x, float y, int channel)
+{
+    int x0 = int(floor(x));
+    int y0 = int(floor(y));
+    float sum = 0.0;
+    float weightSum = 0.0;
+    for (int j = -1; j <= 2; ++j)
+    {
+        int sy = clampi(y0 + j, 0, pc.h - 1);
+        float wy = cubicWeight(y - float(y0 + j));
+        for (int i = -1; i <= 2; ++i)
+        {
+            int sx = clampi(x0 + i, 0, pc.w - 1);
+            float weight = wy * cubicWeight(x - float(x0 + i));
+            sum += src[(sy * pc.w + sx) * pc.channels + channel] * weight;
+            weightSum += weight;
+        }
+    }
+    return weightSum > 1e-6 ? sum / weightSum : sampleBilinear(x, y, channel);
+}
+
+vec2 sampleResidual(float x, float y)
+{
+    float tile = float(pc.i5);
+    float gx = x / tile - 0.5;
+    float gy = y / tile - 0.5;
+    int x0 = int(floor(gx));
+    int y0 = int(floor(gy));
+    float tx = gx - float(x0);
+    float ty = gy - float(y0);
+    int xs[4] = int[4](x0, x0 + 1, x0, x0 + 1);
+    int ys[4] = int[4](y0, y0, y0 + 1, y0 + 1);
+    float weights[4] = float[4]((1.0 - tx) * (1.0 - ty), tx * (1.0 - ty),
+                                (1.0 - tx) * ty, tx * ty);
+    vec2 value = vec2(0.0);
+    for (int i = 0; i < 4; ++i)
+    {
+        int ix = clampi(xs[i], 0, pc.i2 - 1);
+        int iy = clampi(ys[i], 0, pc.i3 - 1);
+        int index = (iy * pc.i2 + ix) * 2;
+        value += weights[i] * vec2(residual[index], residual[index + 1]);
+    }
+    return value;
+}
+
+void main()
+{
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w2 || y >= pc.h2) return;
+
+    float fx = float(x) * 0.5;
+    float fy = float(y) * 0.5;
+    vec2 shift = pc.i4 != 0 ? sampleResidual(fx, fy) : vec2(0.0);
+    float sx = fx + shift.x;
+    float sy = fy + shift.y;
+    bool direct = abs(sx - round(sx)) <= pc.f4 && abs(sy - round(sy)) <= pc.f4 &&
+                  sx >= 0.0 && sy >= 0.0 && sx < float(pc.w) && sy < float(pc.h);
+    float d = max(abs(sx - round(sx)), abs(sy - round(sy)));
+    float sampleWeight = pc.f0 / (1.0 + pc.f5 * d * d);
+    int sourceX = clampi(int(round(sx)), 0, pc.w - 1);
+    int sourceY = clampi(int(round(sy)), 0, pc.h - 1);
+    int outBase = (y * pc.w2 + x) * pc.channels;
+    float maxValue = 0.0;
+    float values[4];
+    for (int channel = 0; channel < pc.channels; ++channel)
+    {
+        values[channel] = direct
+            ? src[(sourceY * pc.w + sourceX) * pc.channels + channel]
+            : (pc.i0 != 0 ? sampleBicubic(sx, sy, channel) : sampleBilinear(sx, sy, channel));
+        maxValue = max(maxValue, values[channel]);
+    }
+
+    float scale = max(pc.f2, 1e-6);
+    if (pc.i1 == 0)
+    {
+        for (int channel = 0; channel < pc.channels; ++channel)
+            acc[outBase + channel] = values[channel] * sampleWeight;
+        wsum[y * pc.w2 + x] = sampleWeight;
+        return;
+    }
+
+    if (pc.f3 > 0.0 && maxValue / scale >= pc.f3) return;
+    float weight = sampleWeight / scale;
+    for (int channel = 0; channel < pc.channels; ++channel)
+        acc[outBase + channel] += values[channel] * weight;
+    wsum[y * pc.w2 + x] += weight;
+}

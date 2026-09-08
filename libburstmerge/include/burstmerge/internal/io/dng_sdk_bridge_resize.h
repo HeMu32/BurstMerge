@@ -11,6 +11,7 @@ namespace io
 
 void SetDngDimensions(DngNegativeHolder* holder, uint32_t width, uint32_t height);
 void ClearDngOriginalSizes(DngNegativeHolder* holder);
+void ClearDngOpcodes(DngNegativeHolder* holder);
 void ClearDngCameraHints(DngNegativeHolder* holder);
 
 } // namespace io

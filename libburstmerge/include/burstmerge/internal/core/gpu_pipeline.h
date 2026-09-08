@@ -50,6 +50,13 @@ AlignmentResult GpuEstimateTranslation(const FloatImage& ref_gray,
                                        const FloatImage& cmp_gray,
                                        const AlignParams& params);
 
+FloatImage GpuSuperResolve2x(const FloatImage& reference,
+                             const std::vector<FloatImage>& comparisons,
+                             const std::vector<float>& exposure_scales,
+                             SuperResolutionInterpolation interpolation,
+                             float clip_threshold,
+                             int gpu_device_index = -1);
+
 // Whether a Vulkan device is available ( Initialize succeeds ). Used by the
 // orchestrator to fall back gracefully.
 bool GpuVulkanAvailable();

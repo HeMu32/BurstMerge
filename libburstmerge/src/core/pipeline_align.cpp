@@ -3,6 +3,7 @@
 #include "burstmerge/internal/align/align.h"
 #include "burstmerge/internal/align/align_common.h"
 #include "burstmerge/internal/align/align_pyramid.h"
+#include "burstmerge/internal/align/align_subpixel.h"
 #include "burstmerge/internal/core/pipeline_frame.h"
 #include "burstmerge/internal/core/profiler.h"
 #include "burstmerge/internal/core/task_executor.h"
@@ -316,13 +317,30 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
                                                  const Settings& settings,
                                                  uint32_t cfa_period,
                                                  const ExposureClassification& exposure,
-                                                 const PipelineOrchestrator::ProgressFn& progress)
+                                                 const PipelineOrchestrator::ProgressFn& progress,
+                                                 std::vector<AlignmentResult>* fixed_reference_alignments,
+                                                 const std::vector<FloatImage>* subpixel_guides)
 {
     ProfileScope scope("time.pipeline.build_aligned_comparisons");
     // Pipeline-facing adapter around alignment: choose guides, dispatch to the
     // alignment code, and organize chaining for bracketed stacks.
     std::vector<FloatImage> aligned;
     aligned.reserve(float_images.size() > 0 ? float_images.size() - 1 : 0);
+    if (fixed_reference_alignments)
+    {
+        fixed_reference_alignments->clear();
+        fixed_reference_alignments->reserve(float_images.size() > 0 ? float_images.size() - 1 : 0);
+    }
+
+    // Optional raw (Bayer) grayscale guides for the sub-pixel refinement. The
+    // demosaiced RGB grays are smooth, making the SSD parabola unreliable; the
+    // raw mosaic grays carry the actual Bayer samples (sharp edges), giving a
+    // much better-conditioned SSD for the sub-pixel shift estimate. When
+    // provided they replace the demosaiced grays in RefineTileFieldSubpixel.
+    const bool use_raw_guides = subpixel_guides &&
+                                subpixel_guides->size() == float_images.size() &&
+                                (*subpixel_guides)[0].channels == 1 &&
+                                (*subpixel_guides)[0].width == float_images[0].width;
 
     AlignParams params;
     params.tile_size = settings.tile_size;
@@ -332,6 +350,20 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         ? 1u : std::max<uint32_t>(1, cfa_period);
     params.align_gamma = settings.align_gamma;
     params.smooth_tile_field = settings.smooth_tile_field;
+
+    // Super-resolution runs its own dedicated sub-pixel alignment stage that
+    // overrides the global alignment settings (see RefineTileFieldSubpixel).
+    const bool sr_active = (settings.super_resolution == SuperResolutionMode::TwoX);
+    const bool subpixel = sr_active && settings.super_resolution_subpixel_align;
+    const SubpixelMethod subpixel_method = settings.super_resolution_align_frequency
+        ? SubpixelMethod::Frequency : SubpixelMethod::SadParabola;
+    const int subpixel_grid = std::max(1, settings.super_resolution_fourier_grid);
+    if (sr_active)
+    {
+        params.tile_size = settings.super_resolution_tile_size;
+        params.mode = (subpixel && settings.super_resolution_align_frequency)
+            ? AlignmentMode::Frequency : settings.alignment_mode;
+    }
 
     const float wl = static_cast<float>(raw_images[ref_idx].metadata.white_level);
 
@@ -370,9 +402,10 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     auto align_and_warp_pregrays = [&](const FloatImage& gray_ref,
                                        const FloatImage& gray_src,
                                        const FloatImage& source,
-                                       size_t source_idx,
-                                       size_t progress_idx,
-                                       size_t total_count) -> FloatImage
+                                        size_t source_idx,
+                                        size_t progress_idx,
+                                        size_t total_count,
+                                        AlignmentResult* alignment_out) -> FloatImage
     {
         Report(progress,
                PipelineConstants::kProgressAlignStart + PipelineConstants::kProgressAlignRange *
@@ -396,6 +429,15 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         {
             ar = EstimateTranslation(gray_ref, gray_src, params);
         }
+if (subpixel)
+        {
+            const bool raw_ok = use_raw_guides && (&gray_ref == &gray_ref_full) &&
+                                source_idx < subpixel_guides->size();
+            const FloatImage& sp_ref = raw_ok ? (*subpixel_guides)[ref_idx] : gray_ref;
+            const FloatImage& sp_src = raw_ok ? (*subpixel_guides)[source_idx] : gray_src;
+            RefineTileFieldSubpixel(sp_ref, sp_src, ar, subpixel_method, subpixel_grid);
+        }
+        if (alignment_out) *alignment_out = ar;
 
         DumpWarpedGrayBmp(gray_src, ar, float_images.size(), source_idx, AlignmentModeTag(params.mode), false, wl);
 
@@ -423,13 +465,15 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 
     auto align_and_warp = [&](const FloatImage& guide_ref,
                                const FloatImage& source,
-                               size_t source_idx,
-                               size_t progress_idx,
-                               size_t total_count) -> FloatImage
+                                size_t source_idx,
+                                size_t progress_idx,
+                                size_t total_count,
+                                AlignmentResult* alignment_out) -> FloatImage
     {
         FloatImage gr = ConvertToGrayAndGamma(guide_ref, wl, settings.align_gamma);
         FloatImage gs = ConvertToGrayAndGamma(source, wl, settings.align_gamma);
-        return align_and_warp_pregrays(gr, gs, source, source_idx, progress_idx, total_count);
+        return align_and_warp_pregrays(gr, gs, source, source_idx, progress_idx, total_count,
+                                       alignment_out);
     };
 
     // Bracketing decision and the EV-sorted frame order are computed once by
@@ -452,12 +496,21 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
         for (size_t i = 0; i < float_images.size(); ++i)
         {
             if (i == ref_idx) continue;
-            aligned.push_back(align_and_warp_pregrays(gray_ref_full,
-                                                      gray_inputs[i],
-                                                      float_images[i],
-                                                      i,
-                                                      processed,
-                                                      total));
+            AlignmentResult ar;
+            FloatImage comparison = align_and_warp_pregrays(gray_ref_full,
+                                                            gray_inputs[i],
+                                                            float_images[i],
+                                                            i,
+                                                            processed,
+                                                            total,
+                                                            fixed_reference_alignments
+                                                                ? &ar
+                                                                : nullptr);
+            aligned.push_back(std::move(comparison));
+            if (fixed_reference_alignments)
+            {
+                fixed_reference_alignments->push_back(ar);
+            }
             // gray_inputs[i] was only needed for EstimateTranslation above;
             // release it now to reduce peak memory for subsequent frames.
             gray_inputs[i].data.clear();
@@ -502,7 +555,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 #endif
         const FloatImage& parent_ref = has_aligned[parent_idx]
             ? aligned_to_root[parent_idx] : float_images[parent_idx];
-        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);
+        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx,
+                                                  processed, total, nullptr);
         aligned_to_root[child_idx] = std::move(child_aligned);
         has_aligned[child_idx] = 1;
         ++processed;
@@ -519,7 +573,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
 #endif
         const FloatImage& parent_ref = has_aligned[parent_idx]
             ? aligned_to_root[parent_idx] : float_images[parent_idx];
-        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx, processed, total);
+        FloatImage child_aligned = align_and_warp(parent_ref, float_images[child_idx], child_idx,
+                                                  processed, total, nullptr);
         aligned_to_root[child_idx] = std::move(child_aligned);
         has_aligned[child_idx] = 1;
         ++processed;
@@ -529,7 +584,8 @@ std::vector<FloatImage> BuildAlignedComparisons(const std::vector<FloatImage>& f
     {
         if (i == ref_idx) continue;
         if (has_aligned[i]) aligned.push_back(std::move(aligned_to_root[i]));
-        else aligned.push_back(align_and_warp(float_images[ref_idx], float_images[i], i, processed, total));
+        else aligned.push_back(align_and_warp(float_images[ref_idx], float_images[i], i,
+                                              processed, total, nullptr));
     }
     return aligned;
 }

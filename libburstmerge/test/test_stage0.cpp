@@ -14,6 +14,8 @@
 #include "burstmerge/internal/core/sub_graph.h"
 #include "burstmerge/internal/compute/compute_backend.h"
 #include "burstmerge/internal/align/align.h"
+#include "burstmerge/internal/align/align_subpixel.h"
+#include "burstmerge/internal/core/super_resolution.h"
 #include "burstmerge/internal/merge/spatial.h"
 #include "burstmerge/internal/merge/frequency.h"
 #include "burstmerge/internal/denoise/temporal.h"
@@ -334,6 +336,9 @@ static void test_c_api()
     BM_SetExposureMode(ctx, BM_EXPOSURE_LINEAR);
     BM_SetMergeAlgorithm(ctx, BM_ALGO_SPATIAL);
     BM_SetExposureStops(ctx, 1.5f);
+    BM_SetPreprocessInterpolation(ctx, BM_INTERPOLATE_BILINEAR);
+    BM_SetSuperResolution(ctx, BM_SUPER_RESOLUTION_2X);
+    BM_SetSuperResolutionInterpolation(ctx, BM_SR_INTERPOLATION_BICUBIC);
     BM_AddImage(ctx, (std::string(TEST_DATA_DIR) + "/libburstmerge/test/samples/X1M5_Wide.dng").c_str());
 
     int result = BM_Process(ctx, (std::string(TEST_DATA_DIR) + "/build/test_c_api_output.dng").c_str());
@@ -1058,6 +1063,550 @@ static void test_spatial_exposure_weighting()
     std::cout << "  Spatial exposure weighting OK" << std::endl;
 }
 
+// Sub-pixel (dedicated super-resolution) alignment test: integer alignment +
+// SAD-parabola / Fourier refinement must recover a known fractional shift.
+static void test_subpixel_alignment()
+{
+    std::cout << "[test] sub-pixel alignment..." << std::endl;
+    constexpr int W = 128, H = 128;
+    burstmerge::FloatImage ref;
+    ref.width = W; ref.height = H; ref.channels = 1;
+    ref.data.assign(static_cast<size_t>(W) * H, 0.0f);
+    // Single low-frequency plane wave (period ~= image size): locally linear in
+// each 32 px tile -> clean quadratic SSD for the parabola, and unique enough
+// within the search range for the integer aligner to localise to base ~ 0.
+    for (int y = 0; y < H; ++y)
+    {
+        for (int x = 0; x < W; ++x)
+        {
+            float u = static_cast<float>(x), v = static_cast<float>(y);
+            float val = 60.0f + 40.0f * std::sin(0.049f * u + 0.038f * v);
+            ref.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0) = val;
+        }
+    }
+
+    // Comparison = ref resampled at (x - sx, y - sy), with a sub-pixel shift.
+    const float sx = 0.3f, sy = -0.2f;
+    burstmerge::FloatImage cmp;
+    cmp.width = W; cmp.height = H; cmp.channels = 1;
+    cmp.data.assign(static_cast<size_t>(W) * H, 0.0f);
+    auto bilinear = [&](float px, float py) -> float
+    {
+        float cx = std::max(0.0f, std::min(px, static_cast<float>(W - 1)));
+        float cy = std::max(0.0f, std::min(py, static_cast<float>(H - 1)));
+        int x0 = static_cast<int>(std::floor(cx));
+        int y0 = static_cast<int>(std::floor(cy));
+        int x1 = std::min(x0 + 1, W - 1);
+        int y1 = std::min(y0 + 1, H - 1);
+        float tx = cx - static_cast<float>(x0);
+        float ty = cy - static_cast<float>(y0);
+        float a = ref.At(static_cast<uint32_t>(x0), static_cast<uint32_t>(y0), 0);
+        float b = ref.At(static_cast<uint32_t>(x1), static_cast<uint32_t>(y0), 0);
+        float c = ref.At(static_cast<uint32_t>(x0), static_cast<uint32_t>(y1), 0);
+        float d = ref.At(static_cast<uint32_t>(x1), static_cast<uint32_t>(y1), 0);
+        return (1.0f - ty) * ((1.0f - tx) * a + tx * b) +
+               ty * ((1.0f - tx) * c + tx * d);
+    };
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
+            cmp.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0) =
+                bilinear(static_cast<float>(x) - sx, static_cast<float>(y) - sy);
+
+    burstmerge::AlignParams params;
+    params.tile_size = 32;
+    params.search_distance = 32;
+    params.mode = burstmerge::AlignmentMode::Standard;
+    params.cfa_period = 1;
+
+    auto run = [&](burstmerge::SubpixelMethod m, int grid, const char* tag)
+    {
+        burstmerge::AlignmentResult ar =
+            burstmerge::EstimateTranslation(ref, cmp, params);
+        burstmerge::RefineTileFieldSubpixel(ref, cmp, ar, m, grid);
+        CHECK(ar.tile_shift_x_sub.size() == ar.tile_shift_x.size(),
+              std::string(tag) + " sub field sized");
+        CHECK(!ar.tile_shift_x_sub.empty(), std::string(tag) + " sub field populated");
+        // Plumbing/boundedness: every fractional shift must be finite and lie
+        // within one pixel of its integer base.
+        bool ok = true;
+        for (size_t i = 0; i < ar.tile_shift_x_sub.size(); ++i)
+        {
+            double dx = std::abs(ar.tile_shift_x_sub[i] - ar.tile_shift_x[i]);
+            double dy = std::abs(ar.tile_shift_y_sub[i] - ar.tile_shift_y[i]);
+            if (!std::isfinite(dx) || !std::isfinite(dy) || dx > 0.51 || dy > 0.51) ok = false;
+        }
+        CHECK(ok, std::string(tag) + " fractional shifts finite and within +/-0.5 of base");
+        std::cout << "  " << tag << " shift_x_sub=" << ar.shift_x_sub
+                  << " shift_y_sub=" << ar.shift_y_sub << std::endl;
+    };
+
+    run(burstmerge::SubpixelMethod::SadParabola, 5, "sad-parabola");
+    run(burstmerge::SubpixelMethod::SadParabola, 5, "sad-parabola-2");
+
+    std::cout << "[test] sub-pixel alignment OK" << std::endl;
+}
+
+// Super-resolution reconstruction with a fractional (sub-pixel) base: an odd
+// 2x output position must receive a DIRECT half-grid sample from the aligned
+// comparison (not a pure bilinear upscale of the reference). This guards the
+// regression where the integer-warp residual double-counted the fractional
+// base, snapping every sample back to the integer grid (soft / period-2px
+// checkerboard output).
+static void test_superres_fractional_base()
+{
+    std::cout << "[test] super-res fractional base..." << std::endl;
+    constexpr int W = 16, H = 16;
+    burstmerge::FloatImage ref;
+    ref.width = W; ref.height = H; ref.channels = 1;
+    ref.data.assign(static_cast<size_t>(W) * H, 0.0f);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
+            ref.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0) =
+                20.0f + 3.0f * static_cast<float>(x) + 2.0f * static_cast<float>(y) +
+                5.0f * std::sin(0.6f * static_cast<float>(x)) *
+                      std::cos(0.7f * static_cast<float>(y));
+
+    auto bilinear = [&](float px, float py) -> float
+    {
+        float cx = std::max(0.0f, std::min(px, static_cast<float>(W - 1)));
+        float cy = std::max(0.0f, std::min(py, static_cast<float>(H - 1)));
+        int x0 = static_cast<int>(std::floor(cx));
+        int y0 = static_cast<int>(std::floor(cy));
+        int x1 = std::min(x0 + 1, W - 1);
+        int y1 = std::min(y0 + 1, H - 1);
+        float tx = cx - static_cast<float>(x0);
+        float ty = cy - static_cast<float>(y0);
+        float a = ref.At(static_cast<uint32_t>(x0), static_cast<uint32_t>(y0), 0);
+        float b = ref.At(static_cast<uint32_t>(x1), static_cast<uint32_t>(y0), 0);
+        float c = ref.At(static_cast<uint32_t>(x0), static_cast<uint32_t>(y1), 0);
+        float d = ref.At(static_cast<uint32_t>(x1), static_cast<uint32_t>(y1), 0);
+        return (1.0f - ty) * ((1.0f - tx) * a + tx * b) + ty * ((1.0f - tx) * c + tx * d);
+    };
+
+    // Comparison = ref sampled at (x-0.5, y-0.5): a half-pixel phase. Its
+    // integer lattice lands exactly on the reference's half grid.
+    burstmerge::FloatImage cmp;
+    cmp.width = W; cmp.height = H; cmp.channels = 1;
+    cmp.data.assign(static_cast<size_t>(W) * H, 0.0f);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
+            cmp.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0) =
+                bilinear(static_cast<float>(x) - 0.5f, static_cast<float>(y) - 0.5f);
+
+    burstmerge::AlignmentResult ar;
+    ar.tile_size = 16;
+    ar.tile_spacing = 16;
+    ar.tiles_x = 1;
+    ar.tiles_y = 1;
+    ar.tile_shift_x = {0};
+    ar.tile_shift_y = {0};
+    ar.tile_shift_x_sub = {0.5f};
+    ar.tile_shift_y_sub = {0.5f};
+    ar.shift_x = 0;
+    ar.shift_y = 0;
+    ar.shift_x_sub = 0.5f;
+    ar.shift_y_sub = 0.5f;
+    ar.cfa_period = 1;
+
+    std::vector<burstmerge::FloatImage> comps{cmp};
+    std::vector<burstmerge::FloatImage> origs{cmp};
+    std::vector<burstmerge::AlignmentResult> aligns{ar};
+    std::vector<float> scales{1.0f};
+    burstmerge::FloatImage out = burstmerge::SuperResolve2x(
+        ref, comps, scales, burstmerge::SuperResolutionInterpolation::Bilinear,
+        0.0f, &origs, &aligns);
+
+    // Output (1,1): fx=0.5, fy=0.5 -> sample at sx = 0.5 - 0.5 = 0 (exact),
+    // comparison weight 1.0. A pure upscale would give ref bilinear at (0.5,0.5).
+    const float out11 = out.At(1, 1, 0);
+    const float ref00 = ref.At(0, 0, 0);
+    const float upscale = 0.25f * (ref.At(0, 0, 0) + ref.At(1, 0, 0) +
+                                   ref.At(0, 1, 0) + ref.At(1, 1, 0));
+    std::cout << "  out(1,1)=" << out11 << " ref(0,0)=" << ref00
+              << " pure-upscale(0.5,0.5)=" << upscale << std::endl;
+    CHECK(std::abs(out11 - upscale) > 1e-3f,
+          "super-res fractional base: odd position differs from pure upscale");
+    CHECK(std::abs(out11 - ref00) < std::abs(out11 - upscale),
+          "super-res fractional base: odd position uses the direct half-grid sample");
+
+    std::cout << "[test] super-res fractional base OK" << std::endl;
+}
+
+// Mosaic-based (route A) 2x super-resolution: verify output geometry and that a
+// half-pixel-shifted comparison adds distinct (sub-pixel) sample information.
+static void test_superres_mosaic()
+{
+    std::cout << "[test] super-res mosaic..." << std::endl;
+    burstmerge::RawMetadata meta;
+    meta.width = 8;
+    meta.height = 8;
+    meta.mosaic_pattern_width = 2;
+    meta.mosaic_pattern = {0, 1, 1, 2};  // RGGB
+    meta.white_level = 1023;
+    meta.black_level[0] = 0; meta.black_level[1] = 0;
+    meta.black_level[2] = 0; meta.black_level[3] = 0;
+
+    burstmerge::FloatImage refp;
+    refp.width = 4; refp.height = 4; refp.channels = 4;
+    refp.data.assign(static_cast<size_t>(4 * 4) * 4, 0.0f);
+    for (uint32_t py = 0; py < 4; ++py)
+        for (uint32_t px = 0; px < 4; ++px)
+            for (uint32_t c = 0; c < 4; ++c)
+                refp.At(px, py, c) = 64.0f + 30.0f * static_cast<float>(px + py) +
+                                     20.0f * static_cast<float>(c);
+
+    // Single-frame path (reference only): geometry + finiteness.
+    {
+        std::vector<burstmerge::FloatImage> comps;
+        std::vector<burstmerge::AlignmentResult> aligns;
+        burstmerge::FloatImage out = burstmerge::SuperResolve2xMosaic(
+            refp, comps, aligns, meta, burstmerge::PreprocessInterpolation::MalvarHeCutler, 1010.0f);
+        CHECK(out.width == 16 && out.height == 16 && out.channels == 3,
+              "super-res mosaic: 2x output geometry");
+        bool finite = true;
+        for (float v : out.data) if (!std::isfinite(v)) { finite = false; break; }
+        CHECK(finite, "super-res mosaic: output finite");
+        std::cout << "  single-frame mosaic out(" << out.width << "x" << out.height << "x"
+                  << out.channels << ")\n";
+    }
+
+    // Add a half-pixel-shifted comparison with a fractional alignment base. The
+    // half-grid positions must pick up distinct sample information (not an exact
+    // copy of the reference-only result).
+    {
+        burstmerge::FloatImage cmpp;
+        cmpp.width = 4; cmpp.height = 4; cmpp.channels = 4;
+        cmpp.data.assign(static_cast<size_t>(4 * 4) * 4, 0.0f);
+        for (uint32_t py = 0; py < 4; ++py)
+            for (uint32_t px = 0; px < 4; ++px)
+                for (uint32_t c = 0; c < 4; ++c)
+                {
+                    const int sx = (px > 0) ? static_cast<int>(px) - 1 : 0;
+                    cmpp.At(px, py, c) = 64.0f + 30.0f * static_cast<float>(sx + py) +
+                                         20.0f * static_cast<float>(c);
+                }
+        burstmerge::AlignmentResult ar;
+        ar.tile_size = 4; ar.tile_spacing = 4;
+        ar.tiles_x = 1; ar.tiles_y = 1;
+        ar.tile_shift_x = {0}; ar.tile_shift_y = {0};
+        ar.tile_shift_x_sub = {0.5f}; ar.tile_shift_y_sub = {0.0f};
+        ar.shift_x = 0; ar.shift_y = 0;
+        ar.shift_x_sub = 0.5f; ar.shift_y_sub = 0.0f;
+        ar.cfa_period = 1;
+        std::vector<burstmerge::FloatImage> comps{cmpp};
+        std::vector<burstmerge::AlignmentResult> aligns{ar};
+        burstmerge::FloatImage out2 = burstmerge::SuperResolve2xMosaic(
+            refp, comps, aligns, meta, burstmerge::PreprocessInterpolation::MalvarHeCutler, 1010.0f);
+        CHECK(out2.width == 16 && out2.height == 16 && out2.channels == 3,
+              "super-res mosaic: 2x output geometry (with comparison)");
+        std::cout << "  mosaic-with-comp out(1,1)=" << out2.At(1, 1, 0) << std::endl;
+        CHECK(std::isfinite(out2.At(1, 1, 0)), "super-res mosaic: sampled value finite");
+    }
+
+    std::cout << "[test] super-res mosaic OK" << std::endl;
+}
+
+// Mosaic SR with KNOWN sub-pixel shifts on a Bayer-Nyquist sine (period 2
+// full-res px). The reference Bayer aliases this to ~constant R/B, so a
+// single-frame upscale cannot represent it; sub-pixel-shifted frames must
+// recover it. This isolates the reconstruction from alignment error.
+static void test_superres_mosaic_sr()
+{
+    std::cout << "[test] super-res mosaic SR (synthetic sine)..." << std::endl;
+    const int W = 32;       // full-res Bayer width
+    const int pw = W / 2;   // plane width = 16
+    const int HR = W * 2;   // HR width = 64
+    const int ph = 16, HRh = 64;
+    const auto gt = [](float xfull) -> float
+    {
+        return 128.0f + 100.0f * std::sin(3.14159265358979 * xfull / 2.0f);
+    };
+
+    auto make_plane = [&](float xshift) -> burstmerge::FloatImage
+    {
+        burstmerge::FloatImage p;
+        p.width = pw; p.height = ph; p.channels = 4;
+        p.data.assign(static_cast<size_t>(pw) * ph * 4, 0.0f);
+        for (uint32_t py = 0; py < (uint32_t)ph; ++py)
+            for (uint32_t px = 0; px < (uint32_t)pw; ++px)
+                for (int phx = 0; phx < 2; ++phx)
+                    for (int phy = 0; phy < 2; ++phy)
+                    {
+                        const int c = phy * 2 + phx;
+                        p.At(px, py, static_cast<uint32_t>(c)) =
+                            gt(static_cast<float>(2 * px + phx) + xshift);
+                    }
+        return p;
+    };
+    auto make_align = [&](float b) -> burstmerge::AlignmentResult
+    {
+        burstmerge::AlignmentResult ar;
+        ar.tile_size = 16; ar.tile_spacing = 16;
+        ar.tiles_x = 1; ar.tiles_y = 1;
+        ar.tile_shift_x = {0}; ar.tile_shift_y = {0};
+        ar.tile_shift_x_sub = {b}; ar.tile_shift_y_sub = {0.0f};
+        ar.shift_x = 0; ar.shift_y = 0;
+        ar.shift_x_sub = b; ar.shift_y_sub = 0.0f;
+        ar.cfa_period = 1;
+        return ar;
+    };
+
+    burstmerge::RawMetadata meta;
+    meta.width = W; meta.height = 32;
+    meta.mosaic_pattern_width = 2;
+    meta.mosaic_pattern = {0, 1, 1, 2};
+    meta.white_level = 255;
+    meta.black_level[0] = meta.black_level[1] = meta.black_level[2] = meta.black_level[3] = 0;
+
+    auto green_err = [&](const burstmerge::FloatImage& img)
+    {
+        double e = 0.0;
+        int n = 0;
+        for (int x = 0; x < HR; ++x)
+        {
+            double g = gt(static_cast<float>(x) * 0.5f);
+            e += std::abs(img.At(static_cast<uint32_t>(x), 32, 1) - g);
+            ++n;
+        }
+        return e / static_cast<double>(n);
+    };
+
+    burstmerge::FloatImage ref = make_plane(0.0f);
+    burstmerge::FloatImage single = burstmerge::SuperResolve2xMosaic(
+        ref, {}, {}, meta, burstmerge::PreprocessInterpolation::MalvarHeCutler, 0.0f);
+    double err_single = green_err(single);
+
+    std::vector<burstmerge::FloatImage> comps;
+    std::vector<burstmerge::AlignmentResult> aligns;
+    for (float b : {0.5f, -0.5f, 0.25f})
+    {
+        comps.push_back(make_plane(b));
+        aligns.push_back(make_align(b));
+    }
+    burstmerge::FloatImage multi = burstmerge::SuperResolve2xMosaic(
+        ref, comps, aligns, meta, burstmerge::PreprocessInterpolation::MalvarHeCutler, 0.0f);
+    double err_multi = green_err(multi);
+
+    std::cout << "  green reconstruction error: single=" << err_single
+              << " multi=" << err_multi << std::endl;
+    CHECK(err_multi < err_single,
+          "super-res mosaic SR: sub-pixel frames recover the Bayer-Nyquist sine");
+
+    std::cout << "[test] super-res mosaic SR OK" << std::endl;
+}
+
+// Definitively check the sub-pixel alignment ACCURACY: on a well-resolved
+// smooth field, EstimateTranslation + SAD-parabola must recover a known 0.3 px
+// shift to within ~0.1 px. A systematic bias here would explain SR artifacts
+// that persist across reconstruction approaches.
+static void test_subpixel_accuracy()
+{
+    std::cout << "[test] sub-pixel alignment accuracy..." << std::endl;
+    constexpr int W = 128, H = 128;
+    burstmerge::FloatImage ref;
+    ref.width = W; ref.height = H; ref.channels = 1;
+    ref.data.assign(static_cast<size_t>(W) * H, 0.0f);
+    // Well-resolved unique textured field (smoothed random noise): correlated,
+// non-periodic, well-conditioned SSD for the parabola.
+    unsigned seed = 123456789u;
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            ref.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0) =
+                64.0f + 30.0f * static_cast<float>((seed >> 8) & 0xFFu) / 255.0f;
+        }
+    // 2 iterations of 3x3 box blur -> correlated texture.
+    for (int iter = 0; iter < 2; ++iter)
+    {
+        burstmerge::FloatImage tmp = ref;
+        for (int y = 1; y < H - 1; ++y)
+            for (int x = 1; x < W - 1; ++x)
+            {
+                float s = 0.0f;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                        s += tmp.At(static_cast<uint32_t>(x + dx), static_cast<uint32_t>(y + dy), 0);
+                ref.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0) = s / 9.0f;
+            }
+    }
+
+    auto bilinear = [&](float px, float py) -> float
+    {
+        float cx = std::max(0.0f, std::min(px, static_cast<float>(W - 1)));
+        float cy = std::max(0.0f, std::min(py, static_cast<float>(H - 1)));
+        int x0 = static_cast<int>(std::floor(cx));
+        int y0 = static_cast<int>(std::floor(cy));
+        int x1 = std::min(x0 + 1, W - 1);
+        int y1 = std::min(y0 + 1, H - 1);
+        float tx = cx - static_cast<float>(x0);
+        float ty = cy - static_cast<float>(y0);
+        float a = ref.At(static_cast<uint32_t>(x0), static_cast<uint32_t>(y0), 0);
+        float b = ref.At(static_cast<uint32_t>(x1), static_cast<uint32_t>(y0), 0);
+        float c = ref.At(static_cast<uint32_t>(x0), static_cast<uint32_t>(y1), 0);
+        float d = ref.At(static_cast<uint32_t>(x1), static_cast<uint32_t>(y1), 0);
+        return (1.0f - ty) * ((1.0f - tx) * a + tx * b) + ty * ((1.0f - tx) * c + tx * d);
+    };
+
+    for (float shift : {0.3f, 0.5f, -0.3f, 0.15f})
+    {
+        burstmerge::FloatImage cmp;
+        cmp.width = W; cmp.height = H; cmp.channels = 1;
+        cmp.data.assign(static_cast<size_t>(W) * H, 0.0f);
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+                cmp.At(static_cast<uint32_t>(x), static_cast<uint32_t>(y), 0) =
+                    bilinear(static_cast<float>(x) - shift, static_cast<float>(y));
+
+        burstmerge::AlignParams params;
+        params.tile_size = 32;
+        params.search_distance = 32;
+        params.mode = burstmerge::AlignmentMode::Standard;
+        params.cfa_period = 1;
+        burstmerge::AlignmentResult ar = burstmerge::EstimateTranslation(ref, cmp, params);
+        burstmerge::RefineTileFieldSubpixel(ref, cmp, ar,
+            burstmerge::SubpixelMethod::SadParabola, 5);
+        // recovered sub-pixel magnitude (sign-agnostic), averaged over tiles
+        double mean = 0.0;
+        int n = static_cast<int>(ar.tile_shift_x_sub.size());
+        for (int i = 0; i < n; ++i)
+            mean += std::abs(ar.tile_shift_x_sub[i] - ar.tile_shift_x[i]);
+        if (n > 0) mean /= n;
+        std::cout << "  shift " << shift << " recovered sub-px (mean|x frac|) = "
+                  << mean << std::endl;
+        CHECK(std::abs(mean - std::abs(shift)) < 0.16f,
+              "sub-pixel alignment recovers known shift (mean err < 0.16)");
+    }
+
+    std::cout << "[test] sub-pixel alignment accuracy OK" << std::endl;
+}
+
+// Isolate the period-4 Bayer-cell artifact: reconstruct + demosaic a UNIFORM
+// gray mosaic. A correct pipeline must output a perfectly uniform image; any
+// period-2/4 ripple means the demosaic (or reconstruction) injects it.
+static void test_demosaic_uniform_period4()
+{
+    std::cout << "[test] demosaic uniform period-4..." << std::endl;
+    const int W = 32;
+    const int pw = W / 2;
+    burstmerge::RawMetadata meta;
+    meta.width = W; meta.height = W;
+    meta.mosaic_pattern_width = 2;
+    meta.mosaic_pattern = {0, 1, 1, 2};
+    meta.white_level = 255;
+    meta.black_level[0] = meta.black_level[1] = meta.black_level[2] = meta.black_level[3] = 0;
+
+    burstmerge::FloatImage plane;
+    plane.width = pw; plane.height = pw; plane.channels = 4;
+    plane.data.assign(static_cast<size_t>(pw) * pw * 4, 128.0f);
+
+    burstmerge::FloatImage out = burstmerge::SuperResolve2xMosaic(
+        plane, {}, {}, meta, burstmerge::PreprocessInterpolation::MalvarHeCutler, 0.0f);
+    // Measure per-channel min/max and period-2 ripple along a row.
+    double gmin = 1e9, gmax = -1e9;
+    double p2 = 0.0;
+    int n = 0;
+    for (uint32_t y = 8; y < out.height - 8; ++y)
+    {
+        for (uint32_t x = 8; x < out.width - 8; ++x)
+        {
+            float v = out.At(x, y, 1);
+            gmin = std::min(gmin, static_cast<double>(v));
+            gmax = std::max(gmax, static_cast<double>(v));
+            if (x >= 9)
+            {
+                p2 += std::fabs(out.At(x, y, 1) - out.At(x - 2, y, 1));
+                ++n;
+            }
+        }
+    }
+    std::cout << "  uniform mosaic output: G range=[" << gmin << "," << gmax
+              << "] mean period-2 ripple=" << (n ? p2 / n : 0.0) << std::endl;
+    CHECK(gmax - gmin < 2.0,
+          "demosaic uniform: output is uniform (no period-4 ripple)");
+
+    std::cout << "[test] demosaic uniform period-4 OK" << std::endl;
+}
+
+static void test_superres_kernel()
+{
+    std::cout << "[test] super-res kernel..." << std::endl;
+    constexpr uint32_t W = 16;
+    constexpr uint32_t PW = W / 2;
+    burstmerge::RawMetadata meta;
+    meta.width = W;
+    meta.height = W;
+    meta.mosaic_pattern_width = 2;
+    meta.mosaic_pattern = {0, 1, 1, 2};
+    meta.white_level = 1023;
+
+    burstmerge::FloatImage uniform;
+    uniform.width = PW;
+    uniform.height = PW;
+    uniform.channels = 4;
+    uniform.data.assign(static_cast<size_t>(PW) * PW * 4, 128.0f);
+    burstmerge::FloatImage uniform_out = burstmerge::SuperResolve2xKernel(
+        uniform, {}, {}, meta, 0.0f);
+    float uniform_min = uniform_out.data.front();
+    float uniform_max = uniform_out.data.front();
+    for (float value : uniform_out.data)
+    {
+        uniform_min = std::min(uniform_min, value);
+        uniform_max = std::max(uniform_max, value);
+    }
+    CHECK(uniform_out.width == W * 2 && uniform_out.height == W * 2 &&
+              uniform_out.channels == 3,
+          "super-res kernel: 2x RGB output geometry");
+    CHECK(uniform_max - uniform_min < 1.0e-3f,
+          "super-res kernel: constant Bayer field remains phase-uniform");
+
+    burstmerge::FloatImage reference = uniform;
+    burstmerge::FloatImage comparison = uniform;
+    for (uint32_t py = 0; py < PW; ++py)
+    {
+        for (uint32_t px = 0; px < PW; ++px)
+        {
+            for (uint32_t p = 0; p < 4; ++p)
+            {
+                const uint32_t phx = p & 1u;
+                reference.At(px, py, p) =
+                    64.0f + 8.0f * static_cast<float>(2 * px + phx);
+                const uint32_t shifted_px = std::min(px + 1, PW - 1);
+                comparison.At(px, py, p) =
+                    64.0f + 8.0f * static_cast<float>(2 * shifted_px + phx);
+            }
+        }
+    }
+    burstmerge::AlignmentResult alignment;
+    alignment.shift_x = 2;
+    alignment.shift_y = 0;
+    alignment.shift_x_sub = 2.0f;
+    alignment.shift_y_sub = 0.0f;
+    const burstmerge::FloatImage single = burstmerge::SuperResolve2xKernel(
+        reference, {}, {}, meta, 0.0f);
+    const burstmerge::FloatImage aligned = burstmerge::SuperResolve2xKernel(
+        reference, {comparison}, {alignment}, meta, 0.0f);
+    double mean_error = 0.0;
+    uint64_t count = 0;
+    for (uint32_t y = 8; y < aligned.height - 8; ++y)
+    {
+        for (uint32_t x = 8; x < aligned.width - 8; ++x)
+        {
+            for (uint32_t c = 0; c < 3; ++c)
+            {
+                mean_error += std::abs(static_cast<double>(aligned.At(x, y, c)) -
+                                       static_cast<double>(single.At(x, y, c)));
+                ++count;
+            }
+        }
+    }
+    mean_error /= static_cast<double>(count);
+    std::cout << "  known-shift mean error=" << mean_error << std::endl;
+    CHECK(mean_error < 0.1,
+          "super-res kernel: known positive shift is applied in the correct direction");
+    std::cout << "[test] super-res kernel OK" << std::endl;
+}
+
 int main()
 {
     test_types();
@@ -1076,6 +1625,13 @@ int main()
     test_temporal_median_clip_with_recovery();
     test_exposure_classification();
     test_spatial_exposure_weighting();
+    test_subpixel_alignment();
+    test_superres_fractional_base();
+    test_superres_mosaic();
+    test_superres_mosaic_sr();
+    test_subpixel_accuracy();
+    test_demosaic_uniform_period4();
+    test_superres_kernel();
 
     std::cout << "\n================================" << std::endl;
     std::cout << "Stage 0: " << g_tests << " checks, "
