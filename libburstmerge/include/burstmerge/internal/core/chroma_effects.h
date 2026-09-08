@@ -1,5 +1,11 @@
 #pragma once
 
+// Optional raw-resize feature; see image_resize.h for the feature-macro
+// contract. Guarded out entirely when the raw_resize tools are not built.
+#ifndef BURSTMERGE_HAVE_RAW_RESIZE
+
+#else
+
 // ============================================================================
 // chroma_effects: color-fringing (Lo-Fi effect) for the raw_resize utility.
 // ----------------------------------------------------------------------------
@@ -24,35 +30,18 @@
 // to model the physics of a real lens accurately.
 //
 // ----------------------------------------------------------------------------
-// Control mechanism: a fixed set of compile-time #define macros governs
-// enablement and parameters. There is NO CLI surface; the resize utility is
-// built with whatever macro values were chosen at build time. The single
-// place to edit these values is the `#define` block below this comment —
-// there is no longer a CMake option/cache surface for chroma. The defaults
-// keep the effect fully disabled (bit-identical output) until the user edits
-// the `#define`s in this header.
+// Control mechanism: the modern entry point
+// ApplyChromaticEffects(img, period, mosaic_pattern, white_level, params) takes
+// a runtime ChromaEffectsParams. The raw_resize CLI (--chroma / --laca-* /
+// --loca-*) and the raw_resize GUI expose these knobs to the user.
+// ChromaEffectsParams defaults to enabled=false, so the effect is a true
+// bit-identical no-op unless the caller opts in.
 //
-//   EFFECT_CA_Enabled          (0/1)  Master switch (LaCA + LoCA).
-//   EFFECT_LaCA_Color          LaCAColor_XXX               (see enum below)
-//   EFFECT_LaCA_Width          (>=0, percent of image diagonal)  corner
-//                              displacement of the selected channel.
-//   EFFECT_LoCA_Color          LoCAColor_XXX               (see enum below)
-//   EFFECT_LoCA_Strength       (>=0)  Sensitivity multiplier on the
-//                              normalised Sobel edge magnitude. With a
-//                              maximum-magnitude edge, Strength ≈ 1.0 will
-//                              push the channel to saturation.
-//   EFFECT_LoCA_Width          (>=0, percent of image diagonal)  maximum
-//                              full width of the fringing band around an
-//                              edge; the band extends half of this to either
-//                              side of the edge (box diffusion radius).
-//   EFFECT_LoCA_MinSensi       (>=0)  raw detection values strictly below
-//                              this threshold are floored to zero BEFORE the
-//                              Strength multiplier is applied. This means
-//                              MinSensi (a floor on raw edge response) and
-//                              Strength (a post-gate amplification) act as
-//                              independent knobs: setting Strength very low
-//                              does NOT raise the MinSensi bar, and setting
-//                              Strength very high does NOT lower it.
+// A legacy overload (no params argument) reads a fixed set of compile-time
+// #define macros for backward compatibility. Its defaults are also disabled
+// (EFFECT_CA_Enabled = 0), so the legacy overload is likewise a bit-identical
+// no-op until the macros are overridden at build time. Prefer the
+// runtime-params entry point for new code.
 //
 // ----------------------------------------------------------------------------
 // Geometry contract: ALL geometric quantities (distances, radii, the diagonal
@@ -118,7 +107,7 @@ struct ChromaEffectsParams
 };
 
 #ifndef EFFECT_CA_Enabled
-#define EFFECT_CA_Enabled 1          // Master switch (0 = bit-identical no-op)
+#define EFFECT_CA_Enabled 0          // Master switch (0 = bit-identical no-op)
 #endif
 
 #ifndef EFFECT_LaCA_Color
@@ -126,7 +115,6 @@ struct ChromaEffectsParams
 #endif
 
 #ifndef EFFECT_LaCA_Width
-// Note: Always introduce bad (jaggy) artifacts. 
 #define EFFECT_LaCA_Width 0.0       // [% of image diagonal; corner displacement]
 #endif
 
@@ -180,3 +168,5 @@ void ApplyChromaticEffects(FloatImage& img,
                            float white_level);
 
 } // namespace burstmerge
+
+#endif // BURSTMERGE_HAVE_RAW_RESIZE

@@ -1,6 +1,12 @@
 #ifndef BURSTMERGE_INTERNAL_CORE_DITHER_H
 #define BURSTMERGE_INTERNAL_CORE_DITHER_H
 
+// Optional raw-resize feature; see image_resize.h for the feature-macro
+// contract. Guarded out entirely when the raw_resize tools are not built.
+#ifndef BURSTMERGE_HAVE_RAW_RESIZE
+
+#else
+
 #include <cmath>
 #include <cstdint>
 
@@ -69,5 +75,7 @@ inline float DitherTPDF(float fx, float fy, float amplitude)
 void ApplyQuantizationDither(FloatImage& img, float amplitude);
 
 } // namespace burstmerge
+
+#endif // BURSTMERGE_HAVE_RAW_RESIZE
 
 #endif // BURSTMERGE_INTERNAL_CORE_DITHER_H

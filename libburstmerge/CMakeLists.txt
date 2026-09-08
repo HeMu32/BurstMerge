@@ -46,6 +46,18 @@ endif()
 
 add_library(burstmerge STATIC ${BURSTMERGE_CORE_SOURCES})
 
+# The raw-resize core modules are optional. When enabled they add public
+# symbols (ProcessRawResize / ResizeImage / ApplyChromaticEffects ...) that
+# are declared in the internal headers under include/burstmerge/internal/ and
+# consumed by the raw_resize CLI / GUI front-ends. BURSTMERGE_HAVE_RAW_RESIZE
+# is PUBLIC so it propagates to those front-ends, keeping the header
+# declarations (guarded by the same macro) consistent with the compiled
+# objects: when the raw_resize tools are disabled the macro is undefined and
+# the resize API is compiled out of the headers entirely.
+if(BURSTMERGE_BUILD_RAW_RESIZE_CLI OR BURSTMERGE_BUILD_RAW_RESIZE_GUI)
+    target_compile_definitions(burstmerge PUBLIC BURSTMERGE_HAVE_RAW_RESIZE)
+endif()
+
 # ---- Vulkan compute shaders -> embedded SPIR-V header (configure time) ----
 # Compiles every src/compute/vulkan/shaders/*.comp with glslangValidator and
 # emits a single generated header included by vulkan_backend.cpp.

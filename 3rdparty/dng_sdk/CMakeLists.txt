@@ -117,7 +117,15 @@ set(JPEGXL_FORCE_SYSTEM_BROTLI OFF CACHE BOOL "" FORCE)
 set(JPEGXL_FORCE_SYSTEM_HWY OFF CACHE BOOL "" FORCE)
 set(JPEGXL_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 if(MINGW)
-    set(HWY_DISABLED_TARGETS "HWY_AVX2" CACHE STRING "" FORCE)
+    # Highway's AVX2 dispatch crashes under MinGW (function multi-versioning
+    # conflicts with the 16-byte stack alignment of the Windows ABI) and the
+    # crash manifests as an intermittent SIGSEGV while decoding JPEG XL DNGs.
+    # Highway only honours the HWY_DISABLED_TARGETS *preprocessor macro* (read
+    # by hwy/detect_targets.h), NOT a bare CMake CACHE variable, so we must
+    # pass it as a real -D definition. Directory-scope add_compile_definitions
+    # here propagates into the libjxl / highway subdirectories added below,
+    # forcing an SSE4 fallback for the decoder.
+    add_compile_definitions(HWY_DISABLED_TARGETS=HWY_AVX2)
 endif()
 
 # libjxl / Highway require precise IEEE-754 floating point (the arithmetic

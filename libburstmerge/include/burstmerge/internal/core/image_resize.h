@@ -1,5 +1,13 @@
 #pragma once
 
+// The raw-resize feature is optional: its core modules are only compiled into
+// libburstmerge when the raw_resize front-ends are enabled, and the same
+// BURSTMERGE_HAVE_RAW_RESIZE macro (PUBLIC on the burstmerge target) is used
+// here so the header declarations stay consistent with the compiled objects.
+#ifndef BURSTMERGE_HAVE_RAW_RESIZE
+
+#else
+
 #include "burstmerge/internal/core/chroma_effects.h"
 #include "burstmerge/internal/core/float_image.h"
 
@@ -65,3 +73,5 @@ RawResizeResult ProcessRawResize(const std::string& input_path,
                                 RawResizeProgressCallback progress_cb = nullptr);
 
 } // namespace burstmerge
+
+#endif // BURSTMERGE_HAVE_RAW_RESIZE
