@@ -87,9 +87,10 @@ int main(int argc, char* argv[])
         ("H,height", "Output mosaic height in pixels (must be multiple of CFA period, typically 2)", cxxopts::value<uint32_t>())
         ("scale", "Uniform scale factor (alternative to --width/--height)", cxxopts::value<double>())
         ("interp", "Interpolation method: bilinear, bicubic (default), area (area-average; recommended for heavy downscale), gaussian-area (>=3x downscale only), 50percent (half-sample; >=2x downscale only)", cxxopts::value<std::string>()->default_value("bicubic"))
-        ("bit-depth", "Output bit depth: 8, 10, 12, 14, 16 (default 16)", cxxopts::value<std::string>()->default_value("16"))
+        ("bit-depth", "Output bit depth: 8, 10, 12, 14, 16 (default 16). The sensor data is rescaled to fill the output container and WhiteLevel is set to the container top.", cxxopts::value<std::string>()->default_value("16"))
         ("pseudo-olpf", "Pseudo optical low-pass filter strength (gaussian pre-blur before downscale to suppress moire; sigma = strength * log2(downscale)). Default 0 (disabled).", cxxopts::value<double>()->default_value("0"))
-        ("dither", "TPDF dither amplitude in output LSB applied before uint16 quantisation to decorrelate quantisation noise. Default 0 (disabled). 1.0 = full +-1 LSB TPDF.", cxxopts::value<double>()->default_value("0"))
+        ("dither", "TPDF dither amplitude applied before uint16 quantisation to decorrelate quantisation noise. Default 0 (disabled). 1.0 = full +-1 LSB TPDF; see --dither-ref for which LSB that is.", cxxopts::value<double>()->default_value("0"))
+        ("dither-ref", "Dither amplitude reference grid: output (default; 1 LSB of the output container) or input (1 LSB of the sensor grid, i.e. bit_scale output LSBs after the rescale).", cxxopts::value<std::string>()->default_value("output"))
         ("clear-camera-hints", "Clear camera metadata hints (anti-alias strength, noise profile, sharpness hints)", cxxopts::value<bool>()->default_value("false"))
 
         // Chromatic aberration (Lo-Fi effects)
@@ -171,6 +172,23 @@ int main(int argc, char* argv[])
 
     resize_opts.pseudo_olpf = static_cast<float>(args["pseudo-olpf"].as<double>());
     resize_opts.dither = static_cast<float>(args["dither"].as<double>());
+    {
+        std::string ref = args["dither-ref"].as<std::string>();
+        for (char& c : ref) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ref == "output")
+        {
+            resize_opts.dither_ref = burstmerge::DitherReference::OutputLsb;
+        }
+        else if (ref == "input")
+        {
+            resize_opts.dither_ref = burstmerge::DitherReference::InputLsb;
+        }
+        else
+        {
+            std::cerr << "Invalid dither-ref (use output or input)" << std::endl;
+            return 2;
+        }
+    }
     resize_opts.clear_camera_hints = args["clear-camera-hints"].as<bool>();
 
     // Chroma options

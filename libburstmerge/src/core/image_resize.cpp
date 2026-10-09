@@ -638,6 +638,9 @@ RawResizeResult ProcessRawResize(const std::string& input_path,
         result.dst_width = dst_mosaic_w;
         result.dst_height = dst_mosaic_h;
 
+        // Output white level fills the requested bit-depth container: the sensor data is
+        // rescaled by bit_scale = target_white / sensor_white so the whole output range
+        // is used, and the WhiteLevel tag is set to the container top.
         uint32_t target_white = (1u << bit_depth) - 1u;
         if (target_white > 65535) target_white = 65535;
         if (target_white < 1) target_white = 1;
@@ -754,8 +757,19 @@ RawResizeResult ProcessRawResize(const std::string& input_path,
 
         if (options.dither > 0.0f)
         {
+            // The amplitude is expressed in the units of the grid that carries the
+            // quantisation error:
+            //   OutputLsb - 1 LSB of the output container (the quantiser's own step),
+            //               so the dither is 1/65535 of full scale on every RAW.
+            //   InputLsb  - 1 LSB of the sensor grid, which the bit-depth rescale above
+            //               widened to bit_scale output LSBs (up to 64x for a 10-bit sensor
+            //               stretched into the 16-bit container), so the dither keeps the
+            //               same strength relative to the data grid on every RAW.
+            const float dither_amplitude = (options.dither_ref == DitherReference::InputLsb)
+                ? options.dither * std::max(1.0f, bit_scale)
+                : options.dither;
             report(0.80f, "Applying dither...");
-            ApplyQuantizationDither(resized_img, options.dither);
+            ApplyQuantizationDither(resized_img, dither_amplitude);
         }
 
         report(0.85f, "Quantizing to uint16...");

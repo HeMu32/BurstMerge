@@ -66,8 +66,11 @@ inline float DitherTPDF(float fx, float fy, float amplitude)
 //     share the same dither value, producing luminance noise rather
 //     than chroma noise (more natural-looking).
 //
-// `amplitude` is the dither amplitude in LSB of the output uint16 container
-// (i.e. in the same units as the already-scaled float-image values).
+// `amplitude` is the dither amplitude in LSB of the data grid that carries the
+// quantisation error (i.e. in the same units as the float-image values it is
+// applied to). Callers that rescale their data (bit-depth rebasing) must express
+// the amplitude on the same grid as the rescaled values: for a 10-bit sensor
+// stretched into the 16-bit container that is 64x one output container LSB.
 // amplitude <= 0 is a no-op.
 //
 // Call this AFTER bit-depth scaling and BEFORE uint16 quantisation

@@ -61,3 +61,10 @@ set_tests_properties(test_stage2 PROPERTIES TIMEOUT 600)
 # Requires Adobe DNG Converter + Vulkan GPU at runtime.
 add_burstmerge_test(test_stage3)
 set_tests_properties(test_stage3 PROPERTIES TIMEOUT 900)
+
+# test_raw_resize_dither: container fill + dither LSB reference for the optional
+# raw_resize pipeline (only built when that pipeline is compiled in).
+if(BURSTMERGE_BUILD_RAW_RESIZE_CLI OR BURSTMERGE_BUILD_RAW_RESIZE_GUI)
+    add_burstmerge_test(test_raw_resize_dither)
+    set_tests_properties(test_raw_resize_dither PROPERTIES TIMEOUT 300)
+endif()

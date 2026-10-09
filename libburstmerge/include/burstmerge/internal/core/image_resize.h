@@ -29,6 +29,16 @@ enum class InterpolationMethod
     HalfSample
 };
 
+// Reference grid for the --dither amplitude. The bit-depth rescale that fills the
+// output container multiplies the sensor's own quantisation lattice by
+// bit_scale = target_white / sensor_white, so the two grids differ whenever the
+// sensor is narrower than the container.
+enum class DitherReference
+{
+    OutputLsb, // 1.0 = 1 LSB of the output container (16-bit: 1/65535 of full scale)
+    InputLsb   // 1.0 = 1 LSB of the sensor grid (bit_scale output LSBs after the rescale)
+};
+
 struct RawResizeOptions
 {
     // Geometry / Target dimension
@@ -41,6 +51,7 @@ struct RawResizeOptions
     int bit_depth = 16;
     float pseudo_olpf = 0.0f; // 0 = disabled
     float dither = 0.0f;      // 0 = disabled, 1.0 = ±1 LSB TPDF
+    DitherReference dither_ref = DitherReference::OutputLsb;
     bool clear_camera_hints = false; // Clear AA strength, noise profile, sharpness hints
 
     // Chromatic aberration effects

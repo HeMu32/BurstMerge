@@ -118,6 +118,7 @@ private:
     wxChoice* choice_bit_depth_ = nullptr;
     wxTextCtrl* txt_olpf_ = nullptr;
     wxTextCtrl* txt_dither_ = nullptr;
+    wxCheckBox* chk_dither_input_ = nullptr;
     wxCheckBox* chk_clear_hints_ = nullptr;
 
     wxCheckBox* chk_chroma_ = nullptr;
@@ -216,6 +217,9 @@ private:
         algo_grid->Add(new wxStaticText(panel, wxID_ANY, "TPDF Dither (LSB):"), 0, wxALIGN_CENTER_VERTICAL);
         txt_dither_ = new wxTextCtrl(panel, wxID_ANY, "0.0");
         algo_grid->Add(txt_dither_, 1, wxEXPAND);
+
+        chk_dither_input_ = new wxCheckBox(panel, wxID_ANY, "Dither in sensor LSB (input grid) instead of output container LSB");
+        algo_grid->Add(chk_dither_input_, 1, wxEXPAND);
 
         algo_box->Add(algo_grid, 1, wxEXPAND | wxALL, FromDIP(5));
 
@@ -417,6 +421,9 @@ private:
         double dither = 0.0;
         txt_dither_->GetValue().ToDouble(&dither);
         opts.dither = static_cast<float>(dither);
+        opts.dither_ref = chk_dither_input_->GetValue()
+            ? burstmerge::DitherReference::InputLsb
+            : burstmerge::DitherReference::OutputLsb;
 
         opts.clear_camera_hints = chk_clear_hints_->GetValue();
 
