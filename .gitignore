@@ -43,6 +43,7 @@ Thumbs.db
 
 # Others
 .vscode/
+.opencode/
 
 **/*.ARW
 **/*.DNG
@@ -78,5 +79,8 @@ Thumbs.db
 
 /3rdparty/pocketfft/*
 !/3rdparty/pocketfft/readme.txt
+
+# wxWidgets source is fetched as a release tarball and built locally; do not track it.
+/3rdparty/wxWidgets/*
 
 Reference/

@@ -25,7 +25,13 @@ function Show-Usage {
 if ($Help -or -not $RefFile -or -not $DngFile) {
   Show-Usage
 }
-$exif="C:\MultiMediaTools\Bin\exiftool.exe"
+$exif=(Get-Command exiftool -ErrorAction SilentlyContinue).Source
+if(-not $exif){
+  foreach($c in @('exiftool.exe')){
+    if(Test-Path $c){$exif=$c;break}
+  }
+}
+if(-not $exif -or -not (Test-Path $exif)){throw "exiftool.exe not found; set `$exif in SyncARWLensCorr.ps1"}
 
 function rx($a){
   $p=New-Object Diagnostics.ProcessStartInfo

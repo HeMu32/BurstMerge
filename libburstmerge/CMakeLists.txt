@@ -1,5 +1,5 @@
 # libburstmerge core static library
-add_library(burstmerge STATIC
+set(BURSTMERGE_CORE_SOURCES
     src/api.cpp
     src/api_c.cpp
     src/core/float_image.cpp
@@ -34,6 +34,29 @@ add_library(burstmerge STATIC
     src/io/bmp_writer.cpp
     ${PROJECT_SOURCE_DIR}/3rdparty/pocketfft/pocketfft.c
 )
+
+if(BURSTMERGE_BUILD_RAW_RESIZE_CLI OR BURSTMERGE_BUILD_RAW_RESIZE_GUI)
+    list(APPEND BURSTMERGE_CORE_SOURCES
+        src/core/dither.cpp
+        src/core/image_resize.cpp
+        src/core/chroma_effects.cpp
+        src/io/dng_sdk_bridge_resize.cpp
+    )
+endif()
+
+add_library(burstmerge STATIC ${BURSTMERGE_CORE_SOURCES})
+
+# The raw-resize core modules are optional. When enabled they add public
+# symbols (ProcessRawResize / ResizeImage / ApplyChromaticEffects ...) that
+# are declared in the internal headers under include/burstmerge/internal/ and
+# consumed by the raw_resize CLI / GUI front-ends. BURSTMERGE_HAVE_RAW_RESIZE
+# is PUBLIC so it propagates to those front-ends, keeping the header
+# declarations (guarded by the same macro) consistent with the compiled
+# objects: when the raw_resize tools are disabled the macro is undefined and
+# the resize API is compiled out of the headers entirely.
+if(BURSTMERGE_BUILD_RAW_RESIZE_CLI OR BURSTMERGE_BUILD_RAW_RESIZE_GUI)
+    target_compile_definitions(burstmerge PUBLIC BURSTMERGE_HAVE_RAW_RESIZE)
+endif()
 
 # ---- Vulkan compute shaders -> embedded SPIR-V header (configure time) ----
 # Compiles every src/compute/vulkan/shaders/*.comp with glslangValidator and
@@ -118,6 +141,8 @@ target_include_directories(burstmerge
             ${CXXOPTS_INCLUDE}
             ${VULKAN_INCLUDE}
             ${BURSTMERGE_GENERATED_DIR}
+            "${DNG_SDK_ROOT}/libjxl/libjxl/lib/include"
+            "${CMAKE_BINARY_DIR}/libjxl_build/lib/include"
 )
 
 target_compile_definitions(burstmerge PRIVATE
@@ -127,6 +152,7 @@ target_compile_definitions(burstmerge PRIVATE
 if(BURSTMERGE_GPU_FP64)
     target_compile_definitions(burstmerge PRIVATE BURSTMERGE_HAVE_GPU_FP64)
 endif()
+
 
 target_link_libraries(burstmerge
     PUBLIC  dng_sdk

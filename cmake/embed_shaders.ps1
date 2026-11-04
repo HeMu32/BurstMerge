@@ -30,30 +30,42 @@ $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine("")
 
 $names = New-Object System.Collections.Generic.List[string]
-foreach ($s in $shaders) {
-    $base = $s.BaseName
-    $names.Add($base)
-    $spv = Join-Path $tempBase ($base + ".spv")
-    $args = @("-V", $incArg, $s.FullName, "-o", $spv)
-    & $Validator @args 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "glslangValidator failed for $($s.Name) (exit $LASTEXITCODE)"
+if (Test-Path $Validator) {
+    foreach ($s in $shaders) {
+        $base = $s.BaseName
+        $names.Add($base)
+        $spv = Join-Path $tempBase ($base + ".spv")
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName = $Validator
+        $pinfo.Arguments = "-V `"$incArg`" `"$($s.FullName)`" -o `"$spv`""
+        $pinfo.UseShellExecute = $false
+        $pinfo.RedirectStandardOutput = $true
+        $pinfo.RedirectStandardError = $true
+        $pinfo.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($pinfo)
+        $proc.WaitForExit()
+        if ($proc.ExitCode -ne 0) {
+            $err = $proc.StandardError.ReadToEnd()
+            throw "glslangValidator failed for $($s.Name) (exit $($proc.ExitCode)): $err"
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($spv)
+        if ($bytes.Length -eq 0) { throw "Empty SPIR-V for $($s.Name)" }
+        $numWords = [int]($bytes.Length / 4)
+        [void]$sb.AppendLine("static const uint32_t kSpv_$base[] = {")
+        $line = New-Object System.Text.StringBuilder
+        for ($i = 0; $i -lt $numWords; ++$i) {
+            $w = [uint32]$bytes[$i*4] -bor ([uint32]$bytes[$i*4+1] -shl 8) -bor ([uint32]$bytes[$i*4+2] -shl 16) -bor ([uint32]$bytes[$i*4+3] -shl 24)
+            [void]$line.Append(("0x{0:x8}," -f $w))
+            if ((($i + 1) % 12) -eq 0) { [void]$sb.AppendLine($line.ToString()); $line.Clear() | Out-Null }
+        }
+        $tail = $line.ToString()
+        if ($tail.Length -gt 0) { [void]$sb.AppendLine($tail) }
+        [void]$sb.AppendLine("};")
+        [void]$sb.AppendLine("static const uint32_t kSpv_${base}_words = $numWords;")
+        [void]$sb.AppendLine("")
     }
-    $bytes = [System.IO.File]::ReadAllBytes($spv)
-    if ($bytes.Length -eq 0) { throw "Empty SPIR-V for $($s.Name)" }
-    $numWords = [int]($bytes.Length / 4)
-    [void]$sb.AppendLine("static const uint32_t kSpv_$base[] = {")
-    $line = New-Object System.Text.StringBuilder
-    for ($i = 0; $i -lt $numWords; ++$i) {
-        $w = [uint32]$bytes[$i*4] -bor ([uint32]$bytes[$i*4+1] -shl 8) -bor ([uint32]$bytes[$i*4+2] -shl 16) -bor ([uint32]$bytes[$i*4+3] -shl 24)
-        [void]$line.Append(("0x{0:x8}," -f $w))
-        if ((($i + 1) % 12) -eq 0) { [void]$sb.AppendLine($line.ToString()); $line.Clear() | Out-Null }
-    }
-    $tail = $line.ToString()
-    if ($tail.Length -gt 0) { [void]$sb.AppendLine($tail) }
-    [void]$sb.AppendLine("};")
-    [void]$sb.AppendLine("static const uint32_t kSpv_${base}_words = $numWords;")
-    [void]$sb.AppendLine("")
+} else {
+    Write-Warning "glslangValidator not found at $Validator - emitting dummy spirv stub for CPU build"
 }
 
 # Accessor: name -> {data,words}

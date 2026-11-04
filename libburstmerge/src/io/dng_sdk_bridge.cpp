@@ -150,7 +150,6 @@ void WriteRawImageToNegative(DngNegativeHolder* holder,
 
     AutoPtr<dng_image> imagePtr(newImage.Release());
     neg.SetStage1Image(imagePtr);
-    neg.ClearRawImage();
     neg.ClearRawLossyCompressedImage();
     neg.ClearRawImageDigest();
 }
