@@ -4,6 +4,8 @@ This is a computational photography tool for multi-frame noise reduction and exp
 It is inspired by the project https://github.com/martin-marek/hdr-plus-swift and based on Google HDR+.
 For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 
+Note that ALL code was ai-generated, supervised by human as a black-box. 
+
 **Platform:** GCC (MinGW, Windows)
 
 ## Features
@@ -15,7 +17,7 @@ For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 - Process Non-RAW pictures
 - STF synthesis like Minolta α7 camera (but with inter-frame alignment)
 - Bayer color filter array support
-- CLI application
+- GUI & CLI application
 
 ### File Input&Output formats
 
