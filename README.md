@@ -4,7 +4,8 @@ This is a computational photography tool for multi-frame noise reduction and exp
 It is inspired by the project https://github.com/martin-marek/hdr-plus-swift and based on Google HDR+.
 For more detail, see the HDR+ paper: https://hdrplusdata.org/en//hdrplus.pdf
 
-Note that ALL code was ai-generated, supervised by human as a black-box. 
+Note that ALL code was ai-generated, supervised by human, verified as a black-box. 
+Still not confident to say this as a production-ready impl. Plz. be conservative about processing results. 
 
 **Platform:** GCC (MinGW, Windows)
 
